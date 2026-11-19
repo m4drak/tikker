@@ -67,6 +67,8 @@ Aplikacja nie wie, w którym trybie działa. Różni się tylko konfiguracja (ad
 
 ### 2.2 Wymagania niefunkcjonalne
 - Obraz `FROM scratch` lub distroless static. Rozmiar ≤ 25 MB (cel), proces działa jako użytkownik nie-root.
+- Toolchain: `go.mod` deklaruje minimalną wersję Go (1.24), a wydania i obrazy budujemy aktualnym stabilnym
+  Go (łatki bezpieczeństwa biblioteki standardowej). CI testuje obie wersje.
 - Bez CGO: SQLite przez `modernc.org/sqlite`. Kompilacja skrośna na `amd64`, `arm64`, `arm/v7`.
 - RSS w spoczynku ≤ 40 MB, przy 10 kanałach ≤ 64 MB.
 - Mało zapisów na flash: WAL, batching, retencja i konfigurowalny `synchronous`.
