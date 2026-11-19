@@ -70,10 +70,23 @@ import (
 
 // Connector talks to one device.
 type Connector interface {
+	// Capabilities reports what the device can send. It is static for the
+	// connector's lifetime and does not contact the device. The sms and
+	// queue layers use it to choose transliteration, splitting or
+	// rejection instead of assuming UCS-2 or concatenated SMS.
+	Capabilities() Capabilities
+
 	// Send hands one SMS to the device for sending on ch. Success means the
 	// device accepted it (status "sent"); there are no delivery reports in
 	// the MVP. Send must honour ctx: when ctx ends after the request was
 	// written, return a domain.TransientAmbiguous error.
+	//
+	// msg must fit Capabilities (encoding, segments); a connector may
+	// reject anything else with a Permanent error. A send can block for up
+	// to Capabilities.SendTimeout (RouterOS: up to ~60 s while the modem
+	// port is held exclusively), so callers run at most
+	// Capabilities.MaxConcurrentSends sends per channel and size leases
+	// from SendTimeout (ADR 0002).
 	Send(ctx context.Context, ch ChannelRef, msg OutboundSMS) (SendResult, error)
 
 	// FetchInbox returns the SMS currently stored in the device inbox for
@@ -102,6 +115,57 @@ type Connector interface {
 	// Close releases resources (idle connections, agent sessions). The
 	// connector must not be used afterwards.
 	Close() error
+}
+
+// Capabilities describes the sending abilities of a device and connector.
+//
+// RouterOS /tool sms send (T00 research, docs/research/routeros-sms.md;
+// [WERYFIKACJA]) supports GSM-7 only, a single 160-character SMS and one
+// command per modem port at a time, taking up to 60 s:
+//
+//	connector.Capabilities{
+//		Encodings:          []domain.Encoding{domain.EncodingGSM7},
+//		MaxSegments:        1,
+//		Concatenation:      false,
+//		MaxConcurrentSends: 1,
+//		SendTimeout:        65 * time.Second,
+//		InboundPDU:         true,
+//	}
+type Capabilities struct {
+	// Encodings the device sends correctly. Text that cannot be encoded
+	// in one of them must be transliterated or rejected by the caller.
+	Encodings []domain.Encoding
+	// MaxSegments is the largest number of segments one Send may carry.
+	// 1 means single SMS only; longer texts must be split into separate
+	// sends (SPEC §4.6 strategy "split") or rejected/truncated.
+	MaxSegments int
+	// Concatenation is true when a multi-segment Send arrives as one
+	// concatenated message (UDH) on the handset.
+	Concatenation bool
+	// MaxConcurrentSends per channel; RouterOS holds the port
+	// exclusively, so 1.
+	MaxConcurrentSends int
+	// SendTimeout is the longest a single Send may legitimately take; the
+	// HTTP client timeout and the dispatcher's lease are derived from it.
+	SendTimeout time.Duration
+	// InboundPDU is true when FetchInbox fills InboundSMS.PDU.
+	InboundPDU bool
+}
+
+// SupportsEncoding reports whether enc is in Encodings.
+func (c Capabilities) SupportsEncoding(enc domain.Encoding) bool {
+	for _, e := range c.Encodings {
+		if e == enc {
+			return true
+		}
+	}
+	return false
+}
+
+// Fits reports whether a text with the given encoding and segment count can
+// be sent in a single Send.
+func (c Capabilities) Fits(enc domain.Encoding, segments int) bool {
+	return c.SupportsEncoding(enc) && segments >= 1 && segments <= c.MaxSegments
 }
 
 // ChannelRef addresses one modem port of the connector's device.
@@ -140,13 +204,23 @@ type InboundSMS struct {
 	// domain.InboundDedupHash. [WERYFIKACJA: RouterOS format]
 	RawTimestamp string
 	// Timestamp is RawTimestamp parsed in the device's time zone, or zero
-	// if it could not be parsed.
+	// if it could not be parsed. RouterOS reports the operator's (SMSC)
+	// timestamp, not the router's clock.
 	Timestamp time.Time
-	Body      string
+	// Body is the device's decoded text. RouterOS decodes everything as
+	// GSM-7, so UCS-2 messages arrive garbled here; prefer decoding PDU.
+	Body string
 	// Type is the device's message type field, if any (RouterOS "type").
 	Type string
-	// Part describes the concatenation header of a multi-part SMS, if the
-	// device exposes it; nil otherwise. [WERYFIKACJA]
+	// PDU is the raw SMS-DELIVER PDU as reported by the device (RouterOS
+	// "pdu", hex string), or empty if unavailable. internal/sms decodes it
+	// (DCS for UCS-2, UDH for concatenation) when Capabilities.InboundPDU
+	// is set. [WERYFIKACJA: content of the field]
+	PDU string
+	// Part describes the concatenation header of a multi-part SMS when the
+	// connector already parsed it; nil otherwise. RouterOS does not join
+	// parts: each part is a separate inbox entry, joined by the inbox
+	// poller (from PDU).
 	Part *PartInfo
 }
 
