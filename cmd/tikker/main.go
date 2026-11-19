@@ -5,28 +5,38 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"time"
 
 	"github.com/m4drak/tikker/internal/config"
+	"github.com/m4drak/tikker/internal/probes"
 	"github.com/m4drak/tikker/internal/version"
 )
 
 // Exit codes. A configuration error is reported with exitConfig so that
-// service managers can tell it apart from a runtime failure.
+// service managers can tell it apart from a runtime failure. exitFailure is
+// used by `healthcheck` when the probe fails.
 const (
-	exitOK     = 0
-	exitConfig = 2
+	exitOK      = 0
+	exitFailure = 1
+	exitConfig  = 2
 )
+
+// healthcheckTimeout bounds the whole `healthcheck` request (SPEC §5).
+const healthcheckTimeout = 3 * time.Second
 
 const usage = `usage: tikker [--config FILE] <command>
        tikker [--config FILE] --check-config
 
 commands:
   version         print build version information (also available as --version)
+  healthcheck     probe the local /readyz (exit 0 when ready); --live probes /healthz
 
 options:
   --config FILE   read the YAML configuration from FILE
@@ -75,15 +85,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	}
 
-	if len(rest) != 1 {
+	if len(rest) == 0 {
 		printUsage(stderr)
 		return exitConfig
 	}
 
 	switch rest[0] {
 	case "version":
+		if len(rest) != 1 {
+			printUsage(stderr)
+			return exitConfig
+		}
 		_, _ = fmt.Fprintln(stdout, version.String())
 		return exitOK
+	case "healthcheck":
+		return runHealthcheck(*configPath, rest[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "tikker: unknown command %q\n\n", rest[0])
 		printUsage(stderr)
@@ -106,6 +122,53 @@ func runCheckConfig(path string, stdout, stderr io.Writer) int {
 
 	_, _ = fmt.Fprintln(stdout, "configuration OK, effective settings (secrets redacted):")
 	_, _ = io.WriteString(stdout, cfg.String())
+	return exitOK
+}
+
+// runHealthcheck implements `tikker healthcheck [--live]`, used by the image
+// HEALTHCHECK. It loads the configuration to find the listen address, probes
+// the local instance and returns exitOK only for 200 OK. Every failure,
+// including an unreadable configuration, returns exitFailure.
+func runHealthcheck(configPath string, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("tikker healthcheck", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	live := fs.Bool("live", false, "probe /healthz (process liveness) instead of /readyz")
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printUsage(stdout)
+			return exitOK
+		}
+		_, _ = fmt.Fprintf(stderr, "tikker healthcheck: %v\n", err)
+		printUsage(stderr)
+		return exitConfig
+	}
+	if fs.NArg() != 0 {
+		printUsage(stderr)
+		return exitConfig
+	}
+
+	cfg, err := config.Load(config.Options{Path: configPath})
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "tikker healthcheck: invalid configuration:")
+		for _, line := range errorLines(err) {
+			_, _ = fmt.Fprintf(stderr, "  - %s\n", line)
+		}
+		return exitFailure
+	}
+
+	target, err := probes.HealthcheckURL(cfg.Listen, *live)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "tikker healthcheck: %v\n", err)
+		return exitFailure
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), healthcheckTimeout)
+	defer cancel()
+	if err := probes.Healthcheck(ctx, &http.Client{}, target); err != nil {
+		_, _ = fmt.Fprintf(stderr, "tikker healthcheck: %v\n", err)
+		return exitFailure
+	}
 	return exitOK
 }
 
