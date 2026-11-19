@@ -18,6 +18,7 @@ import (
 // stub is a minimal Connector used to exercise the registry.
 type stub struct{ cfg DeviceConfig }
 
+func (s *stub) Capabilities() Capabilities { return Capabilities{} }
 func (s *stub) Send(context.Context, ChannelRef, OutboundSMS) (SendResult, error) {
 	return SendResult{}, nil
 }

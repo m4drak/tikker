@@ -46,6 +46,10 @@ Każde inne przejście zwraca `ErrInvalidTransition`. Wiadomości przychodzące 
 wiadomość, ustawia `status=sending`, zwiększa `attempts`, wpisuje `channel_id` i `lease_until`.
 Dwa równoległe wywołania nigdy nie dostaną tej samej wiadomości. Czas dzierżawy musi być dłuższy niż
 timeout pojedynczej wysyłki w konektorze z zapasem (zalecane: `lease = 2 × send_timeout + 30 s`).
+Według researchu T00 wysyłka RouterOS trwa do ok. 60 s, a REST zamyka żądanie po 60 s, więc
+`Capabilities.SendTimeout` konektora `routeros-rest` wynosi 65 s, a dzierżawa ok. 160 s.
+Port modemu jest zajęty na czas komendy, więc na kanał przypada jedna wysyłka naraz
+(`Capabilities.MaxConcurrentSends = 1`).
 
 **Token ogrodzenia (fencing).** Licznik `attempts` pełni rolę tokenu dzierżawy (`domain.Lease.Attempt`).
 `MarkSent`, `MarkFailed` i `Requeue` aktualizują wiersz tylko przy zgodnym `id`, `status=sending` i `attempts`.
@@ -121,10 +125,16 @@ Cykl pollera: `FetchInbox` → zapis wszystkich wiadomości w **jednej transakcj
 Następny cykl pobierze go ponownie, a `InsertInbound` rozpozna duplikat po `dedup_hash` (UNIQUE) i zwróci `created=false`.
 To nie jest błąd.
 
-`dedup_hash = domain.InboundDedupHash(device_id, port, phone, raw_timestamp, body)`: SHA-256 pól
+`dedup_hash = domain.InboundDedupHash(device_id, port, phone, raw_timestamp, body)` to SHA-256 pól
 z prefiksem długości, żeby uniknąć kolizji przez separator. Używamy **surowego** tekstu znacznika czasu z RouterOS,
 bo parsowanie formatu [WERYFIKACJA] mogłoby zmienić hash między wersjami. `.id` z RouterOS (`*1A`) nie nadaje się
 do deduplikacji, bo router może go użyć ponownie.
+
+RouterOS nie skleja SMS-ów wieloczęściowych i dekoduje wszystko jako GSM-7 (research T00), dlatego
+`connector.InboundSMS` niesie też surowe pole `pdu`. tikker sam dekoduje UCS-2 i składa części po UDH.
+Hash liczymy dla każdej części osobno, przed sklejaniem, z surowych danych routera
+(`body` = `pdu`, jeśli jest dostępne, w przeciwnym razie `message`). Sposób przechowywania części
+oczekujących na komplet ustali T16 po pomiarach T00.
 
 Efekt: at-least-once między routerem a bazą i brak duplikatów w bazie.
 
