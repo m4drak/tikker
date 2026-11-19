@@ -215,7 +215,7 @@ Format każdego zadania: **cel**, **wynik**, **kryteria akceptacji**, **zależno
 
 #### T23 – Health/ready i diagnostyka
 - **Wynik:**
-  - `/healthz` (proces żyje) i `/readyz` (baza OK, ≥ 1 kanał `ok` – konfigurowalne);
+  - `/healthz` (proces żyje) i `/readyz` (baza, klucz sekretów, dispatcher; stan kanałów nie wpływa na gotowość – zgodnie z `api/openapi.yaml`);
   - `--check-config`;
   - `HEALTHCHECK` w obrazie (T40) przez sam `tikker healthcheck`.
 - **Zależności:** T11, T17. **Model:** Claude Haiku. **Alternatywa:** DeepSeek V4 Flash @ Hermes.
