@@ -186,6 +186,11 @@ pojedynczy worker i serializację wysyłek. Globalnie obowiązuje limit żądań
   niż pozwala konektor (dla `routeros-rest` 1, czyli 160 znaków GSM-7) [WERYFIKACJA].
 - Gdy konektor nie wspiera wysyłki wieloczęściowej, strategia długich wiadomości jest konfigurowalna:
   `reject` (domyślnie), `split` (osobne wiadomości z prefiksem `(1/3)`, patrz §12 p. 3) lub `truncate`.
+- Planer (`internal/sms.Plan`, T14): najpierw transliteracja (jeśli włączona), potem wybór kodowania.
+  Prefiks `(i/N) ` wlicza się w limit części. Przy `split` suma segmentów wszystkich części podlega `max_segments`
+  (twardy limit 999 części). Planer nigdy nie transliteruje sam: bez zgody i bez UCS-2 w konektorze zwraca błąd
+  (`invalid_format`). Przy `Concatenation=false` jedna wysyłka to jeden SMS.
+- Niekompletne SMS-y wieloczęściowe przychodzące są przechowywane do skompletowania i wygaszane po czasie (T16).
 
 ---
 
