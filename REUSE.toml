@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: 2026 The tikker Authors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Licensing metadata for files that cannot carry an SPDX comment header
+# (Markdown, YAML, TOML, go.mod, Makefile, dotfiles). Source files in Go
+# carry their own headers and are not listed here.
+# Spec: https://reuse.software/spec-3.3/
+
+version = 1
+
+[[annotations]]
+path = [
+  "**/*.md",
+  "**/*.yml",
+  "**/*.yaml",
+  "**/*.toml",
+  "**/*.mod",
+  "Makefile",
+  ".editorconfig",
+  ".gitignore",
+  "REUSE.toml",
+]
+# "override" lets this annotation win over in-text SPDX-like strings in
+# existing docs (e.g. docs/SPEC.md quotes the license identifier in prose).
+precedence = "override"
+SPDX-FileCopyrightText = "2026 The tikker Authors"
+SPDX-License-Identifier = "GPL-3.0-or-later"
+
+[[annotations]]
+path = ["LICENSE", "LICENSES/*.txt"]
+SPDX-FileCopyrightText = "2007 Free Software Foundation, Inc."
+SPDX-License-Identifier = "GPL-3.0-or-later"
