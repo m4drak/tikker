@@ -248,7 +248,15 @@ Zakres `admin` obejmuje `sms:read` i `sms:send`. Uprawnienia tokenu to część 
 
 ## 7. Bezpieczeństwo
 
-- Hasła: argon2id (`golang.org/x/crypto`). Logowanie ma limit prób per IP i per login.
+- Hasła: argon2id (`golang.org/x/crypto`), m=19 MiB, t=2, p=1 (OWASP), format PHC, maks. 2 równoległe hashowania
+  (szczyt ok. 38 MiB RAM), rehash po zmianie parametrów. Hasło min. 12 znaków.
+- Limit prób logowania w pamięci: per login 5 prób, potem 1/min; per IP 20 prób, potem 1/6 s (IPv6 per /64).
+  Odpowiedź 429 z `Retry-After`. Brak różnicy czasowej między „brak użytkownika” a „złe hasło”.
+- Sesje po stronie serwera (tabela `sessions`, w bazie tylko hash tokenu): 1 h bezczynności, 12 h bezwzględnie,
+  cookie `__Host-tikker_session` przy HTTPS. Zmiana hasła, roli lub wyłączenie użytkownika kończy jego sesje.
+- CSRF: token HMAC związany z sesją (formularze i nagłówek `X-CSRF-Token`) oraz `http.CrossOriginProtection`
+  (Origin/Sec-Fetch-Site). API z tokenem Bearer nie wymaga CSRF.
+- Tokeny API: `tkr_<8>_<32>` (ok. 190 bitów sekretu), w bazie SHA-256, porównanie w stałym czasie.
 - Hasła do routerów szyfrowane AES-256-GCM kluczem z `TIKKER_SECRET_KEY` lub pliku `/data/secret.key`
   (generowanego przy pierwszym starcie z uprawnieniami 0600). Rotacja kluczy: po MVP.
 - Tokeny API przechowywane wyłącznie jako hash. Porównania w stałym czasie.
