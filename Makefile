@@ -13,6 +13,7 @@ LDFLAGS     := -s -w \
 	-X $(VERSION_PKG).Date=$(DATE)
 
 ARGS        ?= version
+REDOCLY     ?= npx --yes @redocly/cli@1.34.5
 
 # Tool versions are pinned so that local runs and CI use the same binaries.
 # go-licenses is run through `go run`, so nothing has to be installed globally.
@@ -22,7 +23,7 @@ GOVULNCHECK   ?= golang.org/x/vuln/cmd/govulncheck@v1.9.0
 LICENSES_ALLOWED := MIT,BSD-2-Clause,BSD-3-Clause,ISC,0BSD,Apache-2.0,MPL-2.0,LGPL-2.1,LGPL-3.0,GPL-3.0
 
 .DEFAULT_GOAL := build
-.PHONY: build test lint run clean licenses vuln ci
+.PHONY: build test lint run clean licenses vuln ci openapi-lint
 
 build: ## Build a static binary (CGO disabled) into bin/
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/tikker
@@ -45,4 +46,7 @@ licenses: ## Check dependency licenses against the SPEC §11 allowlist (go-licen
 vuln: ## Scan for known vulnerabilities (govulncheck)
 	$(GO) run $(GOVULNCHECK) ./...
 
-ci: lint test build licenses vuln ## Run the CI checks locally (run `reuse lint` separately)
+ci: lint test build licenses vuln openapi-lint ## Run the CI checks locally (run `reuse lint` separately)
+
+openapi-lint: ## Lint the OpenAPI contract (api/openapi.yaml)
+	$(REDOCLY) lint

@@ -138,3 +138,15 @@ jobs:
           cache: true
       - name: Scan for known vulnerabilities
         run: make vuln
+
+  openapi:
+    name: openapi lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      # Node.js is preinstalled on ubuntu-latest runners; the CLI version is pinned.
+      - name: Lint OpenAPI contract
+        run: make openapi-lint
