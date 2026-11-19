@@ -5,6 +5,7 @@ go 1.24.0
 require (
 	github.com/nyaruka/phonenumbers v1.8.1
 	github.com/oklog/ulid/v2 v2.1.2
+	go.uber.org/goleak v1.3.0
 	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/text v0.28.0
 	modernc.org/sqlite v1.40.1

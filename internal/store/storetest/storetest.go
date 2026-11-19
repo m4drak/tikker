@@ -47,6 +47,7 @@ func Run(t *testing.T, f Factory) {
 		{"Expire", testExpire},
 		{"ListCount", testListCount},
 		{"Inbound", testInbound},
+		{"InboundParts", testInboundParts},
 		{"Retention", testRetention},
 		{"WithTx", testWithTx},
 		{"Concurrency", testConcurrency},
@@ -1173,6 +1174,116 @@ func testInbound(t *testing.T, f Factory) {
 	// Inbound messages are never handed to dispatchers.
 	if _, ok := e.acquire(ch, nil, T0); ok {
 		t.Fatal("inbound acquired")
+	}
+}
+
+func testInboundParts(t *testing.T, f Factory) {
+	e := newEnv(t, f)
+	dev := e.device("r1")
+	ch := e.channel(dev, "lte1")
+	other := e.channel(dev, "lte2")
+	parts := e.s.InboundParts()
+	mk := func(c domain.Channel, hash string, at time.Time) store.InboundPart {
+		return store.InboundPart{
+			ID: e.id(), ChannelID: c.ID, DedupHash: hash, Phone: "+48600000001", RawTimestamp: "2026-01-02 03:04:05",
+			ReceivedAt: T0, Body: "body-" + hash, PDU: "pdu-" + hash, CreatedAt: at,
+		}
+	}
+
+	none, err := parts.ListPending(e.ctx, ch.ID)
+	e.ok(err)
+	if len(none) != 0 {
+		t.Fatalf("pending in empty store: %v", none)
+	}
+
+	p2 := mk(ch, "h2", T0.Add(2*time.Second))
+	p1 := mk(ch, "h1", T0.Add(time.Second))
+	po := mk(other, "h3", T0)
+	for _, p := range []store.InboundPart{p2, p1, po} {
+		created, err := parts.Add(e.ctx, p)
+		e.ok(err)
+		if !created {
+			t.Fatalf("Add %s reported duplicate", p.DedupHash)
+		}
+	}
+
+	// Duplicate hash with a new ID: not an error, nothing stored.
+	dup := p1
+	dup.ID = e.id()
+	created, err := parts.Add(e.ctx, dup)
+	e.ok(err)
+	if created {
+		t.Fatal("duplicate part reported as created")
+	}
+
+	// Per channel, oldest first, with all fields.
+	got, err := parts.ListPending(e.ctx, ch.ID)
+	e.ok(err)
+	if len(got) != 2 || got[0].ID != p1.ID || got[1].ID != p2.ID {
+		t.Fatalf("pending = %+v", got)
+	}
+	if got[0] != p1 {
+		t.Fatalf("stored part = %+v, want %+v", got[0], p1)
+	}
+
+	// Consume turns parts into content-free tombstones that still dedupe.
+	e.ok(parts.Consume(e.ctx, nil, e.id(), T0))
+	e.ok(parts.Consume(e.ctx, []domain.ID{p1.ID, p2.ID, e.id()}, e.id(), T0.Add(time.Minute)))
+	got, err = parts.ListPending(e.ctx, ch.ID)
+	e.ok(err)
+	if len(got) != 0 {
+		t.Fatalf("pending after consume: %+v", got)
+	}
+	created, err = parts.Add(e.ctx, mk(ch, "h1", T0))
+	e.ok(err)
+	if created {
+		t.Fatal("tombstone did not dedupe")
+	}
+	if err := parts.Consume(e.ctx, []domain.ID{po.ID}, "", T0); err == nil {
+		t.Fatal("consume without message ID accepted")
+	}
+	// A consumed part cannot be consumed again by another message.
+	e.ok(parts.Consume(e.ctx, []domain.ID{p1.ID}, e.id(), T0.Add(time.Hour)))
+
+	// Purge: only tombstones consumed before the cutoff.
+	n, err := parts.PurgeConsumed(e.ctx, T0.Add(time.Minute))
+	e.ok(err)
+	if n != 0 {
+		t.Fatalf("purged %d tombstones too early", n)
+	}
+	n, err = parts.PurgeConsumed(e.ctx, T0.Add(2*time.Minute))
+	e.ok(err)
+	if n != 2 { // p1 kept its first consumed_at, so both go
+		t.Fatalf("purged %d, want 2", n)
+	}
+	created, err = parts.Add(e.ctx, mk(ch, "h2", T0))
+	e.ok(err)
+	if !created {
+		t.Fatal("purged tombstone still dedupes")
+	}
+	// Pending parts are never purged.
+	n, err = parts.PurgeConsumed(e.ctx, T0.Add(1000*time.Hour))
+	e.ok(err)
+	if n != 0 {
+		t.Fatalf("purged %d, want 0", n)
+	}
+	got, err = parts.ListPending(e.ctx, other.ID)
+	e.ok(err)
+	if len(got) != 1 {
+		t.Fatalf("other channel pending = %+v", got)
+	}
+
+	// Parts go with their channel; unknown channel is rejected.
+	e.ok(e.s.Channels().Delete(e.ctx, other.ID))
+	got, err = parts.ListPending(e.ctx, other.ID)
+	e.ok(err)
+	if len(got) != 0 {
+		t.Fatalf("parts of a deleted channel survived: %+v", got)
+	}
+	_, err = parts.Add(e.ctx, mk(other, "h9", T0))
+	e.is(err, domain.ErrNotFound)
+	if _, err := parts.Add(e.ctx, store.InboundPart{}); err == nil {
+		t.Fatal("empty part accepted")
 	}
 }
 

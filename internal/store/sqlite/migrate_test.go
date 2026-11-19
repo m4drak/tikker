@@ -27,8 +27,11 @@ func TestOpenMigratesAndReopens(t *testing.T) {
 	var n int
 	var name, sum string
 	var at int64
-	if err := s.writeDB.QueryRow(`SELECT COUNT(*), MIN(name), MIN(checksum), MIN(applied_at) FROM schema_migrations`).
-		Scan(&n, &name, &sum, &at); err != nil {
+	if err := s.writeDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.writeDB.QueryRow(`SELECT name, checksum, applied_at FROM schema_migrations WHERE version = 1`).
+		Scan(&name, &sum, &at); err != nil {
 		t.Fatal(err)
 	}
 	want, err := loadMigrations(migrationFiles, "migrations")
@@ -38,7 +41,7 @@ func TestOpenMigratesAndReopens(t *testing.T) {
 	if n != len(want) || name != "init" || sum != want[0].checksum || at != clk.Now().UnixMilli() {
 		t.Fatalf("schema_migrations = %d %q %q %d", n, name, sum, at)
 	}
-	for _, table := range []string{"users", "api_tokens", "devices", "channels", "messages", "idempotency_keys", "audit_log"} {
+	for _, table := range []string{"users", "api_tokens", "devices", "channels", "messages", "idempotency_keys", "audit_log", "inbound_parts"} {
 		var c int
 		if err := s.writeDB.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&c); err != nil {
 			t.Errorf("table %s: %v", table, err)
