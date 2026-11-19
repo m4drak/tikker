@@ -15,6 +15,7 @@ path = [
   "**/*.yaml",
   "**/*.toml",
   "**/*.mod",
+  "**/*.sum",
   "Makefile",
   ".editorconfig",
   ".gitignore",
