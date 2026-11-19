@@ -141,7 +141,7 @@ queued ──(DELETE przez API/UI)──► cancelled
 - Ponowienia: wykładniczy backoff z jitterem (np. 30 s, 2 min, 10 min, 30 min), domyślnie `max_attempts=5`.
 - Dzierżawa (`lease_until`) chroni przed podwójną wysyłką po awarii. Wygasła dzierżawa w stanie `sending`
   wraca do `queued` tylko wtedy, gdy nie ma pewności wysyłki. Taka sytuacja jest logowana jako „możliwy duplikat”.
-  Gwarancja jest at-least-once; wybór jest udokumentowany.
+  Gwarancja jest **at-least-once** (decyzja właściciela).
 - Idempotencja: nagłówek `Idempotency-Key` (unikalny per token przez 24 h) zwraca istniejącą wiadomość.
 
 ### 4.3 Wiadomości przychodzące
@@ -287,7 +287,7 @@ test/e2e/                 testy end-to-end (fake RouterOS)
 ## 11. Open source i licencje
 
 - Licencja projektu: **GNU GPL v3.0**. W każdym pliku źródłowym nagłówek SPDX
-  (`SPDX-License-Identifier: GPL-3.0-or-later` lub `GPL-3.0-only`; decyzja właściciela, patrz pytanie otwarte 1).
+  `SPDX-License-Identifier: GPL-3.0-or-later` (decyzja właściciela, 2026-11-19).
 - Zależności tylko na licencjach zgodnych z GPLv3 (MIT, BSD, ISC, 0BSD, Apache-2.0, MPL-2.0, LGPL).
   CI sprawdza je narzędziem `go-licenses` z listą dozwolonych licencji, a `reuse lint` sprawdza nagłówki.
 - `THIRD_PARTY_NOTICES` generowany w release, do tego SBOM (SPDX) dołączany do wydań.
@@ -299,9 +299,12 @@ test/e2e/                 testy end-to-end (fake RouterOS)
 
 ---
 
-## 12. Pytania otwarte
+## 12. Decyzje i pytania otwarte
 
-1. `GPL-3.0-only` czy `GPL-3.0-or-later`? Rekomendacja: `-or-later` (zgodność z przyszłymi wersjami GPL).
-2. Gwarancja at-least-once przy awarii w trakcie wysyłki (możliwy duplikat) czy at-most-once (możliwa utrata)?
-   Rekomendacja: at-least-once, z przełącznikiem per kanał.
+Rozstrzygnięte (2026-11-19):
+1. Licencja: **GPL-3.0-or-later**.
+2. Gwarancja dostarczenia: **at-least-once**. Przy awarii w trakcie wysyłki lepszy jest duplikat niż utrata
+   wiadomości. Wybór utrwala ADR 0002.
+
+Otwarte:
 3. Domyślny limit wysyłki per kanał, do ustalenia po T00.
