@@ -79,11 +79,12 @@ Aplikacja nie wie, w którym trybie działa. Różni się tylko konfiguracja (ad
 ## 3. Integracja z RouterOS
 
 ### 3.1 Wymagania po stronie routera
-- RouterOS ≥ 7.x [WERYFIKACJA: minimalna wersja z poprawnym `/rest/tool/sms/*`].
+- RouterOS ≥ 7.16 (robocze minimum wg T00: m.in. `polling` w `/tool sms`) [WERYFIKACJA].
 - Włączona usługa `www-ssl` (zalecana) albo `www`, z ograniczeniem `address=` do IP tikkera / podsieci veth.
 - `/tool sms set port=lte1 receive-enabled=yes`.
-- Dedykowany użytkownik i grupa z minimalnymi politykami: `read`, `write`, `rest-api`
-  [WERYFIKACJA: czy `send` wymaga dodatkowo `test`/`policy`].
+- Dedykowany użytkownik i grupa z minimalnymi politykami: `api`, `rest-api`, `read`, `write`
+  [WERYFIKACJA: czy `send` wymaga dodatkowo `test`/`policy`]. RouterOS buforuje poświadczenia REST ok. 10 min.
+- Zalecane: `/tool sms set auto-erase=yes`; przy modemach MBIM także usuwanie wysłanych SMS (zapełniają SIM).
 
 Projekt dostarczy skrypt `deploy/routeros/setup.rsc`, który konfiguruje użytkownika, grupę, SMS, usługę oraz,
 w trybie kontenerowym, `veth`, bridge, mount i kontener.
@@ -91,22 +92,24 @@ w trybie kontenerowym, `veth`, bridge, mount i kontener.
 ### 3.2 Wywołania API (konektor `routeros-rest`)
 | Operacja | Wywołanie | Uwagi |
 |---|---|---|
-| Wysyłka | `POST /rest/tool/sms/send` `{"port":"lte1","phone-number":"+48…","message":"…"}` | [WERYFIKACJA: długie SMS, UCS-2/polskie znaki, kody błędów, czas odpowiedzi] |
-| Odczyt skrzynki | `GET /rest/tool/sms/inbox` | pola: `.id`, `phone`, `timestamp`, `message`, `type` [WERYFIKACJA: format timestamp, sklejanie wieloczęściowych] |
+| Wysyłka | `POST /rest/tool/sms/send` `{"port":"lte1","phone-number":"+48…","message":"…"}` (wymagany `Content-Type: application/json`) | wg dokumentacji 7.25 tylko GSM-7 i ≤ 160 znaków, bez UCS-2 i wieloczęściowych; REST przerywa po 60 s; port modemu wyłączny [WERYFIKACJA: kody błędów, czas odpowiedzi] |
+| Odczyt skrzynki | `GET /rest/tool/sms/inbox` | pola: `.id`, `phone`, `timestamp`, `type`, `message`, `pdu`; RouterOS nie skleja części i dekoduje jako GSM-7, więc tikker dekoduje `pdu` sam [WERYFIKACJA: format timestamp i `pdu`] |
 | Usunięcie | `DELETE /rest/tool/sms/inbox/{.id}` lub `POST /rest/tool/sms/inbox/remove` | |
 | Zdrowie | `GET /rest/system/resource`, `GET /rest/interface/lte` (+ `monitor` jednorazowo) | sygnał, operator, stan rejestracji |
 
-Interfejs konektora (Go, szkic):
-```go
-type Connector interface {
-    Send(ctx context.Context, ch ChannelRef, to string, body string) (SendResult, error)
-    FetchInbox(ctx context.Context, ch ChannelRef) ([]InboundSMS, error)
-    DeleteInbox(ctx context.Context, ch ChannelRef, ids []string) error
-    Health(ctx context.Context, ch ChannelRef) (ChannelHealth, error)
-}
-```
-Błędy klasyfikujemy jako `Transient` (sieć, timeout, 5xx, modem zajęty) → ponowienie,
+Interfejs konektora: `internal/connector/connector.go` (źródło prawdy). Jedna instancja na urządzenie, tworzona przez
+`Registry` wg `Device.Connector` (`routeros-rest`, po MVP `agent`). Metody: `Send(OutboundSMS)` (z `MessageID`,
+potrzebnym konektorowi `agent` do deduplikacji), `FetchInbox`, `DeleteInbox`, `Health`, `Probe` (wersja RouterOS,
+płytka, TLS z odciskiem, porty LTE) i `Close`. Konektor deklaruje swoje możliwości (UCS-2, maks. liczba segmentów),
+a warstwa `internal/sms` dobiera do nich kodowanie, transliterację i strategię długich wiadomości.
+
+Klient REST: timeout ≥ 65 s, jedna wysyłka naraz na port, osobny użytkownik RouterOS na instancję tikkera
+(RouterOS kolejkuje żądania jednego użytkownika).
+
+Błędy (`domain.ConnectorError`) klasyfikujemy jako `Transient` (sieć, timeout, 5xx, modem zajęty) → ponowienie,
 `Permanent` (zły numer, 4xx walidacji) → `failed`, `Auth` (401/403) → kanał `degraded` i alert w UI.
+Błąd niesklasyfikowany jest traktowany jak `Transient`. Błąd niejednoznaczny (timeout po wysłaniu żądania)
+ustawia na wiadomości flagę `possible_duplicate`.
 
 ### 3.3 TLS do routera
 Domyślnie weryfikacja certyfikatu. Opcje per urządzenie: własny CA (PEM), przypięcie odcisku SHA-256
@@ -121,12 +124,17 @@ W trybie kontenerowym dopuszczalne jest HTTP wyłącznie na adresie veth (oznacz
 - **User**: `id`, `username`, `password_hash` (argon2id), `role` (`admin`|`operator`|`viewer`), `created_at`, `disabled`.
 - **APIToken**: `id`, `user_id`, `name`, `prefix`, `hash` (SHA-256 z sekretu), `scopes` (`sms:send`, `sms:read`, `admin`), `expires_at`, `last_used_at`.
   Token pokazywany jest tylko raz, w formacie `tkr_<prefix>_<secret>`.
-- **Device**: `id`, `name`, `base_url`, `username`, `password_enc` (AES-256-GCM), `tls_mode`, `ca_pem`, `fingerprint`, `enabled`, `created_at`.
-- **Channel**: `id`, `device_id`, `port` (np. `lte1`), `name`, `tags[]`, `rate_per_min`, `max_segments`, `enabled`,
-  `state` (`ok`|`degraded`|`down`|`disabled`), `last_health_at`, `signal`, `operator`.
-- **Message**: `id` (ULID), `direction` (`out`|`in`), `channel_id`, `peer` (E.164), `body`, `encoding` (`gsm7`|`ucs2`),
-  `segments`, `status`, `attempts`, `next_attempt_at`, `lease_until`, `last_error`, `idempotency_key`, `client_ref`,
-  `created_by` (user/token), `created_at`, `sent_at`, `received_at`, `dedup_hash` (dla `in`).
+- **Device**: `id`, `name`, `connector` (domyślnie `routeros-rest`), `base_url`, `username`, `password_enc` (AES-256-GCM),
+  `tls_mode` (`verify`|`ca`|`fingerprint`|`insecure`), `ca_pem`, `fingerprint`, `enabled`, `created_at`.
+- **Channel**: `id`, `device_id`, `port` (np. `lte1`), `name`, `tags[]`, `rate_per_min`, `max_segments`, `transliterate`, `enabled`,
+  `state` (`ok`|`degraded`|`down`|`disabled`), `state_reason`, `last_health_at`, `signal` (`{rssi, rsrp, rsrq, sinr}`, nullable),
+  `operator`. `queue_depth` jest wyliczane.
+- **Message**: `id` (ULID), `direction` (`out`|`in`), `channel_id` (nullable do czasu przydzielenia przez routing),
+  `peer` (E.164), `body` (pusty po retencji), `encoding` (`gsm7`|`ucs2`), `segments`, `status`, `attempts`, `next_attempt_at`,
+  `lease_until`, `last_error`, `possible_duplicate`, `tags[]`, `expires_at`, `client_ref`,
+  `created_by` (`user:<id>`|`token:<id>`, puste dla `in`), `created_at`, `sent_at`, `received_at`, `dedup_hash` (dla `in`).
+  Wiadomości przychodzące mają status `received`.
+- **IdempotencyRecord**: (`created_by`, `key`) → hash żądania, ID wiadomości, `created_at`. Ważny 24 h.
 - **AuditLog**: `id`, `actor`, `action`, `target`, `meta` (JSON), `at`.
 
 ### 4.2 Statusy wiadomości wychodzących
@@ -138,17 +146,21 @@ queued ──(dispatcher bierze dzierżawę)──► sending ──ok──► 
 queued ──(DELETE przez API/UI)──► cancelled
 ```
 - `sent` oznacza, że RouterOS przyjął wiadomość do wysłania. MVP nie ma raportów doręczenia.
-- Ponowienia: wykładniczy backoff z jitterem (np. 30 s, 2 min, 10 min, 30 min), domyślnie `max_attempts=5`.
+- Ponowienia: wykładniczy backoff 30 s, 2 min, 8 min, 30 min (mnożnik 4, limit 30 min), jitter ±20%, domyślnie `max_attempts=5`.
+- Przekroczenie `expires_at` → `failed`, `last_error` zaczyna się od `expired`.
 - Dzierżawa (`lease_until`) chroni przed podwójną wysyłką po awarii. Wygasła dzierżawa w stanie `sending`
-  wraca do `queued` tylko wtedy, gdy nie ma pewności wysyłki. Taka sytuacja jest logowana jako „możliwy duplikat”.
-  Gwarancja jest **at-least-once** (decyzja właściciela).
-- Idempotencja: nagłówek `Idempotency-Key` (unikalny per token przez 24 h) zwraca istniejącą wiadomość.
+  wraca do `queued` z flagą `possible_duplicate`, a po wyczerpaniu prób przechodzi w `failed`.
+  `attempts` działa jak numer dzierżawy: worker ze starą dzierżawą nie nadpisze stanu (`ErrLeaseLost`).
+  Gwarancja jest **at-least-once** (decyzja właściciela). Szczegóły: ADR 0002.
+- Idempotencja: nagłówek `Idempotency-Key` (per token, 24 h). Ten sam klucz i treść zwracają pierwotną odpowiedź,
+  inna treść daje 422, równoległe żądanie w toku daje 409. Batch jest atomowy (jeden klucz na paczkę), ponad 100 pozycji daje 413.
 
 ### 4.3 Wiadomości przychodzące
 - Poller per kanał co `inbox_poll_interval` (domyślnie 15 s).
 - Algorytm: pobierz skrzynkę → zapisz w bazie w transakcji (dedup po `dedup_hash = sha256(device|port|phone|timestamp|message)`)
   → dopiero po commicie usuń z routera. Gwarancja at-least-once bez duplikatów w bazie.
-- Sklejanie SMS wieloczęściowych, jeśli RouterOS zwraca części osobno [WERYFIKACJA].
+- Dekodowanie pola `pdu` (UCS-2, nagłówek UDH) i sklejanie SMS wieloczęściowych po stronie tikkera, bo RouterOS
+  tego nie robi [WERYFIKACJA zawartości `pdu`].
 
 ### 4.4 Routing (wybór kanału)
 Kolejność:
@@ -156,7 +168,9 @@ Kolejność:
 2. `tags` (kanały mające wszystkie tagi).
 3. Domyślnie wszystkie aktywne kanały.
 
-Spośród kandydatów w stanie `ok` wybieramy kanał z najmniejszą kolejką (round-robin przy remisie).
+Routing odbywa się w chwili pobrania wiadomości przez worker kanału (pull, ADR 0002), a nie przy zapisie.
+Wolny worker zdrowego kanału bierze najstarszą pasującą wiadomość, co daje efekt „najmniejszej kolejki”.
+Wiadomość bez przypiętego kanału po ponowieniu może pójść innym kanałem.
 Brak zdrowego kanału zostawia wiadomość w `queued` do skutku lub do `expires_at`, jeśli podano.
 
 ### 4.5 Limity
@@ -167,10 +181,11 @@ pojedynczy worker i serializację wysyłek. Globalnie obowiązuje limit żądań
 - Normalizacja do E.164 przez `github.com/nyaruka/phonenumbers` (MIT). `default_region` konfigurowalny (domyślnie `PL`).
   Krótkie numery i numery alfanumeryczne są dopuszczone, jeśli włączy je flaga `allow_short_numbers`.
 - Licznik segmentów: GSM-7 (160/153, z rozszerzeniami liczonymi podwójnie) oraz UCS-2 (70/67).
-- Opcja `transliterate` (per kanał): zamiana polskich znaków na ASCII, gdy RouterOS/modem nie obsługuje UCS-2
-  [WERYFIKACJA]. `max_segments` (domyślnie 3) to limit, powyżej którego zwracamy 422.
-- Jeśli RouterOS nie wspiera wysyłki wieloczęściowej [WERYFIKACJA], strategia jest konfigurowalna:
-  `reject`, `split` (osobne SMS z prefiksem `(1/3)`) lub `truncate`.
+- Opcja `transliterate` (per kanał): zamiana polskich znaków na ASCII. Domyślnie włączona, gdy konektor nie obsługuje UCS-2
+  (dotyczy `routeros-rest` wg T00). `max_segments` to limit, powyżej którego zwracamy 422: domyślnie 3, ale nie więcej
+  niż pozwala konektor (dla `routeros-rest` 1, czyli 160 znaków GSM-7) [WERYFIKACJA].
+- Gdy konektor nie wspiera wysyłki wieloczęściowej, strategia długich wiadomości jest konfigurowalna:
+  `reject` (domyślnie), `split` (osobne SMS z prefiksem `(1/3)`) lub `truncate`.
 
 ---
 
@@ -186,12 +201,17 @@ Autoryzacja: `Authorization: Bearer tkr_…`. Paginacja kursorowa (`?cursor=&lim
 | `GET /messages` | `sms:read` | filtry: `direction`, `status`, `peer`, `channel_id`, `since`, `until` |
 | `GET /messages/{id}` | `sms:read` | szczegóły |
 | `DELETE /messages/{id}` | `sms:send` | anuluj (tylko `queued`) |
-| `GET /channels` | `sms:read` | lista kanałów ze stanem |
+| `GET /channels[/{id}]` | `sms:read` | kanały ze stanem |
+| `POST/PATCH/DELETE /channels[/{id}]` | `admin` | zarządzanie kanałami (tagi, limity, transliteracja) |
 | `GET/POST/PATCH/DELETE /devices[/{id}]` | `admin` | zarządzanie urządzeniami (hasło tylko do zapisu) |
 | `POST /devices/{id}/test` | `admin` | test połączenia, wykrycie portów LTE |
 | `GET/POST/DELETE /tokens[/{id}]` | `admin` | tokeny |
 | `GET/POST/PATCH /users[/{id}]` | `admin` | użytkownicy |
 | `GET /healthz`, `GET /readyz` | – | bez autoryzacji, bez szczegółów wrażliwych |
+
+Zakres `admin` obejmuje `sms:read` i `sms:send`. Uprawnienia tokenu to część wspólna jego zakresów i roli właściciela
+(viewer → read, operator → read + send). PATCH stosuje JSON Merge Patch (RFC 7396). Użytkowników się nie usuwa
+(`disabled`), a ostatniego admina nie można wyłączyć (409).
 
 ---
 
@@ -254,7 +274,9 @@ Urządzenia i kanały są przechowywane w bazie (zarządzane z UI/API), opcjonal
 ```
 cmd/tikker/               main
 internal/config/          konfiguracja
-internal/store/           SQLite, migracje (embed), repozytoria
+internal/clock/           zegar (systemowy i fałszywy do testów)
+internal/store/           interfejsy repozytoriów
+internal/store/sqlite/    implementacja SQLite, migracje (embed)
 internal/domain/          encje, statusy, błędy
 internal/connector/       interfejs + routeros/ (REST klient), fake/ (testy)
 internal/sms/             kodowanie GSM-7/UCS-2, segmentacja, transliteracja, numery
