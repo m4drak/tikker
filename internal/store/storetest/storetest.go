@@ -36,6 +36,7 @@ func Run(t *testing.T, f Factory) {
 		{"Channels", testChannels},
 		{"Users", testUsers},
 		{"Tokens", testTokens},
+		{"Sessions", testSessions},
 		{"Audit", testAudit},
 		{"Enqueue", testEnqueue},
 		{"Idempotency", testIdempotency},
@@ -478,6 +479,94 @@ func testTokens(t *testing.T, f Factory) {
 	e.ok(e.s.Tokens().Delete(e.ctx, t1.ID))
 	e.is(e.s.Tokens().Delete(e.ctx, t1.ID), domain.ErrNotFound)
 	_, err = e.s.Tokens().GetByPrefix(e.ctx, "abc123")
+	e.is(err, domain.ErrNotFound)
+}
+
+func testSessions(t *testing.T, f Factory) {
+	e := newEnv(t, f)
+	u1 := domain.User{ID: e.id(), Username: "u1", PasswordHash: "x", Role: domain.RoleAdmin, CreatedAt: T0}
+	u2 := domain.User{ID: e.id(), Username: "u2", PasswordHash: "x", Role: domain.RoleViewer, CreatedAt: T0}
+	e.ok(e.s.Users().Create(e.ctx, u1))
+	e.ok(e.s.Users().Create(e.ctx, u2))
+	sr := e.s.Sessions()
+
+	s1 := store.Session{ID: "h1", UserID: u1.ID, CreatedAt: T0, ExpiresAt: T0.Add(12 * time.Hour),
+		UserAgent: "Firefox", IP: "192.0.2.0"}
+	e.ok(sr.Create(e.ctx, s1))
+	s2 := store.Session{ID: "h2", UserID: u1.ID, CreatedAt: T0.Add(time.Minute), LastSeenAt: T0.Add(2 * time.Minute),
+		ExpiresAt: T0.Add(time.Hour)}
+	e.ok(sr.Create(e.ctx, s2))
+	s3 := store.Session{ID: "h3", UserID: u2.ID, CreatedAt: T0, ExpiresAt: T0.Add(time.Hour)}
+	e.ok(sr.Create(e.ctx, s3))
+
+	e.is(sr.Create(e.ctx, s1), domain.ErrConflict)
+	e.is(sr.Create(e.ctx, store.Session{ID: "orphan", UserID: e.id(), CreatedAt: T0, ExpiresAt: T0}), domain.ErrNotFound)
+	if err := sr.Create(e.ctx, store.Session{UserID: u1.ID}); err == nil {
+		t.Fatal("session without ID accepted")
+	}
+
+	got, err := sr.Get(e.ctx, "h1")
+	e.ok(err)
+	if got.UserID != u1.ID || !got.CreatedAt.Equal(T0) || !got.LastSeenAt.Equal(T0) ||
+		!got.ExpiresAt.Equal(T0.Add(12*time.Hour)) || got.UserAgent != "Firefox" || got.IP != "192.0.2.0" {
+		t.Fatalf("Get = %+v", got)
+	}
+	if got, _ := sr.Get(e.ctx, "h2"); !got.LastSeenAt.Equal(T0.Add(2 * time.Minute)) {
+		t.Fatalf("LastSeenAt = %v", got.LastSeenAt)
+	}
+	_, err = sr.Get(e.ctx, "nope")
+	e.is(err, domain.ErrNotFound)
+
+	list, err := sr.List(e.ctx, u1.ID)
+	e.ok(err)
+	if len(list) != 2 || list[0].ID != "h2" || list[1].ID != "h1" {
+		t.Fatalf("List = %+v", list)
+	}
+
+	e.ok(sr.Touch(e.ctx, "h1", T0.Add(30*time.Minute)))
+	if got, _ := sr.Get(e.ctx, "h1"); !got.LastSeenAt.Equal(T0.Add(30 * time.Minute)) {
+		t.Fatalf("after Touch = %+v", got)
+	}
+	e.is(sr.Touch(e.ctx, "nope", T0), domain.ErrNotFound)
+
+	// Expired: s2 by absolute expiry, s3 by idle time; s1 survives.
+	n, err := sr.DeleteExpired(e.ctx, T0.Add(time.Hour), T0.Add(10*time.Minute))
+	e.ok(err)
+	if n != 2 {
+		t.Fatalf("DeleteExpired = %d", n)
+	}
+	if n, _ := sr.DeleteExpired(e.ctx, T0.Add(time.Hour), T0.Add(10*time.Minute)); n != 0 {
+		t.Fatalf("second DeleteExpired = %d", n)
+	}
+	if _, err := sr.Get(e.ctx, "h1"); err != nil {
+		t.Fatalf("h1 gone: %v", err)
+	}
+
+	e.ok(sr.Create(e.ctx, store.Session{ID: "h4", UserID: u1.ID, CreatedAt: T0, ExpiresAt: T0.Add(time.Hour)}))
+	e.ok(sr.Create(e.ctx, store.Session{ID: "h5", UserID: u2.ID, CreatedAt: T0, ExpiresAt: T0.Add(time.Hour)}))
+	n, err = sr.DeleteByUser(e.ctx, u1.ID)
+	e.ok(err)
+	if n != 2 {
+		t.Fatalf("DeleteByUser = %d", n)
+	}
+	if l, _ := sr.List(e.ctx, u1.ID); len(l) != 0 {
+		t.Fatalf("u1 sessions left: %+v", l)
+	}
+
+	e.ok(sr.Delete(e.ctx, "h5"))
+	e.is(sr.Delete(e.ctx, "h5"), domain.ErrNotFound)
+
+	// Inside a transaction the repository shares it.
+	err = e.s.WithTx(e.ctx, func(tx store.Repos) error {
+		if err := tx.Sessions().Create(e.ctx, store.Session{ID: "tx", UserID: u2.ID, CreatedAt: T0, ExpiresAt: T0.Add(time.Hour)}); err != nil {
+			return err
+		}
+		return errors.New("rollback")
+	})
+	if err == nil {
+		t.Fatal("WithTx error lost")
+	}
+	_, err = sr.Get(e.ctx, "tx")
 	e.is(err, domain.ErrNotFound)
 }
 
