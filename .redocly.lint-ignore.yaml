@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 The tikker Authors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Świadome wyjątki od reguł lintera.
+# Sondy /healthz i /readyz nie mają odpowiedzi 4xx: nie przyjmują parametrów ani autoryzacji.
+api/openapi.yaml:
+  operation-4xx-response:
+    - '#/paths/~1healthz/get/responses'
+    - '#/paths/~1readyz/get/responses'
