@@ -9,10 +9,13 @@ coverage.out
 *.db-wal
 *.db-shm
 secret.key
-config.yaml
+/config.yaml
 
 # Editors and OS files
 .idea/
 .vscode/
 *.swp
 .DS_Store
+
+# Claude Code agent worktrees
+/.claude/worktrees/
