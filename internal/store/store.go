@@ -38,6 +38,7 @@ type Repos interface {
 	Channels() ChannelRepo
 	Users() UserRepo
 	Tokens() TokenRepo
+	Sessions() SessionRepo
 	Audit() AuditRepo
 }
 
@@ -366,6 +367,46 @@ type TokenRepo interface {
 	// TouchLastUsed sets LastUsedAt. Implementations may coalesce writes
 	// (e.g. at most once per minute per token) to limit flash wear.
 	TouchLastUsed(ctx context.Context, id domain.ID, at time.Time) error
+}
+
+// SessionRepo stores server-side sessions of the web panel (T20). A session
+// is identified by the hex SHA-256 of the random token kept in the browser
+// cookie, so a database leak does not reveal usable cookies. Expiry is
+// decided by the caller (internal/auth); the repository only stores
+// timestamps.
+type SessionRepo interface {
+	// Create stores s; a duplicate ID yields domain.ErrConflict and an
+	// unknown UserID domain.ErrNotFound. LastSeenAt defaults to CreatedAt.
+	Create(ctx context.Context, s Session) error
+	// Get returns one session or domain.ErrNotFound. It never writes.
+	Get(ctx context.Context, id string) (Session, error)
+	// List returns the sessions of userID, newest first (active sessions
+	// view). It never writes.
+	List(ctx context.Context, userID domain.ID) ([]Session, error)
+	// Touch sets LastSeenAt or returns domain.ErrNotFound. Callers limit
+	// how often they call it (e.g. once a minute per session) to spare
+	// the flash storage.
+	Touch(ctx context.Context, id string, at time.Time) error
+	// Delete removes one session or returns domain.ErrNotFound.
+	Delete(ctx context.Context, id string) error
+	// DeleteByUser removes every session of userID (password, role or
+	// status change) and returns how many it removed.
+	DeleteByUser(ctx context.Context, userID domain.ID) (int, error)
+	// DeleteExpired removes sessions with ExpiresAt <= now or LastSeenAt
+	// <= idleBefore and returns how many it removed. It writes nothing
+	// when there are none.
+	DeleteExpired(ctx context.Context, now, idleBefore time.Time) (int, error)
+}
+
+// Session is a logged-in panel session.
+type Session struct {
+	ID         string // hex SHA-256 of the cookie token; never the token itself
+	UserID     domain.ID
+	CreatedAt  time.Time
+	LastSeenAt time.Time
+	ExpiresAt  time.Time // absolute expiry
+	UserAgent  string    // truncated, informational
+	IP         string    // truncated client network, informational
 }
 
 // AuditRepo stores the audit log. It is append-only.

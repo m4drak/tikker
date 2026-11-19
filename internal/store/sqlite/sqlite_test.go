@@ -197,6 +197,7 @@ func TestNoWritesWhenIdle(t *testing.T) {
 		s.Devices().Create(ctx, d), s.Channels().Create(ctx, ch), s.Users().Create(ctx, u), s.Tokens().Create(ctx, tok),
 		s.Channels().UpdateHealth(ctx, ch.ID, store.ChannelHealthUpdate{State: domain.ChannelOK, At: storetest.T0}),
 		s.Tokens().TouchLastUsed(ctx, tok.ID, storetest.T0),
+		s.Sessions().Create(ctx, store.Session{ID: "sess", UserID: u.ID, CreatedAt: storetest.T0, ExpiresAt: storetest.T0.Add(time.Hour)}),
 	} {
 		if err != nil {
 			t.Fatal(err)
@@ -275,6 +276,15 @@ func TestNoWritesWhenIdle(t *testing.T) {
 		}
 		if _, err := s.Tokens().GetByPrefix(ctx, "pfx"); err != nil {
 			t.Fatal(err)
+		}
+		if _, err := s.Sessions().Get(ctx, "sess"); err != nil {
+			t.Fatal(err)
+		}
+		if l, err := s.Sessions().List(ctx, u.ID); err != nil || len(l) != 1 {
+			t.Fatalf("Sessions.List = %v, %v", l, err)
+		}
+		if n, err := s.Sessions().DeleteExpired(ctx, storetest.T0, storetest.T0.Add(-time.Hour)); err != nil || n != 0 {
+			t.Fatalf("Sessions.DeleteExpired = %v, %v", n, err)
 		}
 		// Coalesced writes: same health, token touched just now.
 		if err := s.Channels().UpdateHealth(ctx, ch.ID, store.ChannelHealthUpdate{State: domain.ChannelOK, At: storetest.T0.Add(time.Second)}); err != nil {
