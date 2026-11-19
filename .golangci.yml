@@ -25,7 +25,6 @@ linters:
         - fmt.Fprintf
         - fmt.Fprintln
     misspell:
-      locale: US
       # Polish words in user-facing text and test data; "routeros" is a package name.
       ignore-rules:
         - adres
