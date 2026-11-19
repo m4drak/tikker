@@ -165,6 +165,10 @@ type MessageRepo interface {
 	// PurgeBodies empties Body of terminal messages created before cutoff
 	// (retention, SPEC §7) and returns how many it changed. Metadata stays.
 	PurgeBodies(ctx context.Context, cutoff time.Time) (int, error)
+
+	// PurgeIdempotency deletes idempotency records created before the given
+	// time (callers pass now - 24 h) and returns how many it removed.
+	PurgeIdempotency(ctx context.Context, before time.Time) (int, error)
 }
 
 // Idempotency identifies a client request for [MessageRepo.Enqueue].
@@ -292,7 +296,9 @@ type UserRepo interface {
 	GetByUsername(ctx context.Context, username string) (domain.User, error)
 	// List returns all users ordered by username.
 	List(ctx context.Context) ([]domain.User, error)
-	// Update replaces Username, PasswordHash, Role and Disabled.
+	// Update replaces Username, PasswordHash, Role and Disabled. A change
+	// that would leave no enabled admin (demoting or disabling the last one)
+	// is refused with domain.ErrConflict, atomically with the write.
 	Update(ctx context.Context, u domain.User) error
 	// Count returns the number of users (first-run wizard).
 	Count(ctx context.Context) (int, error)
