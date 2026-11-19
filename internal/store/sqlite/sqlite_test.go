@@ -249,6 +249,12 @@ func TestNoWritesWhenIdle(t *testing.T) {
 		if n, err := m.PurgeIdempotency(ctx, storetest.T0); err != nil || n != 0 {
 			t.Fatalf("PurgeIdempotency = %v, %v", n, err)
 		}
+		if p, err := s.InboundParts().ListPending(ctx, ch.ID); err != nil || len(p) != 0 {
+			t.Fatalf("ListPending = %v, %v", p, err)
+		}
+		if n, err := s.InboundParts().PurgeConsumed(ctx, storetest.T0); err != nil || n != 0 {
+			t.Fatalf("PurgeConsumed = %v, %v", n, err)
+		}
 		if _, err := s.Retain(ctx, storetest.T0, time.Hour); err != nil {
 			t.Fatal(err)
 		}

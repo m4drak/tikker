@@ -163,6 +163,11 @@ queued ──(DELETE przez API/UI)──► cancelled
   → dopiero po commicie usuń z routera. Gwarancja at-least-once bez duplikatów w bazie.
 - Dekodowanie pola `pdu` (UCS-2, nagłówek UDH) i sklejanie SMS wieloczęściowych po stronie tikkera, bo RouterOS
   tego nie robi [WERYFIKACJA zawartości `pdu`].
+- Hash `dedup_hash` liczony jest per wpis skrzynki z surowych danych (`pdu`, a bez niego `message`). Części SMS wieloczęściowego
+  trafiają do tabeli `inbound_parts` w tej samej transakcji (router je potem usuwa); po złożeniu zostają jako puste
+  znaczniki (tombstones) na czas `PartRetention` (domyślnie 7 dni), żeby część dostarczona ponownie po nieudanym
+  usunięciu nie zaczęła nowej wiadomości. Część bez kompletu po 24 h daje wiadomość z `last_error="incomplete: n/m parts"`.
+  Pusty polling i duplikaty niczego nie zapisują.
 
 ### 4.4 Routing (wybór kanału)
 Kolejność:

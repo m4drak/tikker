@@ -33,6 +33,7 @@ import (
 // repositories share one transaction.
 type Repos interface {
 	Messages() MessageRepo
+	InboundParts() InboundPartRepo
 	Devices() DeviceRepo
 	Channels() ChannelRepo
 	Users() UserRepo
@@ -221,6 +222,48 @@ type MessageFilter struct {
 	CreatedBy domain.Actor
 	Since     time.Time // CreatedAt >= Since
 	Until     time.Time // CreatedAt < Until
+}
+
+// InboundPartRepo keeps the parts of inbound concatenated SMS while the inbox
+// poller waits for the rest of the message (SPEC §4.3, ADR 0002 §4).
+//
+// Every part ever seen keeps a row, identified by its DedupHash: pending
+// while the message is incomplete, afterwards as a tombstone without content.
+// A part redelivered by the router after a failed deletion therefore finds
+// its hash and is not mistaken for a new message.
+type InboundPartRepo interface {
+	// Add stores a pending part unless a row with the same DedupHash exists
+	// (pending or consumed). created reports whether a row was inserted.
+	// A duplicate is not an error. The part must have ID, ChannelID and
+	// DedupHash; CreatedAt defaults to the store's clock.
+	Add(ctx context.Context, p InboundPart) (created bool, err error)
+
+	// ListPending returns the pending parts of a channel, oldest first (by
+	// CreatedAt, then ID). It never writes.
+	ListPending(ctx context.Context, channelID domain.ID) ([]InboundPart, error)
+
+	// Consume marks pending parts as belonging to the stored message
+	// messageID: it empties their PDU and Body (the content now lives in the
+	// message) and keeps the rows as tombstones. Unknown IDs are ignored.
+	Consume(ctx context.Context, ids []domain.ID, messageID domain.ID, at time.Time) error
+
+	// PurgeConsumed deletes tombstones consumed before the given time and
+	// returns how many it removed. It writes nothing when there are none.
+	PurgeConsumed(ctx context.Context, before time.Time) (int, error)
+}
+
+// InboundPart is one received part of a concatenated SMS.
+type InboundPart struct {
+	ID        domain.ID
+	ChannelID domain.ID
+	// DedupHash is domain.InboundDedupHash of the part's raw data.
+	DedupHash    string
+	Phone        string
+	RawTimestamp string
+	ReceivedAt   time.Time // device timestamp, or fetch time if unknown
+	Body         string    // device-decoded text (GSM-7 guess)
+	PDU          string    // raw PDU as reported by the device
+	CreatedAt    time.Time // when the part was first stored
 }
 
 // ---------------------------------------------------------------------------
