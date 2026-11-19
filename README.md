@@ -5,6 +5,8 @@ Status: projektowanie. Zobacz:
 - [Specyfikacja](docs/SPEC.md)
 - [Plan realizacji](docs/PLAN.md)
 - [ADR 0001 – architektura](docs/adr/0001-architektura.md)
+- [ADR 0002 – gwarancje dostarczenia](docs/adr/0002-gwarancje-dostarczenia.md)
+- [ADR 0003 – biblioteki i układ pakietów](docs/adr/0003-biblioteki.md)
 
 Licencja: GNU GPL v3.0 – patrz [LICENSE](LICENSE).
 
