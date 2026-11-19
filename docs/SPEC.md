@@ -266,6 +266,16 @@ Urządzenia i kanały są przechowywane w bazie (zarządzane z UI/API), opcjonal
 | `TIKKER_RETENTION` | `2160h` | retencja treści |
 | `TIKKER_LOG_LEVEL` / `TIKKER_LOG_FORMAT` | `info` / `json` | `log/slog` |
 | `TIKKER_SQLITE_SYNCHRONOUS` | `NORMAL` | kompromis zużycie flash / trwałość |
+| `TIKKER_CONFIG` | – | ścieżka pliku YAML (flaga `--config` ma pierwszeństwo); domyślnie `$TIKKER_DATA_DIR/config.yaml`, opcjonalny |
+| `TIKKER_ALLOW_SHORT_NUMBERS` | `false` | dopuszcza numery krótkie i alfanumeryczne (§4.6) |
+| `TIKKER_LONG_MESSAGE_STRATEGY` | `reject` | `reject` / `split` / `truncate` dla długich wiadomości (§4.6) |
+| `TIKKER_RETRY_MAX_ATTEMPTS` | `5` | łączna liczba prób wysyłki, z pierwszą (§4.2) |
+| `TIKKER_RETRY_BASE` | `30s` | opóźnienie nominalne po pierwszej porażce (§4.2) |
+| `TIKKER_RETRY_FACTOR` | `4` | mnożnik wykładniczego backoffu (§4.2) |
+| `TIKKER_RETRY_MAX` | `30m` | limit opóźnienia nominalnego (§4.2) |
+| `TIKKER_RETRY_JITTER` | `0.2` | względny rozrzut opóźnienia, w [0, 1) (§4.2) |
+| `TIKKER_TLS_CERT_FILE` / `TIKKER_TLS_KEY_FILE` | – | certyfikat i klucz wbudowanego HTTPS (§7); ustawiane razem |
+| `TIKKER_ADMIN_PASSWORD` | – | hasło admina tworzonego przy pierwszym starcie (§6), min. 12 znaków |
 
 ---
 

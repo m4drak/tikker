@@ -5,39 +5,121 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
 
+	"github.com/m4drak/tikker/internal/config"
 	"github.com/m4drak/tikker/internal/version"
 )
 
-const usage = `usage: tikker <command>
+// Exit codes. A configuration error is reported with exitConfig so that
+// service managers can tell it apart from a runtime failure.
+const (
+	exitOK     = 0
+	exitConfig = 2
+)
+
+const usage = `usage: tikker [--config FILE] <command>
+       tikker [--config FILE] --check-config
 
 commands:
-  version   print build version information (also available as --version)
+  version         print build version information (also available as --version)
+
+options:
+  --config FILE   read the YAML configuration from FILE
+                  (default: TIKKER_CONFIG, then $TIKKER_DATA_DIR/config.yaml)
+  --check-config  validate the configuration, print the effective settings
+                  with secrets redacted, and exit
 `
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// run executes the command given in args and returns the process exit code.
+// run executes the command line in args and returns the process exit code.
 func run(args []string, stdout, stderr io.Writer) int {
-	if len(args) != 1 {
+	fs := flag.NewFlagSet("tikker", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	configPath := fs.String("config", "", "configuration file")
+	checkConfig := fs.Bool("check-config", false, "validate the configuration and exit")
+	showVersion := fs.Bool("version", false, "print build version information")
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printUsage(stdout)
+			return exitOK
+		}
+		_, _ = fmt.Fprintf(stderr, "tikker: %v\n\n", err)
 		printUsage(stderr)
-		return 2
+		return exitConfig
+	}
+	rest := fs.Args()
+
+	if *checkConfig {
+		if len(rest) != 0 {
+			printUsage(stderr)
+			return exitConfig
+		}
+		return runCheckConfig(*configPath, stdout, stderr)
 	}
 
-	switch args[0] {
-	case "version", "--version":
+	if *showVersion {
+		if len(rest) != 0 {
+			printUsage(stderr)
+			return exitConfig
+		}
 		_, _ = fmt.Fprintln(stdout, version.String())
-		return 0
-	default:
-		_, _ = fmt.Fprintf(stderr, "tikker: unknown command %q\n\n", args[0])
-		printUsage(stderr)
-		return 2
+		return exitOK
 	}
+
+	if len(rest) != 1 {
+		printUsage(stderr)
+		return exitConfig
+	}
+
+	switch rest[0] {
+	case "version":
+		_, _ = fmt.Fprintln(stdout, version.String())
+		return exitOK
+	default:
+		_, _ = fmt.Fprintf(stderr, "tikker: unknown command %q\n\n", rest[0])
+		printUsage(stderr)
+		return exitConfig
+	}
+}
+
+// runCheckConfig loads and validates the configuration. On success it prints
+// the effective settings; on failure it lists every problem and returns
+// exitConfig.
+func runCheckConfig(path string, stdout, stderr io.Writer) int {
+	cfg, err := config.Load(config.Options{Path: path})
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "tikker: invalid configuration:")
+		for _, line := range errorLines(err) {
+			_, _ = fmt.Fprintf(stderr, "  - %s\n", line)
+		}
+		return exitConfig
+	}
+
+	_, _ = fmt.Fprintln(stdout, "configuration OK, effective settings (secrets redacted):")
+	_, _ = io.WriteString(stdout, cfg.String())
+	return exitOK
+}
+
+// errorLines returns the messages of a (possibly nested) joined error, one
+// per problem.
+func errorLines(err error) []string {
+	if multi, ok := err.(interface{ Unwrap() []error }); ok {
+		var lines []string
+		for _, e := range multi.Unwrap() {
+			lines = append(lines, errorLines(e)...)
+		}
+		return lines
+	}
+	return []string{err.Error()}
 }
 
 // printUsage writes the usage text. Write errors on the console are ignored
