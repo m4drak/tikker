@@ -69,6 +69,7 @@ Format każdego zadania: **cel**, **wynik**, **kryteria akceptacji**, **zależno
   - lista urządzeń LTE z obsługą `container` (arch., RAM, nośnik);
   - procedura `device-mode`.
 - **Kryteria:** każdy punkt [WERYFIKACJA] ma odpowiedź „potwierdzone/obalone + dowód”. SPEC jest zaktualizowany.
+- **Stan (2026-11-19):** część agentowa gotowa. Pomiary na sprzęcie **odłożone** decyzją właściciela. Do tego czasu kod opiera się na researchu, a założenia są oznaczone `ASSUMPTION(T00)` i [WERYFIKACJA].
 - **Zależności:** brak. **Wymaga człowieka z urządzeniem** (agent przygotowuje skrypty i checklistę, człowiek uruchamia).
 - **Model:** Claude Sonnet. **Alternatywa:** Gemini Pro (research dokumentacji).
 
@@ -139,7 +140,7 @@ Format każdego zadania: **cel**, **wynik**, **kryteria akceptacji**, **zależno
   - testy kontraktowe przeciw fake RouterOS (T13);
   - test przypięcia odcisku certyfikatu;
   - po T00: testy przeciw nagranym odpowiedziom z realnego sprzętu (golden files).
-- **Zależności:** T04, T13. Finalizacja po T00. **Model:** Claude Opus. **Alternatywa:** ChatGPT (flagowy).
+- **Zależności:** T04, T13. Finalizacja (golden files z realnego sprzętu) po pomiarach T00, które są odłożone. **Model:** Claude Opus. **Alternatywa:** ChatGPT (flagowy).
 
 #### T13 – Fake RouterOS
 - **Wynik:**

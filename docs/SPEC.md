@@ -185,7 +185,7 @@ pojedynczy worker i serializację wysyłek. Globalnie obowiązuje limit żądań
   (dotyczy `routeros-rest` wg T00). `max_segments` to limit, powyżej którego zwracamy 422: domyślnie 3, ale nie więcej
   niż pozwala konektor (dla `routeros-rest` 1, czyli 160 znaków GSM-7) [WERYFIKACJA].
 - Gdy konektor nie wspiera wysyłki wieloczęściowej, strategia długich wiadomości jest konfigurowalna:
-  `reject` (domyślnie), `split` (osobne SMS z prefiksem `(1/3)`) lub `truncate`.
+  `reject` (domyślnie), `split` (osobne wiadomości z prefiksem `(1/3)`, patrz §12 p. 3) lub `truncate`.
 
 ---
 
@@ -337,9 +337,11 @@ Rozstrzygnięte (2026-11-19):
 1. Licencja: **GPL-3.0-or-later**.
 2. Gwarancja dostarczenia: **at-least-once**. Przy awarii w trakcie wysyłki lepszy jest duplikat niż utrata
    wiadomości. Wybór utrwala ADR 0002.
+3. Strategia `split` przy konektorze bez sklejania (RouterOS): **osobne wiadomości tworzone przy zapisie**.
+   API zapisuje N niezależnych wiadomości (każda z prefiksem `(i/N)`, wspólnym `client_ref` i tym samym rekordem
+   idempotencji) i zwraca je wszystkie. Każda część ma własny cykl życia i ponowienia, więc awaria w połowie
+   nie powoduje ponownej wysyłki już wysłanych części.
 
 Otwarte:
-3. Domyślny limit wysyłki per kanał, do ustalenia po T00.
-4. Strategia `split` przy konektorze bez sklejania (RouterOS): (a) API tworzy osobne wiadomości przy zapisie
-   (rekomendacja T04: prostsze przy at-least-once) czy (b) dispatcher wysyła części jednej wiadomości po kolei
-   (awaria w połowie oznacza ponowną wysyłkę wysłanych części)?
+4. Domyślny limit wysyłki per kanał, do ustalenia po pomiarach T00 (odłożonych).
+
