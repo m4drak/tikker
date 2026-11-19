@@ -330,3 +330,6 @@ Rozstrzygnięte (2026-11-19):
 
 Otwarte:
 3. Domyślny limit wysyłki per kanał, do ustalenia po T00.
+4. Strategia `split` przy konektorze bez sklejania (RouterOS): (a) API tworzy osobne wiadomości przy zapisie
+   (rekomendacja T04: prostsze przy at-least-once) czy (b) dispatcher wysyła części jednej wiadomości po kolei
+   (awaria w połowie oznacza ponowną wysyłkę wysłanych części)?
