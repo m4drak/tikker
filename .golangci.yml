@@ -17,6 +17,24 @@ linters:
     - gosec
     - revive
     - misspell
+  settings:
+    errcheck:
+      # Writes to stdout/stderr in CLI code are best-effort.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    misspell:
+      locale: US
+      # Polish words in user-facing text and test data.
+      ignore-rules:
+        - adres
+  exclusions:
+    rules:
+      # Test fixtures use fake credentials and temp file paths.
+      - path: _test\.go
+        linters:
+          - gosec
 
 formatters:
   enable:

@@ -130,7 +130,7 @@ func (c *Client) Do(ctx context.Context, label, method, path string, body any) *
 	if err != nil {
 		res.Err = err
 	} else {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		res.Status = resp.StatusCode
 		res.Body, err = io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		if err != nil {
@@ -273,5 +273,5 @@ func writeJSON(path string, v any) error {
 	if err := enc.Encode(v); err != nil {
 		return err
 	}
-	return os.WriteFile(path, buf.Bytes(), 0o640)
+	return os.WriteFile(path, buf.Bytes(), 0o600)
 }
