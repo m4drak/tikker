@@ -11,7 +11,7 @@ Uwagi ogólne:
 
 ## 0. Przygotowanie
 
-1. Zbuduj narzędzie: `go build -o probe ./scripts/probe` (Go ≥ 1.24, nic więcej nie trzeba).
+1. Zbuduj narzędzie: `go build -o probe ./scripts/probe` (Go ≥ 1.25, nic więcej nie trzeba).
 2. Router: zapisz wersję i model.
    ```
    /system resource print

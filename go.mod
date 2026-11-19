@@ -1,12 +1,12 @@
 module github.com/m4drak/tikker
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/nyaruka/phonenumbers v1.8.1
 	github.com/oklog/ulid/v2 v2.1.2
 	go.yaml.in/yaml/v3 v3.0.6
-	golang.org/x/text v0.28.0
+	golang.org/x/text v0.39.0
 	modernc.org/sqlite v1.40.1
 )
 
