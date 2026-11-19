@@ -14,8 +14,15 @@ LDFLAGS     := -s -w \
 
 ARGS        ?= version
 
+# Tool versions are pinned so that local runs and CI use the same binaries.
+# go-licenses is run through `go run`, so nothing has to be installed globally.
+GO_LICENSES   ?= github.com/google/go-licenses/v2@v2.0.1
+GOVULNCHECK   ?= golang.org/x/vuln/cmd/govulncheck@v1.9.0
+# Allowlist from SPEC §11 (GPLv3-compatible licenses).
+LICENSES_ALLOWED := MIT,BSD-2-Clause,BSD-3-Clause,ISC,0BSD,Apache-2.0,MPL-2.0,LGPL-2.1,LGPL-3.0,GPL-3.0
+
 .DEFAULT_GOAL := build
-.PHONY: build test lint run clean
+.PHONY: build test lint run clean licenses vuln ci
 
 build: ## Build a static binary (CGO disabled) into bin/
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/tikker
@@ -31,3 +38,11 @@ run: build ## Build and run the binary; pass arguments with ARGS="..."
 
 clean: ## Remove build artifacts
 	rm -rf bin dist coverage.out
+
+licenses: ## Check dependency licenses against the SPEC §11 allowlist (go-licenses)
+	$(GO) run $(GO_LICENSES) check ./... --allowed_licenses=$(LICENSES_ALLOWED)
+
+vuln: ## Scan for known vulnerabilities (govulncheck)
+	$(GO) run $(GOVULNCHECK) ./...
+
+ci: lint test build licenses vuln ## Run the CI checks locally (run `reuse lint` separately)

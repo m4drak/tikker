@@ -70,3 +70,5 @@ Zmiana łamiąca zgodność: `!` po typie lub stopka `BREAKING CHANGE:`.
 - Go 1.24 lub nowszy, `make`, [golangci-lint](https://golangci-lint.run/) (v2).
 - `reuse` (opcjonalnie lokalnie, obowiązkowo w CI): `pip install reuse`.
 - Sprzęt MikroTik nie jest potrzebny do pracy nad kodem: do czasu zadania T00 używamy fake RouterOS (T13).
+- `make ci` uruchamia lokalnie te same kontrole co CI (lint, test, build, licenses, vuln); `reuse lint` uruchamiasz osobno.
+  Workflow: `.github/workflows/ci.yml`. Narzędzia `go-licenses` i `govulncheck` są uruchamiane przez `go run` z przypiętą wersją.
