@@ -1,6 +1,6 @@
 # ADR 0002: Gwarancje dostarczenia – at-least-once, dzierżawy, idempotencja, deduplikacja
 
-- Status: proponowana (wymaga zatwierdzenia przez człowieka, PLAN T04)
+- Status: zaakceptowana (właściciel, 2026-11-19)
 - Data: 2026-11-19
 - Powiązane: SPEC §4.2–§4.4, ADR 0001, kod: `internal/domain` (maszyna stanów, `RetryPolicy`,
   klasyfikacja błędów), `internal/store` (kontrakt repozytoriów), `internal/connector`

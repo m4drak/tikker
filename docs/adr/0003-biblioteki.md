@@ -1,6 +1,6 @@
 # ADR 0003: Wybór bibliotek i układ pakietów
 
-- Status: proponowana (wymaga zatwierdzenia przez człowieka, PLAN T04)
+- Status: zaakceptowana (właściciel, 2026-11-19)
 - Data: 2026-11-19
 - Powiązane: SPEC §2.2, §6, §7, §9, §11; ADR 0001; ADR 0002
 
