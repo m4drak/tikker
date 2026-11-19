@@ -14,6 +14,8 @@ Najpierw przeczytaj dokumenty źródłowe:
 - [docs/SPEC.md](docs/SPEC.md): specyfikacja MVP (architektura, model danych, API, bezpieczeństwo, struktura repo w §9);
 - [docs/PLAN.md](docs/PLAN.md): plan realizacji, zadania (T00–T52), zależności i reguły pracy (§1.2);
 - [docs/adr/0001-architektura.md](docs/adr/0001-architektura.md): decyzja o architekturze;
+- [docs/adr/0002-gwarancje-dostarczenia.md](docs/adr/0002-gwarancje-dostarczenia.md): at-least-once, dzierżawy, idempotencja, deduplikacja;
+- [docs/adr/0003-biblioteki.md](docs/adr/0003-biblioteki.md): biblioteki i układ pakietów (`domain`, `store`, `connector`, `clock`);
 - [CONTRIBUTING.md](CONTRIBUTING.md): DCO, Conventional Commits, nagłówki SPDX, dozwolone licencje.
 
 Oznaczenie **[WERYFIKACJA]** w SPEC oznacza założenie o RouterOS, którego jeszcze nie potwierdzono

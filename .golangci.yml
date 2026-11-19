@@ -17,6 +17,11 @@ linters:
     - gosec
     - revive
     - misspell
+  settings:
+    misspell:
+      # "routeros" is a package name (internal/connector/routeros), not a typo.
+      ignore-rules:
+        - routeros
 
 formatters:
   enable:
