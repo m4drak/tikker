@@ -42,7 +42,10 @@ func TestSealOpenRoundTrip(t *testing.T) {
 			if sealed[0] != VersionV1 {
 				t.Fatalf("version = %d", sealed[0])
 			}
-			if tt.pt != "" && bytes.Contains(sealed, []byte(tt.pt)) {
+			// Only check plaintexts long enough that a random match in the
+			// nonce/ciphertext is negligible (a 1-byte "x" appears by chance
+			// in ~12% of 33 random bytes).
+			if len(tt.pt) >= 8 && bytes.Contains(sealed, []byte(tt.pt)) {
 				t.Fatal("plaintext visible in ciphertext")
 			}
 			got, err := ring.Open("p", "rec", sealed)
