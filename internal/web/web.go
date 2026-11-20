@@ -210,7 +210,7 @@ func (s *Server) HandleFunc(pattern string, role domain.Role, h http.HandlerFunc
 // Handler returns the panel: every response carries the security headers and
 // state-changing requests pass the CSRF check.
 func (s *Server) Handler() http.Handler {
-	return s.securityHeaders(s.auth.CSRF(s.mux))
+	return s.securityHeaders(limitPanelBody(s.auth.CSRF(s.mux)))
 }
 
 func (s *Server) buildMux() *http.ServeMux {
@@ -239,4 +239,15 @@ func (s *Server) protect(role domain.Role, h http.Handler) http.Handler {
 		}
 		h.ServeHTTP(w, r)
 	}))
+}
+
+// limitPanelBody bounds every request body before the CSRF middleware parses
+// the form, so oversized POSTs cannot bypass maxFormBytes.
+func limitPanelBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
