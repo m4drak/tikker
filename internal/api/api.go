@@ -38,23 +38,11 @@
 //
 // # Choosing the channel capabilities for a message (POST /messages)
 //
-// The text of an outbound message is planned once, at write time, with
-// sms.Plan, because the store keeps one body per message (SPEC §4.6, §12.3).
-// The channel that finally sends the message is chosen later by the queue, so
-// the plan must be valid for every channel that may be chosen:
-//
-//   - channel_id given: that channel (unknown: unknown_channel, disabled or
-//     on a disabled device: channel_disabled);
-//   - otherwise the enabled channels (on enabled devices) that carry all the
-//     given tags, or all enabled channels without tags; none:
-//     no_matching_channel. Channels that are down or degraded still count:
-//     the message waits in the queue.
-//
-// Over the candidate channels the strictest values are used: the encodings
-// every connector supports, the smallest connector MaxSegments, concatenation
-// only if all connectors support it, the smallest channel max_segments and
-// transliteration if any channel has it enabled (so the one stored body is
-// sendable everywhere). With a single candidate these are its own values.
+// Validation, channel selection and planning of the text are done by package
+// sending, which the web panel uses too: the text is planned once, at write
+// time, with sms.Plan, and the plan must be valid for every channel that may
+// finally send the message (see the package documentation of sending for the
+// routing rules and the strictest-capabilities rule).
 package api
 
 import (
@@ -73,6 +61,7 @@ import (
 	"github.com/m4drak/tikker/internal/connector"
 	"github.com/m4drak/tikker/internal/domain"
 	"github.com/m4drak/tikker/internal/secrets"
+	"github.com/m4drak/tikker/internal/sending"
 	"github.com/m4drak/tikker/internal/sms"
 	"github.com/m4drak/tikker/internal/store"
 )
@@ -153,6 +142,11 @@ type Deps struct {
 	Credentials  Credentials
 	Connectors   ConnectorFactory
 
+	// Sending is the outbound message service; when nil the API builds its
+	// own from the other dependencies and Options. The application passes
+	// the one it shares with the web panel.
+	Sending *sending.Service
+
 	Clock  clock.Clock        // default: system clock
 	IDs    domain.IDGenerator // default: ULIDs from Clock
 	Logger *slog.Logger       // default: slog.Default()
@@ -191,9 +185,8 @@ type Options struct {
 type API struct {
 	st    store.Store
 	auth  Auth
-	disp  Notifier
+	send  *sending.Service
 	reld  ChannelReloader
-	caps  CapabilityProvider
 	hv    HealthView
 	creds Credentials
 	conns ConnectorFactory
@@ -235,7 +228,7 @@ func newAPI(deps Deps) (*API, error) {
 		return nil, fmt.Errorf("api: missing dependencies: %s", strings.Join(missing, ", "))
 	}
 	a := &API{
-		st: deps.Store, auth: deps.Auth, disp: deps.Dispatcher, reld: deps.Reloader, caps: deps.Capabilities,
+		st: deps.Store, auth: deps.Auth, reld: deps.Reloader,
 		hv: deps.Health, creds: deps.Credentials, conns: deps.Connectors,
 		clk: deps.Clock, ids: deps.IDs, log: deps.Logger, opts: deps.Options,
 		inflight: newInflight(),
@@ -270,6 +263,18 @@ func newAPI(deps Deps) (*API, error) {
 		return nil, fmt.Errorf("api: AllowedHTTPHosts: %w", err)
 	}
 	a.allowHTTP = httpAllow
+	if a.send = deps.Sending; a.send == nil {
+		a.send, err = sending.New(sending.Deps{
+			Store: a.st, Capabilities: deps.Capabilities, Notifier: deps.Dispatcher, Clock: a.clk, IDs: a.ids,
+			Options: sending.Options{
+				DefaultRegion: a.opts.DefaultRegion, AllowShortNumbers: a.opts.AllowShortNumbers,
+				LongMessageStrategy: a.opts.LongMessageStrategy,
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("api: %w", err)
+		}
+	}
 	a.limiter = newLimiter(a.opts.RateLimit, a.clk)
 	a.mux = http.NewServeMux()
 	a.routes()

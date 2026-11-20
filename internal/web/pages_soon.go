@@ -6,9 +6,9 @@ package web
 import "net/http"
 
 // registerPages registers the panel pages behind a session. The pages of
-// T31 (dashboard, send, messages) and T32 (devices, tokens, users, audit)
-// are placeholders until those tasks replace them: call s.Handle with the
-// same pattern (see the package documentation).
+// T32 (devices, tokens, users, audit) are placeholders until that task
+// replaces them: call s.Handle with the same pattern (see the package
+// documentation). The pages of T31 replace their placeholders below.
 func (s *Server) registerPages() {
 	for _, it := range navItems {
 		pattern := "GET " + it.Path
@@ -17,6 +17,9 @@ func (s *Server) registerPages() {
 		}
 		s.Handle(pattern, it.Role, s.soon(it.LabelKey))
 	}
+	s.registerDashboard()
+	s.registerSend()
+	s.registerMessages()
 }
 
 // soon renders the "coming soon" placeholder with the page's title.

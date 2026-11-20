@@ -114,3 +114,168 @@ footer.site button.link[aria-current="true"] {
   font-weight: 700;
   text-decoration: none;
 }
+
+/* Dashboard, messages, send form (T31). */
+
+.muted {
+  color: var(--pico-muted-color);
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+  gap: var(--pico-grid-column-gap);
+}
+
+.stats article {
+  margin: 0;
+  padding: var(--pico-spacing);
+  text-align: center;
+}
+
+.stats article strong {
+  display: block;
+  font-size: 2rem;
+  line-height: 1.2;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border: var(--pico-border-width) solid var(--pico-muted-border-color);
+  border-radius: 1rem;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.badge.state-ok,
+.badge.status-sent,
+.badge.status-received {
+  border-color: var(--pico-ins-color);
+  color: var(--pico-ins-color);
+}
+
+.badge.state-degraded,
+.badge.status-queued,
+.badge.status-sending,
+.badge.status-duplicate {
+  border-color: var(--pico-mark-background-color);
+  background: var(--pico-mark-background-color);
+  color: var(--pico-mark-color);
+}
+
+.badge.state-down,
+.badge.status-failed {
+  border-color: var(--pico-del-color);
+  color: var(--pico-del-color);
+}
+
+.badge.state-disabled,
+.badge.status-cancelled {
+  color: var(--pico-muted-color);
+}
+
+.tag {
+  display: inline-block;
+  padding: 0 0.4rem;
+  border-radius: var(--pico-border-radius);
+  background: var(--pico-code-background-color);
+  font-size: 0.8rem;
+}
+
+.notice.ok {
+  padding: var(--pico-spacing);
+  border: var(--pico-border-width) solid var(--pico-ins-color);
+  border-radius: var(--pico-border-radius);
+  color: var(--pico-ins-color);
+}
+
+.filters .actions,
+article footer.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.5rem;
+}
+
+article footer.actions form {
+  margin: 0;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.body-cell {
+  min-width: 9rem;
+  max-width: 24rem;
+  overflow-wrap: break-word;
+}
+
+table.compact {
+  font-size: 0.875rem;
+}
+
+table.compact th,
+table.compact td {
+  padding: 0.5rem 0.6rem;
+}
+
+.pager {
+  display: flex;
+  justify-content: space-between;
+  margin-top: var(--pico-spacing);
+}
+
+.props {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.35rem 1.5rem;
+}
+
+.props dt {
+  color: var(--pico-muted-color);
+}
+
+.props dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+pre.body-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.preview {
+  margin-bottom: var(--pico-spacing);
+  padding: 0.75rem var(--pico-spacing);
+  border: var(--pico-border-width) solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  font-size: 0.9rem;
+}
+
+.preview-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.preview-stats li {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.preview-note {
+  margin: 0.5rem 0 0;
+}
+
+.preview-note.warn {
+  color: var(--pico-mark-color);
+  background: var(--pico-mark-background-color);
+}

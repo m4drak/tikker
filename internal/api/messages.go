@@ -4,41 +4,28 @@
 package api
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
-	"strings"
-	"time"
-	"unicode"
 
 	"github.com/m4drak/tikker/internal/auth"
-	"github.com/m4drak/tikker/internal/connector"
 	"github.com/m4drak/tikker/internal/domain"
-	"github.com/m4drak/tikker/internal/sms"
-	"github.com/m4drak/tikker/internal/sms/gsm"
-	"github.com/m4drak/tikker/internal/sms/phone"
+	"github.com/m4drak/tikker/internal/sending"
 	"github.com/m4drak/tikker/internal/store"
 )
 
 // Limits of schema SendMessageRequest and Tag.
 const (
-	maxToLen       = 32
-	maxBodyChars   = 1600
-	maxClientRef   = 128
-	maxTags        = 16
-	maxTagLen      = 32
-	maxIDLen       = 64
+	maxToLen       = sending.MaxToLen
+	maxIDLen       = sending.MaxIDLen
 	replayedHeader = "Idempotent-Replayed"
 	opSendMessage  = "POST /messages"
 	opSendBatch    = "POST /messages/batch"
 )
 
-var tagPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
-
-// sendRequest is schema SendMessageRequest. Fields are pointers so that a
-// missing member can be told from an empty one.
+// sendRequest is schema SendMessageRequest (the JSON form of
+// sending.Request). Fields are pointers so that a missing member can be told
+// from an empty one.
 type sendRequest struct {
 	To        *string  `json:"to"`
 	Body      *string  `json:"body"`
@@ -53,279 +40,26 @@ type batchRequest struct {
 	Messages []sendRequest `json:"messages"`
 }
 
-// routingView is a snapshot of channels and devices read once per request.
-type routingView struct {
-	channels []domain.Channel
-	devices  map[domain.ID]domain.Device
-}
-
-func (a *API) loadRouting(ctx context.Context) (*routingView, error) {
-	chs, err := a.st.Channels().List(ctx, store.ChannelFilter{})
-	if err != nil {
-		return nil, fmt.Errorf("list channels: %w", err)
-	}
-	devs, err := a.st.Devices().List(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list devices: %w", err)
-	}
-	rv := &routingView{channels: chs, devices: make(map[domain.ID]domain.Device, len(devs))}
-	for _, d := range devs {
-		rv.devices[d.ID] = d
-	}
-	return rv, nil
-}
-
-// usable reports whether c and its device are enabled.
-func (rv *routingView) usable(c domain.Channel) bool {
-	d, ok := rv.devices[c.DeviceID]
-	return c.Enabled && ok && d.Enabled
-}
-
-func (rv *routingView) channel(id domain.ID) (domain.Channel, bool) {
-	for _, c := range rv.channels {
-		if c.ID == id {
-			return c, true
-		}
-	}
-	return domain.Channel{}, false
-}
-
-// target is the outcome of channel selection for one message.
-type target struct {
-	channels []domain.Channel
-	caps     connector.Capabilities
-	opts     sms.Options
-}
-
-// selectChannels applies the routing rules of the package documentation:
-// channel_id, else tags, else every enabled channel. On failure it returns
-// the validation code and detail.
-func (a *API) selectChannels(rv *routingView, channelID domain.ID, tags []string) (target, string, string) {
-	var cands []domain.Channel
-	switch {
-	case channelID != "":
-		c, ok := rv.channel(channelID)
-		if !ok {
-			return target{}, codeUnknownChannel, "Channel does not exist."
-		}
-		if !rv.usable(c) {
-			return target{}, codeChannelDisabled, "Channel (or its device) is disabled."
-		}
-		cands = []domain.Channel{c}
-	default:
-		for _, c := range rv.channels {
-			if rv.usable(c) && c.HasTags(tags) {
-				cands = append(cands, c)
-			}
-		}
-		if len(cands) == 0 {
-			if len(tags) > 0 {
-				return target{}, codeNoMatchingChannel, "No enabled channel carries all the given tags."
-			}
-			return target{}, codeNoMatchingChannel, "There is no enabled channel."
-		}
-	}
-
-	// Keep the channels with a working connector and combine their
-	// capabilities (strictest values).
-	var t target
-	for _, c := range cands {
-		caps, ok := a.caps.ChannelCapabilities(c.ID)
-		if !ok {
-			continue
-		}
-		if len(t.channels) == 0 {
-			t.caps = connector.Capabilities{
-				Encodings: append([]domain.Encoding(nil), caps.Encodings...), MaxSegments: caps.MaxSegments,
-				Concatenation: caps.Concatenation,
-			}
-			t.opts = sms.Options{MaxSegments: c.MaxSegments, Transliterate: c.Transliterate}
-		} else {
-			t.caps = strictest(t.caps, caps)
-			t.opts.MaxSegments = min(t.opts.MaxSegments, c.MaxSegments)
-			t.opts.Transliterate = t.opts.Transliterate || c.Transliterate
-		}
-		t.channels = append(t.channels, c)
-	}
-	if len(t.channels) == 0 {
-		if channelID != "" {
-			return target{}, codeChannelDisabled, "Channel has no working connector."
-		}
-		return target{}, codeNoMatchingChannel, "No matching channel has a working connector."
-	}
-	t.opts.Strategy = a.opts.LongMessageStrategy
-	return t, "", ""
-}
-
-// strictest returns capabilities that every one of a and b can satisfy.
-func strictest(a, b connector.Capabilities) connector.Capabilities {
-	out := connector.Capabilities{
-		MaxSegments:   min(a.MaxSegments, b.MaxSegments),
-		Concatenation: a.Concatenation && b.Concatenation,
-	}
-	for _, e := range a.Encodings {
-		if b.SupportsEncoding(e) {
-			out.Encodings = append(out.Encodings, e)
-		}
-	}
-	return out
-}
-
 // validateTags checks Tags (schema Tags and Tag).
 func validateTags(v *validation, field string, tags []string) {
-	if len(tags) > maxTags {
-		v.add(field, codeOutOfRange, "At most %d tags are allowed.", maxTags)
-	}
-	seen := map[string]bool{}
-	for i, t := range tags {
-		f := fmt.Sprintf("%s/%d", field, i)
-		switch {
-		case len(t) == 0 || len(t) > maxTagLen:
-			v.add(f, codeOutOfRange, "A tag has 1 to %d characters.", maxTagLen)
-		case !tagPattern.MatchString(t):
-			v.add(f, codeInvalidFormat, "A tag consists of lower-case letters, digits, '_', '.' and '-' and starts with a letter or digit.")
-		case seen[t]:
-			v.add(f, codeInvalidFormat, "Tags must be unique.")
-		}
-		seen[t] = true
+	for _, e := range sending.ValidateTags(field, tags) {
+		v.add(e.Field, e.Code, "%s", e.Detail)
 	}
 }
 
 // planOne validates one request, selects channels, plans the text and returns
-// the messages (one, or several parts) to enqueue. pointer is the JSON
-// pointer of the request inside the body ("" for POST /messages,
+// the messages (one, or several parts) to enqueue (package sending). pointer
+// is the JSON pointer of the request inside the body ("" for POST /messages,
 // "/messages/3" in a batch). Problems are added to v; the result is nil then.
-func (a *API) planOne(rv *routingView, req sendRequest, pointer string, actor domain.Actor, v *validation) ([]domain.Message, error) {
-	before := len(v.errs)
-	f := func(name string) string { return pointer + "/" + name }
-
-	var to phone.Number
-	switch {
-	case req.To == nil || *req.To == "":
-		v.add(f("to"), codeRequired, "A recipient number is required.")
-	case runeLen(*req.To) > maxToLen:
-		v.add(f("to"), codeOutOfRange, "At most %d characters.", maxToLen)
-	default:
-		n, err := phone.Normalize(*req.To, phone.Options{DefaultRegion: a.opts.DefaultRegion, AllowShort: a.opts.AllowShortNumbers})
-		switch {
-		case errors.Is(err, phone.ErrInvalidNumber):
-			v.add(f("to"), codeInvalidPhone, "Not a valid phone number for region %s.", strings.ToUpper(a.opts.DefaultRegion))
-		case err != nil:
-			return nil, fmt.Errorf("normalize number: %w", err) // misconfigured region
-		default:
-			to = n
-		}
-	}
-
-	switch {
-	case req.Body == nil || *req.Body == "":
-		v.add(f("body"), codeRequired, "A message body is required.")
-	case runeLen(*req.Body) > maxBodyChars:
-		v.add(f("body"), codeOutOfRange, "At most %d characters.", maxBodyChars)
-	}
-
-	var channelID domain.ID
-	if req.ChannelID != nil {
-		switch {
-		case *req.ChannelID == "" || len(*req.ChannelID) > maxIDLen:
-			v.add(f("channel_id"), codeInvalidFormat, "A channel ID has 1 to %d characters.", maxIDLen)
-		default:
-			channelID = domain.ID(*req.ChannelID)
-		}
-	}
-	validateTags(v, f("tags"), req.Tags)
-
-	if req.ClientRef != nil && runeLen(*req.ClientRef) > maxClientRef {
-		v.add(f("client_ref"), codeOutOfRange, "At most %d characters.", maxClientRef)
-	}
-	var expires time.Time
-	hasExpiry := false
-	if req.ExpiresAt != nil {
-		t, ok := parseTimestamp(*req.ExpiresAt)
-		switch {
-		case !ok:
-			v.add(f("expires_at"), codeInvalidFormat, "Must be an RFC 3339 timestamp.")
-		case !t.After(a.clk.Now()):
-			v.add(f("expires_at"), codeExpiresInPast, "expires_at must be in the future.")
-		default:
-			expires, hasExpiry = t, true
-		}
-	}
-	if len(v.errs) > before {
-		return nil, nil
-	}
-
-	t, code, detail := a.selectChannels(rv, channelID, req.Tags)
-	if code != "" {
-		field := pointer
-		switch {
-		case channelID != "":
-			field = f("channel_id")
-		case len(req.Tags) > 0:
-			field = f("tags")
-		}
-		v.add(field, code, "%s", detail)
-		return nil, nil
-	}
-	res, err := sms.Plan(*req.Body, t.caps, t.opts)
+func (a *API) planOne(rt *sending.Routing, req sendRequest, pointer string, actor domain.Actor, v *validation) ([]domain.Message, error) {
+	msgs, errs, err := a.send.Plan(rt, sending.Request(req), pointer, actor)
 	if err != nil {
-		code := sms.ErrorCode(err)
-		switch {
-		case code == "":
-			return nil, fmt.Errorf("plan message: %w", err)
-		case errors.Is(err, sms.ErrUnsupportedEncoding):
-			v.add(f("body"), code, "%s", unsupportedDetail(*req.Body))
-		default:
-			v.add(f("body"), code, "%s", planDetail(err))
-		}
-		return nil, nil
+		return nil, err //nolint:wrapcheck // already has context
 	}
-
-	now := a.clk.Now()
-	msgs := make([]domain.Message, len(res.Parts))
-	for i, part := range res.Parts {
-		m := domain.Message{
-			ID: a.ids.NewID(), Direction: domain.DirectionOut,
-			Route: domain.Route{ChannelID: channelID, Tags: append([]string(nil), req.Tags...)},
-			Peer:  to.Value, Body: part.Text, Encoding: res.Encoding, Segments: part.Segments,
-			Status: domain.StatusQueued, NextAttemptAt: now, CreatedBy: actor, CreatedAt: now,
-		}
-		if req.ClientRef != nil {
-			m.ClientRef = *req.ClientRef
-		}
-		if hasExpiry {
-			m.ExpiresAt = expires
-		}
-		msgs[i] = m
+	for _, e := range errs {
+		v.add(e.Field, e.Code, "%s", e.Detail)
 	}
 	return msgs, nil
-}
-
-// unsupportedDetail explains code unsupported_characters: the text needs an
-// encoding (UCS-2) that the channels which may send it cannot use, and
-// transliteration is off for them.
-func unsupportedDetail(body string) string {
-	for _, c := range body {
-		if !gsm.InGSM(c) {
-			return fmt.Sprintf("Character %q is outside the GSM-7 alphabet, and the channel sends GSM-7 only; "+
-				"enable transliterate on the channel or remove such characters.", c)
-		}
-	}
-	return "The channel cannot send this text in any encoding it supports."
-}
-
-// planDetail turns a planner error into a sentence for the client.
-func planDetail(err error) string {
-	msg := strings.TrimPrefix(err.Error(), "sms: ")
-	r := []rune(msg)
-	if len(r) > 0 {
-		r[0] = unicode.ToUpper(r[0])
-	}
-	msg = string(r)
-	if !strings.HasSuffix(msg, ".") {
-		msg += "."
-	}
-	return msg
 }
 
 // sendMessage implements POST /messages.
@@ -409,7 +143,7 @@ func (a *API) enqueue(w http.ResponseWriter, r *http.Request, p auth.Principal, 
 		}
 	}
 
-	rv, err := a.loadRouting(ctx)
+	rt, err := a.send.LoadRouting(ctx)
 	if err != nil {
 		return err
 	}
@@ -423,7 +157,7 @@ func (a *API) enqueue(w http.ResponseWriter, r *http.Request, p auth.Principal, 
 			pointer = fmt.Sprintf("/messages/%d", i)
 		}
 		before := len(v.errs)
-		parts, err := a.planOne(rv, req, pointer, actor, &v)
+		parts, err := a.planOne(rt, req, pointer, actor, &v)
 		if err != nil {
 			return err
 		}
@@ -443,12 +177,9 @@ func (a *API) enqueue(w http.ResponseWriter, r *http.Request, p auth.Principal, 
 	if in.batch {
 		idem.Groups = groups
 	}
-	res, err := a.st.Messages().Enqueue(ctx, msgs, idem)
+	res, err := a.send.Enqueue(ctx, msgs, idem)
 	if err != nil {
 		return enqueueError(err)
-	}
-	if !res.Replayed {
-		a.disp.Notify()
 	}
 	return a.writeEnqueued(w, res, in.batch)
 }
@@ -538,10 +269,7 @@ func (a *API) listMessages(w http.ResponseWriter, r *http.Request, _ auth.Princi
 		}
 		// Same normalisation as "to"; inbound peers can be alphanumeric
 		// senders that never normalise, so fall back to the raw text.
-		f.Peer = peer
-		if n, err := phone.Normalize(peer, phone.Options{DefaultRegion: a.opts.DefaultRegion, AllowShort: a.opts.AllowShortNumbers}); err == nil {
-			f.Peer = n.Value
-		}
+		f.Peer = a.send.NormalizePeer(peer)
 	}
 	f.ChannelID = q.id("channel_id")
 	f.Since, f.Until = q.timestamp("since"), q.timestamp("until")
@@ -599,15 +327,7 @@ func (a *API) cancelMessage(w http.ResponseWriter, r *http.Request, p auth.Princ
 	if err != nil {
 		return err
 	}
-	ctx := r.Context()
-	var m domain.Message
-	err = a.st.WithTx(ctx, func(tx store.Repos) error {
-		var err error
-		if m, err = tx.Messages().Cancel(ctx, id); err != nil {
-			return err
-		}
-		return a.audit(ctx, tx, actorOf(p), domain.AuditMessageCancel, "message:"+string(id), nil)
-	})
+	m, err := a.send.Cancel(r.Context(), actorOf(p), id)
 	switch {
 	case errors.Is(err, domain.ErrNotFound):
 		return notFound("Message")
