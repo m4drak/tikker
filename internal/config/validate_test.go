@@ -68,6 +68,20 @@ func TestValidate(t *testing.T) {
 		{name: "tls file missing", mutate: func(c *Config) {
 			c.TLS = TLSConfig{CertFile: "/nonexistent/cert.pem", KeyFile: "/nonexistent/key.pem"}
 		}, wantErr: []string{"tls.cert_file (TIKKER_TLS_CERT_FILE)", "not accessible"}},
+		{name: "valid trusted proxies", mutate: func(c *Config) { c.TrustedProxies = []string{"10.0.0.1", "192.168.88.0/24", "fd00::/8"} }},
+		{name: "trusted proxy not an address", mutate: func(c *Config) { c.TrustedProxies = []string{"proxy.local"} }, wantErr: []string{"trusted_proxies (TIKKER_TRUSTED_PROXIES)"}},
+		{name: "trusted proxy bad prefix", mutate: func(c *Config) { c.TrustedProxies = []string{"10.0.0.0/33"} }, wantErr: []string{"trusted_proxies"}},
+		{name: "valid trusted origins", mutate: func(c *Config) { c.TrustedOrigins = []string{"https://sms.example.net", "http://192.168.88.1:8080"} }},
+		{name: "trusted origin with path", mutate: func(c *Config) { c.TrustedOrigins = []string{"https://sms.example.net/ui"} }, wantErr: []string{"trusted_origins (TIKKER_TRUSTED_ORIGINS)"}},
+		{name: "trusted origin without scheme", mutate: func(c *Config) { c.TrustedOrigins = []string{"sms.example.net"} }, wantErr: []string{"trusted_origins"}},
+		{name: "session idle too short", mutate: func(c *Config) { c.SessionIdleTimeout = time.Second }, wantErr: []string{"session_idle_timeout (TIKKER_SESSION_IDLE_TIMEOUT)"}},
+		{name: "session absolute below idle", mutate: func(c *Config) { c.SessionAbsoluteTimeout = 30 * time.Minute }, wantErr: []string{"session_absolute_timeout (TIKKER_SESSION_ABSOLUTE_TIMEOUT)"}},
+		{name: "valid allowed http hosts", mutate: func(c *Config) { c.AllowedHTTPHosts = []string{"172.17.0.1", "172.17.0.0/24", "router.lan", "::1"} }},
+		{name: "allowed http host bad prefix", mutate: func(c *Config) { c.AllowedHTTPHosts = []string{"172.17.0.0/99"} }, wantErr: []string{"allowed_http_hosts (TIKKER_ALLOWED_HTTP_HOSTS)"}},
+		{name: "allowed http host with scheme", mutate: func(c *Config) { c.AllowedHTTPHosts = []string{"http://router.lan"} }, wantErr: []string{"allowed_http_hosts"}},
+		{name: "api rate limit disabled", mutate: func(c *Config) { c.APIRateLimit = 0 }},
+		{name: "negative api rate limit", mutate: func(c *Config) { c.APIRateLimit = -1 }, wantErr: []string{"api_rate_limit (TIKKER_API_RATE_LIMIT)"}},
+		{name: "shutdown timeout too short", mutate: func(c *Config) { c.ShutdownTimeout = 0 }, wantErr: []string{"shutdown_timeout (TIKKER_SHUTDOWN_TIMEOUT)"}},
 		{name: "admin password too short", mutate: func(c *Config) { c.AdminPassword = "short" }, wantErr: []string{"admin_password (TIKKER_ADMIN_PASSWORD)", "at least 12"}},
 	}
 

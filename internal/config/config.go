@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/m4drak/tikker/internal/domain"
@@ -46,6 +47,27 @@ type Config struct {
 	Retry               RetryConfig         `yaml:"retry"`
 	TLS                 TLSConfig           `yaml:"tls"`
 	AdminPassword       Secret              `yaml:"admin_password"`
+
+	// TrustedProxies are the reverse proxies (IP addresses or CIDR
+	// prefixes) whose X-Forwarded-For header is believed for the client IP.
+	TrustedProxies []string `yaml:"trusted_proxies"`
+	// TrustedOrigins are extra origins (scheme://host[:port]) allowed to
+	// send state-changing requests to the panel, besides base_url.
+	TrustedOrigins []string `yaml:"trusted_origins"`
+	// SessionIdleTimeout and SessionAbsoluteTimeout bound panel sessions
+	// (SPEC §7).
+	SessionIdleTimeout     time.Duration `yaml:"session_idle_timeout"`
+	SessionAbsoluteTimeout time.Duration `yaml:"session_absolute_timeout"`
+	// AllowedHTTPHosts are the device hosts (IP addresses, CIDR prefixes or
+	// literal host names) that may be reached over plain http:// (SPEC §3.3,
+	// the veth subnet in container mode). Empty: devices need https://.
+	AllowedHTTPHosts []string `yaml:"allowed_http_hosts"`
+	// APIRateLimit is the per-token request budget per minute of the REST
+	// API (SPEC §4.5); 0 disables the limit.
+	APIRateLimit int `yaml:"api_rate_limit"`
+	// ShutdownTimeout bounds the graceful shutdown: in-flight HTTP
+	// requests and sends may finish within it (SPEC §2.2).
+	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
 }
 
 // RetryConfig is the outbound retry schedule (SPEC §4.2).
@@ -95,6 +117,12 @@ func Default() Config {
 		LogLevel:            "info",
 		LogFormat:           "json",
 		SQLiteSynchronous:   "NORMAL",
+		// Session timeouts as auth.DefaultSessionIdleTimeout and
+		// auth.DefaultSessionAbsoluteTimeout (SPEC §7).
+		SessionIdleTimeout:     time.Hour,
+		SessionAbsoluteTimeout: 12 * time.Hour,
+		APIRateLimit:           120,
+		ShutdownTimeout:        30 * time.Second,
 		Retry: RetryConfig{
 			MaxAttempts: rp.MaxAttempts,
 			Base:        rp.Initial,
@@ -154,7 +182,23 @@ func (c Config) entries() []entry {
 		{"tls.cert_file", strconv.Quote(c.TLS.CertFile)},
 		{"tls.key_file", strconv.Quote(c.TLS.KeyFile)},
 		{"admin_password", strconv.Quote(c.AdminPassword.String())},
+		{"trusted_proxies", quoteList(c.TrustedProxies)},
+		{"trusted_origins", quoteList(c.TrustedOrigins)},
+		{"session_idle_timeout", strconv.Quote(c.SessionIdleTimeout.String())},
+		{"session_absolute_timeout", strconv.Quote(c.SessionAbsoluteTimeout.String())},
+		{"allowed_http_hosts", quoteList(c.AllowedHTTPHosts)},
+		{"api_rate_limit", strconv.Itoa(c.APIRateLimit)},
+		{"shutdown_timeout", strconv.Quote(c.ShutdownTimeout.String())},
 	}
+}
+
+// quoteList renders a list setting as [a, b] with quoted items.
+func quoteList(items []string) string {
+	q := make([]string, len(items))
+	for i, it := range items {
+		q[i] = strconv.Quote(it)
+	}
+	return "[" + strings.Join(q, ", ") + "]"
 }
 
 type entry struct {

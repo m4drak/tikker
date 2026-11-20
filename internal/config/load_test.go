@@ -148,6 +148,13 @@ func TestLoadDefaultsMatchSpec(t *testing.T) {
 		{"retry.jitter", cfg.Retry.Jitter, rp.Jitter},
 		{"tls.cert_file", cfg.TLS.CertFile, ""},
 		{"admin_password", string(cfg.AdminPassword), ""},
+		{"session_idle_timeout", cfg.SessionIdleTimeout, time.Hour},
+		{"session_absolute_timeout", cfg.SessionAbsoluteTimeout, 12 * time.Hour},
+		{"api_rate_limit", cfg.APIRateLimit, 120},
+		{"shutdown_timeout", cfg.ShutdownTimeout, 30 * time.Second},
+		{"trusted_proxies", len(cfg.TrustedProxies), 0},
+		{"trusted_origins", len(cfg.TrustedOrigins), 0},
+		{"allowed_http_hosts", len(cfg.AllowedHTTPHosts), 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -209,6 +216,60 @@ tls:
 	// A key missing from the file keeps its default.
 	if cfg.InboxPollInterval != 15*time.Second {
 		t.Errorf("InboxPollInterval = %s, want default 15s", cfg.InboxPollInterval)
+	}
+}
+
+func TestLoadLists(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		env  map[string]string
+		want []string
+	}{
+		{name: "default empty", want: nil},
+		{name: "yaml list", yaml: "allowed_http_hosts: [\"172.17.0.1\", \" router.lan \"]\n", want: []string{"172.17.0.1", "router.lan"}},
+		{name: "env comma separated", env: map[string]string{envAllowedHTTPHosts: " 172.17.0.0/24, ,127.0.0.1 "}, want: []string{"172.17.0.0/24", "127.0.0.1"}},
+		{name: "env overrides yaml", yaml: "allowed_http_hosts: [a.lan]\n", env: map[string]string{envAllowedHTTPHosts: "b.lan"}, want: []string{"b.lan"}},
+		{name: "empty env clears yaml", yaml: "allowed_http_hosts: [a.lan]\n", env: map[string]string{envAllowedHTTPHosts: ""}, want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := ""
+			if tt.yaml != "" {
+				path = writeYAML(t, dir, tt.yaml)
+			}
+			cfg, err := Load(Options{Path: path, Lookup: envMap(testEnv(dir, tt.env))})
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if fmt.Sprint(cfg.AllowedHTTPHosts) != fmt.Sprint(tt.want) || len(cfg.AllowedHTTPHosts) != len(tt.want) {
+				t.Errorf("AllowedHTTPHosts = %q, want %q", cfg.AllowedHTTPHosts, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadServeSettingsFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := Load(Options{Lookup: envMap(testEnv(dir, map[string]string{
+		envTrustedProxies:         "10.0.0.1,10.1.0.0/16",
+		envTrustedOrigins:         "https://sms.example.net",
+		envSessionIdleTimeout:     "30m",
+		envSessionAbsoluteTimeout: "8h",
+		envAPIRateLimit:           "0",
+		envShutdownTimeout:        "5s",
+	}))})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.TrustedProxies) != 2 || len(cfg.TrustedOrigins) != 1 || cfg.SessionIdleTimeout != 30*time.Minute ||
+		cfg.SessionAbsoluteTimeout != 8*time.Hour || cfg.APIRateLimit != 0 || cfg.ShutdownTimeout != 5*time.Second {
+		t.Errorf("cfg = %+v", cfg)
+	}
+	prefixes, err := ParsePrefixes(cfg.TrustedProxies)
+	if err != nil || len(prefixes) != 2 || prefixes[0].Bits() != 32 || prefixes[1].String() != "10.1.0.0/16" {
+		t.Errorf("ParsePrefixes = %v, %v", prefixes, err)
 	}
 }
 

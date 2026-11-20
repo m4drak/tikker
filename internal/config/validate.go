@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
@@ -63,6 +64,13 @@ var (
 	sTLSCertFile         = setting{"tls.cert_file", envTLSCertFile}
 	sTLSKeyFile          = setting{"tls.key_file", envTLSKeyFile}
 	sAdminPassword       = setting{"admin_password", envAdminPassword}
+	sTrustedProxies      = setting{"trusted_proxies", envTrustedProxies}
+	sTrustedOrigins      = setting{"trusted_origins", envTrustedOrigins}
+	sSessionIdle         = setting{"session_idle_timeout", envSessionIdleTimeout}
+	sSessionAbsolute     = setting{"session_absolute_timeout", envSessionAbsoluteTimeout}
+	sAllowedHTTPHosts    = setting{"allowed_http_hosts", envAllowedHTTPHosts}
+	sAPIRateLimit        = setting{"api_rate_limit", envAPIRateLimit}
+	sShutdownTimeout     = setting{"shutdown_timeout", envShutdownTimeout}
 )
 
 var regionPattern = regexp.MustCompile(`^[A-Z]{2}$`)
@@ -125,6 +133,25 @@ func Validate(c Config) error {
 	if n := utf8.RuneCountInString(string(c.AdminPassword)); n > 0 && n < minAdminPasswordLen {
 		add(sAdminPassword.errorf("must be at least %d characters", minAdminPasswordLen))
 	}
+
+	if _, err := ParsePrefixes(c.TrustedProxies); err != nil {
+		add(sTrustedProxies.errorf("%v", err))
+	}
+	for _, o := range c.TrustedOrigins {
+		add(validateOrigin(o))
+	}
+	add(validateMinDuration(sSessionIdle, c.SessionIdleTimeout, time.Minute))
+	if c.SessionAbsoluteTimeout < c.SessionIdleTimeout {
+		add(sSessionAbsolute.errorf("must not be less than session_idle_timeout (%s), got %s",
+			c.SessionIdleTimeout, c.SessionAbsoluteTimeout))
+	}
+	for _, h := range c.AllowedHTTPHosts {
+		add(validateHTTPHost(h))
+	}
+	if c.APIRateLimit < 0 {
+		add(sAPIRateLimit.errorf("must be 0 (no limit) or positive, got %d", c.APIRateLimit))
+	}
+	add(validateMinDuration(sShutdownTimeout, c.ShutdownTimeout, time.Second))
 
 	return errors.Join(errs...)
 }
@@ -229,4 +256,58 @@ func validateTLS(t TLSConfig) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// ParsePrefixes parses IP addresses and CIDR prefixes (trusted_proxies). An
+// address is a single-host prefix.
+func ParsePrefixes(items []string) ([]netip.Prefix, error) {
+	out := make([]netip.Prefix, 0, len(items))
+	for _, it := range items {
+		if strings.Contains(it, "/") {
+			p, err := netip.ParsePrefix(it)
+			if err != nil {
+				return nil, fmt.Errorf("%q is not an IP address or CIDR prefix", it)
+			}
+			out = append(out, p.Masked())
+			continue
+		}
+		ip, err := netip.ParseAddr(it)
+		if err != nil {
+			return nil, fmt.Errorf("%q is not an IP address or CIDR prefix", it)
+		}
+		ip = ip.Unmap()
+		out = append(out, netip.PrefixFrom(ip, ip.BitLen()))
+	}
+	return out, nil
+}
+
+// validateOrigin accepts scheme://host[:port] with an http or https scheme
+// and nothing else (no path, query or user info).
+func validateOrigin(o string) error {
+	u, err := url.Parse(o)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+		u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return sTrustedOrigins.errorf("%q is not an origin such as https://sms.example.net", o)
+	}
+	return nil
+}
+
+// hostNamePattern is a DNS host name (letters, digits, hyphens, dots).
+var hostNamePattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$`)
+
+// validateHTTPHost accepts an IP address, a CIDR prefix or a host name.
+func validateHTTPHost(h string) error {
+	if strings.Contains(h, "/") {
+		if _, err := netip.ParsePrefix(h); err != nil {
+			return sAllowedHTTPHosts.errorf("%q is not a valid CIDR prefix", h)
+		}
+		return nil
+	}
+	if _, err := netip.ParseAddr(h); err == nil {
+		return nil
+	}
+	if !hostNamePattern.MatchString(h) {
+		return sAllowedHTTPHosts.errorf("%q is not an IP address, CIDR prefix or host name", h)
+	}
+	return nil
 }

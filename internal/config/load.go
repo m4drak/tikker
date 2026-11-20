@@ -42,6 +42,14 @@ const (
 	envTLSCertFile       = "TIKKER_TLS_CERT_FILE"
 	envTLSKeyFile        = "TIKKER_TLS_KEY_FILE"
 	envAdminPassword     = "TIKKER_ADMIN_PASSWORD" //nolint:gosec // G101: variable name, not a credential
+
+	envTrustedProxies         = "TIKKER_TRUSTED_PROXIES"
+	envTrustedOrigins         = "TIKKER_TRUSTED_ORIGINS"
+	envSessionIdleTimeout     = "TIKKER_SESSION_IDLE_TIMEOUT"
+	envSessionAbsoluteTimeout = "TIKKER_SESSION_ABSOLUTE_TIMEOUT"
+	envAllowedHTTPHosts       = "TIKKER_ALLOWED_HTTP_HOSTS"
+	envAPIRateLimit           = "TIKKER_API_RATE_LIMIT"
+	envShutdownTimeout        = "TIKKER_SHUTDOWN_TIMEOUT"
 )
 
 // DefaultConfigFile is the YAML file name looked up in the data directory
@@ -196,6 +204,13 @@ func applyEnv(cfg *Config, lookup LookupFunc) error {
 		*dst = d
 	}
 
+	// list reads a comma-separated list; an empty variable clears it.
+	list := func(name string, dst *[]string) {
+		if v, ok := lookup(name); ok {
+			*dst = splitList(v)
+		}
+	}
+
 	str(envListen, &cfg.Listen)
 	str(envDataDir, &cfg.DataDir)
 	secret(envSecretKey, &cfg.SecretKey)
@@ -219,6 +234,13 @@ func applyEnv(cfg *Config, lookup LookupFunc) error {
 	str(envTLSCertFile, &cfg.TLS.CertFile)
 	str(envTLSKeyFile, &cfg.TLS.KeyFile)
 	secret(envAdminPassword, &cfg.AdminPassword)
+	list(envTrustedProxies, &cfg.TrustedProxies)
+	list(envTrustedOrigins, &cfg.TrustedOrigins)
+	duration(envSessionIdleTimeout, &cfg.SessionIdleTimeout)
+	duration(envSessionAbsoluteTimeout, &cfg.SessionAbsoluteTimeout)
+	list(envAllowedHTTPHosts, &cfg.AllowedHTTPHosts)
+	integer(envAPIRateLimit, &cfg.APIRateLimit)
+	duration(envShutdownTimeout, &cfg.ShutdownTimeout)
 
 	return errors.Join(errs...)
 }
@@ -232,4 +254,23 @@ func normalize(cfg *Config) {
 	cfg.LogLevel = strings.ToLower(strings.TrimSpace(cfg.LogLevel))
 	cfg.LogFormat = strings.ToLower(strings.TrimSpace(cfg.LogFormat))
 	cfg.SQLiteSynchronous = strings.ToUpper(strings.TrimSpace(cfg.SQLiteSynchronous))
+	cfg.TrustedProxies = trimList(cfg.TrustedProxies)
+	cfg.TrustedOrigins = trimList(cfg.TrustedOrigins)
+	cfg.AllowedHTTPHosts = trimList(cfg.AllowedHTTPHosts)
+}
+
+// splitList splits a comma-separated environment value.
+func splitList(v string) []string {
+	return trimList(strings.Split(v, ","))
+}
+
+// trimList trims the items and drops empty ones; nil when nothing is left.
+func trimList(items []string) []string {
+	var out []string
+	for _, it := range items {
+		if it = strings.TrimSpace(it); it != "" {
+			out = append(out, it)
+		}
+	}
+	return out
 }

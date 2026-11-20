@@ -296,6 +296,12 @@ Urządzenia i kanały są przechowywane w bazie (zarządzane z UI/API), opcjonal
 | `TIKKER_RETRY_JITTER` | `0.2` | względny rozrzut opóźnienia, w [0, 1) (§4.2) |
 | `TIKKER_TLS_CERT_FILE` / `TIKKER_TLS_KEY_FILE` | – | certyfikat i klucz wbudowanego HTTPS (§7); ustawiane razem |
 | `TIKKER_ADMIN_PASSWORD` | – | hasło admina tworzonego przy pierwszym starcie (§6), min. 12 znaków |
+| `TIKKER_TRUSTED_PROXIES` | – | reverse proxy (IP lub CIDR, po przecinku), którym wierzymy w `X-Forwarded-For` (limity logowania, audyt) |
+| `TIKKER_TRUSTED_ORIGINS` | – | dodatkowe originy (`scheme://host[:port]`, po przecinku) dla ochrony CSRF panelu, poza `TIKKER_BASE_URL` |
+| `TIKKER_SESSION_IDLE_TIMEOUT` / `TIKKER_SESSION_ABSOLUTE_TIMEOUT` | `1h` / `12h` | limity sesji panelu (§7); bezwzględny ≥ bezczynności |
+| `TIKKER_ALLOWED_HTTP_HOSTS` | – | hosty urządzeń (IP, CIDR lub nazwa, po przecinku) dostępne przez `http://` (§3.3, np. podsieć veth w trybie kontenerowym); domyślnie tylko `https://` |
+| `TIKKER_API_RATE_LIMIT` | `120` | limit żądań API na token na minutę (§4.5); `0` wyłącza |
+| `TIKKER_SHUTDOWN_TIMEOUT` | `30s` | czas na łagodne zamknięcie: dokończenie żądań HTTP i bieżących wysyłek (§2.2) |
 
 ---
 

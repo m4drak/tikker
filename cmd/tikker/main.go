@@ -12,6 +12,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/m4drak/tikker/internal/config"
@@ -35,6 +37,10 @@ const usage = `usage: tikker [--config FILE] <command>
        tikker [--config FILE] --check-config
 
 commands:
+  serve           run the SMS gateway (REST API, queue, inbox, health checks)
+  token create    create an API token for an existing user and print it once:
+                  token create [--user admin] [--name NAME] [--scope S]... [--ttl DURATION]
+                  scopes: sms:send, sms:read, admin (default: admin)
   version         print build version information (also available as --version)
   healthcheck     probe the local /readyz (exit 0 when ready); --live probes /healthz
 
@@ -100,6 +106,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	case "healthcheck":
 		return runHealthcheck(*configPath, rest[1:], stdout, stderr)
+	case "serve":
+		if len(rest) != 1 {
+			printUsage(stderr)
+			return exitConfig
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return runServe(ctx, *configPath, stdout, stderr)
+	case "token":
+		return runToken(*configPath, rest[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "tikker: unknown command %q\n\n", rest[0])
 		printUsage(stderr)
