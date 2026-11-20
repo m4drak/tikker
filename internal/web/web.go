@@ -10,7 +10,11 @@
 //	render.go       templates, View, Render/RenderBlock, error pages
 //	nav.go          navigation items and their minimum roles
 //	pages_auth.go   login, logout, first-run wizard, language switch
-//	pages_soon.go   placeholder pages of tasks T31/T32
+//	pages_soon.go   registerPages: placeholders (T32) and the real pages
+//	pages_dashboard.go  dashboard and its htmx fragment (T31)
+//	pages_send.go   send form, live segment preview (T31)
+//	pages_messages.go   message list, details, cancel (T31)
+//	format.go       helpers shared by the pages (status labels, signal)
 //	security.go     security headers (CSP, X-Frame-Options, ...)
 //	static.go       /static/ (embedded assets, ETag, immutable cache)
 //	templates/      layout/*.html (base + partials), pages/*.html (one per page)
@@ -33,7 +37,8 @@
 //     tests fail when a language lacks a key or a template uses an unknown
 //     key).
 //  4. Register the route in registerPages (pages_soon.go), replacing the
-//     placeholder for the same pattern:
+//     placeholder for the same pattern (T31 did this for /, /send and
+//     /messages; T32 replaces the rest):
 //     s.Handle("GET /messages", domain.RoleViewer, handler).
 //     The route is wrapped in [auth.Service.RequireSession] (anonymous users
 //     are redirected to the login page, or get HX-Redirect for htmx) and a
@@ -50,7 +55,6 @@
 package web
 
 import (
-	"errors"
 	"fmt"
 	"html/template"
 	"log/slog"
@@ -59,6 +63,10 @@ import (
 
 	"github.com/m4drak/tikker/internal/auth"
 	"github.com/m4drak/tikker/internal/domain"
+	"github.com/m4drak/tikker/internal/health"
+	"github.com/m4drak/tikker/internal/queue"
+	"github.com/m4drak/tikker/internal/sending"
+	"github.com/m4drak/tikker/internal/store"
 	"github.com/m4drak/tikker/internal/version"
 	"github.com/m4drak/tikker/internal/web/i18n"
 )
@@ -70,10 +78,26 @@ const DefaultSourceURL = "https://github.com/m4drak/tikker"
 // maxFormBytes bounds the body of the panel's own forms.
 const maxFormBytes = 64 << 10
 
+// QueueStats gives the dashboard the dispatcher's counters;
+// *queue.Dispatcher implements it.
+type QueueStats interface{ Stats() queue.Stats }
+
+// HealthSnapshot gives the dashboard the live health of the channels;
+// *health.Checker implements it.
+type HealthSnapshot interface{ Snapshot() []health.ChannelStatus }
+
 // Options configures [New].
 type Options struct {
 	// Auth is the authentication service (required).
 	Auth *auth.Service
+	// Store is read by the dashboard and the message pages (required).
+	Store store.Store
+	// Sending sends and cancels messages and previews texts; the API uses
+	// the same service (required).
+	Sending *sending.Service
+	// Queue and Health feed the dashboard (required).
+	Queue  QueueStats
+	Health HealthSnapshot
 	// Logger receives the panel's logs (default slog.Default()).
 	Logger *slog.Logger
 	// BaseURL is the public URL of the instance (TIKKER_BASE_URL). An https
@@ -87,6 +111,10 @@ type Options struct {
 // at "/".
 type Server struct {
 	auth      *auth.Service
+	st        store.Store
+	send      *sending.Service
+	queue     QueueStats
+	health    HealthSnapshot
 	log       *slog.Logger
 	i18n      *i18n.Bundle
 	pages     map[string]map[string]*template.Template // language -> page -> template set
@@ -108,11 +136,23 @@ type route struct {
 // New builds the panel: it loads and checks the templates, the translations
 // and the embedded assets and registers the routes.
 func New(opts Options) (*Server, error) {
-	if opts.Auth == nil {
-		return nil, errors.New("web: Auth is required")
+	for _, m := range []struct {
+		name string
+		nil  bool
+	}{
+		{"Auth", opts.Auth == nil}, {"Store", opts.Store == nil}, {"Sending", opts.Sending == nil},
+		{"Queue", opts.Queue == nil}, {"Health", opts.Health == nil},
+	} {
+		if m.nil {
+			return nil, fmt.Errorf("web: %s is required", m.name)
+		}
 	}
 	s := &Server{
 		auth:      opts.Auth,
+		st:        opts.Store,
+		send:      opts.Sending,
+		queue:     opts.Queue,
+		health:    opts.Health,
 		log:       opts.Logger,
 		https:     strings.HasPrefix(strings.ToLower(opts.BaseURL), "https://"),
 		sourceURL: opts.SourceURL,

@@ -13,6 +13,7 @@ import (
 
 	"github.com/m4drak/tikker/internal/connector"
 	"github.com/m4drak/tikker/internal/domain"
+	"github.com/m4drak/tikker/internal/sending"
 	"github.com/m4drak/tikker/internal/sms"
 )
 
@@ -211,7 +212,14 @@ func TestChannelSyncFailures(t *testing.T) {
 		t.Error("capabilities without a connector")
 	}
 	// Without a connector the API refuses to plan for the channel.
-	e.api.caps = s
+	svc, err := sending.New(sending.Deps{
+		Store: e.st, Capabilities: s, Notifier: e.disp, Clock: e.api.clk, IDs: e.api.ids,
+		Options: sending.Options{DefaultRegion: e.api.opts.DefaultRegion},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.api.send = svc
 	e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "x", "channel_id": ch}).problem(422, problemValidation)
 	e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "x"}).problem(422, problemValidation)
 }
@@ -248,7 +256,14 @@ func (panicNotifier) Notify() { panic("boom") }
 func TestPanicBecomesInternalError(t *testing.T) {
 	e := newEnv(t)
 	e.basic()
-	e.api.disp = panicNotifier{}
+	svc, err := sending.New(sending.Deps{
+		Store: e.st, Capabilities: e.sync, Notifier: panicNotifier{}, Clock: e.api.clk, IDs: e.api.ids,
+		Options: sending.Options{DefaultRegion: e.api.opts.DefaultRegion},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.api.send = svc
 	res := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "x"})
 	p := res.problem(500, problemInternal)
 	if !strings.HasPrefix(p["instance"].(string), requestInstancePrefix) || p["detail"] != nil {
@@ -307,15 +322,6 @@ func TestLimiterSweep(t *testing.T) {
 	}
 }
 
-func TestStrictestCapabilities(t *testing.T) {
-	a := connector.Capabilities{Encodings: []domain.Encoding{domain.EncodingGSM7, domain.EncodingUCS2}, MaxSegments: 3, Concatenation: true}
-	b := connector.Capabilities{Encodings: []domain.Encoding{domain.EncodingGSM7}, MaxSegments: 1}
-	got := strictest(a, b)
-	if got.MaxSegments != 1 || got.Concatenation || len(got.Encodings) != 1 || got.Encodings[0] != domain.EncodingGSM7 {
-		t.Errorf("strictest = %+v", got)
-	}
-}
-
 func TestProbeErrorCode(t *testing.T) {
 	ctx := context.Background()
 	if c := probeErrorCode(ctx, domain.AuthError("x", errors.New("a"))); c != domain.CodeAuthFailed {
@@ -338,7 +344,7 @@ func TestProbeErrorCode(t *testing.T) {
 	if got := scrub("ab", "ab"); got != "ab" {
 		t.Errorf("short secrets are left alone: %q", got)
 	}
-	if truncateRunes("abcdef", 3) != "abc..." || planDetail(errors.New("sms: too long")) != "Too long." {
+	if truncateRunes("abcdef", 3) != "abc..." {
 		t.Error("string helpers")
 	}
 }

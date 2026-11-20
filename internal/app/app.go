@@ -51,6 +51,7 @@ import (
 	"github.com/m4drak/tikker/internal/probes"
 	"github.com/m4drak/tikker/internal/queue"
 	"github.com/m4drak/tikker/internal/secrets"
+	"github.com/m4drak/tikker/internal/sending"
 	"github.com/m4drak/tikker/internal/sms"
 	"github.com/m4drak/tikker/internal/store/sqlite"
 	"github.com/m4drak/tikker/internal/web"
@@ -342,8 +343,19 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	if a.cfg.APIRateLimit == 0 {
 		rate.Requests = -1 // disabled
 	}
+	// One sending service for the API and the web panel.
+	snd, err := sending.New(sending.Deps{
+		Store: a.store, Capabilities: a.sync, Notifier: a.disp, Clock: a.clk,
+		Options: sending.Options{
+			DefaultRegion: a.cfg.DefaultRegion, AllowShortNumbers: a.cfg.AllowShortNumbers,
+			LongMessageStrategy: strategy,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("sending: %w", err)
+	}
 	apiH, err := api.New(api.Deps{
-		Store: a.store, Auth: a.auth, Dispatcher: a.disp, Reloader: a.sync, Capabilities: a.sync,
+		Store: a.store, Auth: a.auth, Dispatcher: a.disp, Reloader: a.sync, Capabilities: a.sync, Sending: snd,
 		Health: a.health, Credentials: creds, Connectors: reg,
 		Clock: a.clk, Logger: a.log,
 		Options: api.Options{
@@ -369,7 +381,10 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	if err != nil {
 		return nil, fmt.Errorf("probes: %w", err)
 	}
-	panel, err := web.New(web.Options{Auth: a.auth, Logger: a.log, BaseURL: a.cfg.BaseURL})
+	panel, err := web.New(web.Options{
+		Auth: a.auth, Logger: a.log, BaseURL: a.cfg.BaseURL,
+		Store: a.store, Sending: snd, Queue: a.disp, Health: a.health,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("web panel: %w", err)
 	}

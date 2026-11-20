@@ -72,12 +72,6 @@ func TestSendMessage(t *testing.T) {
 	}
 }
 
-func TestUnsupportedDetail(t *testing.T) {
-	if d := unsupportedDetail("abc"); !strings.Contains(d, "cannot send") {
-		t.Errorf("detail without a non-GSM character = %q", d)
-	}
-}
-
 func tokenID(t *testing.T, e *testEnv, raw string) string {
 	t.Helper()
 	prefix := strings.Split(raw, "_")[1]

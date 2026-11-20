@@ -94,15 +94,15 @@ func TestLanguageSwitch(t *testing.T) {
 		t.Errorf("with token: %d, Location %q", w.Code, w.Header().Get("Location"))
 	}
 
-	// Pages are fully translated: the dashboard stub in both languages.
+	// Pages are fully translated: the message list in both languages.
 	pl := e.do(http.MethodGet, "/messages", nil, withCookies(s, &http.Cookie{Name: LangCookie, Value: "pl"})).Body.String()
 	en := e.do(http.MethodGet, "/messages", nil, withCookies(s, &http.Cookie{Name: LangCookie, Value: "en"})).Body.String()
-	for _, want := range []string{"Wiadomości", "Ta strona będzie dostępna wkrótce.", "Wyloguj", "podgląd", "Kod źródłowy"} {
+	for _, want := range []string{"Wiadomości", "Pasujących wiadomości: 0", "Wyloguj", "podgląd", "Kod źródłowy"} {
 		if !strings.Contains(pl, want) {
 			t.Errorf("pl page lacks %q", want)
 		}
 	}
-	for _, want := range []string{"Messages", "This page is coming soon.", "Sign out", "viewer", "Source code"} {
+	for _, want := range []string{"Messages", "Matching messages: 0", "Sign out", "viewer", "Source code"} {
 		if !strings.Contains(en, want) {
 			t.Errorf("en page lacks %q", want)
 		}

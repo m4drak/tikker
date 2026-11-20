@@ -60,6 +60,7 @@ func (s *Server) loadTemplates() (map[string]map[string]*template.Template, erro
 		funcs := template.FuncMap{
 			"t":     func(key string, args ...any) string { return s.i18n.T(lang, key, args...) },
 			"asset": s.assets.url,
+			"ts":    formatTime,
 		}
 		base, err := template.New("layout").Funcs(funcs).ParseFS(templateFS, "templates/layout/*.html")
 		if err != nil {

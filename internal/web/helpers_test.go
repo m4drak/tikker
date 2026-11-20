@@ -17,7 +17,11 @@ import (
 
 	"github.com/m4drak/tikker/internal/auth"
 	"github.com/m4drak/tikker/internal/clock"
+	"github.com/m4drak/tikker/internal/connector"
 	"github.com/m4drak/tikker/internal/domain"
+	"github.com/m4drak/tikker/internal/health"
+	"github.com/m4drak/tikker/internal/queue"
+	"github.com/m4drak/tikker/internal/sending"
 	"github.com/m4drak/tikker/internal/store/sqlite"
 )
 
@@ -29,16 +33,53 @@ var testParams = auth.Params{Memory: 64, Time: 1, Threads: 1, SaltLen: 16, KeyLe
 const goodPassword = "correct horse battery"
 
 type env struct {
-	t   *testing.T
-	srv *Server
-	h   http.Handler
-	svc *auth.Service
-	clk *clock.Fake
+	t     *testing.T
+	srv   *Server
+	h     http.Handler
+	svc   *auth.Service
+	clk   *clock.Fake
+	st    *sqlite.Store
+	caps  *fakeCaps
+	queue *fakeQueue
+	hs    *fakeHealth
+	wake  *fakeNotifier
 }
+
+// fakeCaps gives every channel the capabilities of a RouterOS modem (GSM-7
+// only, one segment) unless a channel has its own entry.
+type fakeCaps struct {
+	def connector.Capabilities
+	per map[domain.ID]connector.Capabilities
+}
+
+func (f *fakeCaps) ChannelCapabilities(id domain.ID) (connector.Capabilities, bool) {
+	if c, ok := f.per[id]; ok {
+		return c, true
+	}
+	return f.def, true
+}
+
+type fakeQueue struct{ stats queue.Stats }
+
+func (f *fakeQueue) Stats() queue.Stats { return f.stats }
+
+type fakeHealth struct{ snap []health.ChannelStatus }
+
+func (f *fakeHealth) Snapshot() []health.ChannelStatus { return f.snap }
+
+type fakeNotifier struct{ n int }
+
+func (f *fakeNotifier) Notify() { f.n++ }
 
 // newEnv builds a panel on an in-memory database. users maps a username to
 // its role; the password of every user is goodPassword.
 func newEnv(t *testing.T, users map[string]domain.Role, mods ...func(*Options, *auth.Config)) *env {
+	t.Helper()
+	return newEnvSending(t, sending.Options{DefaultRegion: "PL"}, users, mods...)
+}
+
+// newEnvSending is newEnv with the settings of the sending service.
+func newEnvSending(t *testing.T, so sending.Options, users map[string]domain.Role, mods ...func(*Options, *auth.Config)) *env {
 	t.Helper()
 	clk := clock.NewFake(t0)
 	st, err := sqlite.Open(context.Background(), sqlite.Options{Clock: clk})
@@ -48,7 +89,17 @@ func newEnv(t *testing.T, users map[string]domain.Role, mods ...func(*Options, *
 	t.Cleanup(func() { _ = st.Close() })
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	acfg := auth.Config{Store: st, Clock: clk, Params: testParams, Logger: log}
-	opts := Options{Logger: log}
+	e := &env{t: t, clk: clk, st: st,
+		caps:  &fakeCaps{def: connector.Capabilities{Encodings: []domain.Encoding{domain.EncodingGSM7}, MaxSegments: 1}},
+		queue: &fakeQueue{}, hs: &fakeHealth{}, wake: &fakeNotifier{}}
+	snd, err := sending.New(sending.Deps{
+		Store: st, Capabilities: e.caps, Notifier: e.wake, Clock: clk,
+		Options: so,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{Logger: log, Store: st, Sending: snd, Queue: e.queue, Health: e.hs}
 	for _, m := range mods {
 		m(&opts, &acfg)
 	}
@@ -67,7 +118,8 @@ func newEnv(t *testing.T, users map[string]domain.Role, mods ...func(*Options, *
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &env{t: t, srv: srv, h: srv.Handler(), svc: svc, clk: clk}
+	e.srv, e.h, e.svc = srv, srv.Handler(), svc
+	return e
 }
 
 var allRoles = map[string]domain.Role{

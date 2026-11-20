@@ -1,0 +1,71 @@
+{{- /*
+SPDX-FileCopyrightText: 2026 The tikker Authors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/ -}}
+{{define "title"}}{{t "message.title"}}{{end}}
+{{define "content" -}}
+<h1>{{t "message.title"}}</h1>
+{{- if .Data.Conflict}}
+<p class="notice" role="alert">{{t "message.cancel_conflict"}}</p>
+{{- else if eq .Data.Notice "queued"}}
+<p class="notice ok" role="status">{{t "messages.notice.queued"}}</p>
+{{- else if eq .Data.Notice "cancelled"}}
+<p class="notice ok" role="status">{{t "messages.notice.cancelled"}}</p>
+{{- end}}
+<article>
+  <dl class="props">
+    <dt>{{t "message.id"}}</dt><dd><code>{{.Data.M.ID}}</code></dd>
+    <dt>{{t "messages.col.direction"}}</dt><dd>{{t .Data.DirKey}}</dd>
+    <dt>{{t "messages.col.status"}}</dt>
+    <dd>
+      <span class="badge status-{{.Data.M.Status}}">{{t .Data.StatusKey}}</span>
+      {{- if .Data.M.PossibleDuplicate}} <span class="badge status-duplicate">{{t "messages.duplicate"}}</span>
+      <br><small class="muted">{{t "message.duplicate_text"}}</small>{{end}}
+    </dd>
+    <dt>{{t "messages.col.peer"}}</dt><dd>{{.Data.M.Peer}}</dd>
+    <dt>{{t "messages.col.channel"}}</dt><dd>{{if .Data.Channel}}{{.Data.Channel}}{{else}}-{{end}}</dd>
+    {{- if .Data.M.Route.Tags}}
+    <dt>{{t "send.tags"}}</dt><dd>{{range .Data.M.Route.Tags}}<span class="tag">{{.}}</span> {{end}}</dd>
+    {{- end}}
+    <dt>{{t "message.encoding"}}</dt><dd>{{.Data.Encoding}}, {{t "message.segments"}}: {{.Data.M.Segments}}</dd>
+    <dt>{{t "message.attempts"}}</dt><dd>{{.Data.M.Attempts}}</dd>
+    {{- if .Data.M.LastError}}
+    <dt>{{t "message.last_error"}}</dt><dd>{{.Data.M.LastError}}</dd>
+    {{- end}}
+    {{- if .Data.M.ClientRef}}
+    <dt>{{t "message.client_ref"}}</dt><dd>{{.Data.M.ClientRef}}</dd>
+    {{- end}}
+    {{- if .Data.Author}}
+    <dt>{{t "message.created_by"}}</dt><dd>{{.Data.Author}}</dd>
+    {{- end}}
+    <dt>{{t "message.created_at"}}</dt><dd>{{ts .Data.M.CreatedAt}} UTC</dd>
+    {{- if not .Data.M.NextAttemptAt.IsZero}}{{if eq .Data.M.Status "queued"}}
+    <dt>{{t "message.next_attempt"}}</dt><dd>{{ts .Data.M.NextAttemptAt}} UTC</dd>
+    {{- end}}{{end}}
+    {{- if not .Data.M.ExpiresAt.IsZero}}
+    <dt>{{t "message.expires_at"}}</dt><dd>{{ts .Data.M.ExpiresAt}} UTC</dd>
+    {{- end}}
+    {{- if not .Data.M.SentAt.IsZero}}
+    <dt>{{t "message.sent_at"}}</dt><dd>{{ts .Data.M.SentAt}} UTC</dd>
+    {{- end}}
+    {{- if not .Data.M.ReceivedAt.IsZero}}
+    <dt>{{t "message.received_at"}}</dt><dd>{{ts .Data.M.ReceivedAt}} UTC</dd>
+    {{- end}}
+  </dl>
+  <h2>{{t "messages.col.body"}}</h2>
+  {{- if .Data.M.Body}}
+  <pre class="body-text" id="message-body">{{.Data.M.Body}}</pre>
+  {{- else}}
+  <p class="muted">{{t "message.body_purged"}}</p>
+  {{- end}}
+  <footer class="actions">
+    <a href="/messages" role="button" class="secondary outline">{{t "message.back"}}</a>
+    {{- if .Data.CanCancel}}
+    <form method="post" action="/messages/{{.Data.M.ID}}/cancel">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <button type="submit" class="contrast">{{t "message.cancel"}}</button>
+    </form>
+    {{- end}}
+  </footer>
+</article>
+{{- end}}
