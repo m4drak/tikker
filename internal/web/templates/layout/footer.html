@@ -1,0 +1,22 @@
+{{- /*
+SPDX-FileCopyrightText: 2026 The tikker Authors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/ -}}
+{{define "footer" -}}
+<footer class="container site">
+  <div class="row">
+    <span>tikker {{.Version}}</span>
+    <span>
+      <a href="{{.SourceURL}}" rel="noopener noreferrer">{{t "footer.source"}}</a>
+      &middot; {{t "footer.license"}}
+    </span>
+    <form method="post" action="/lang" aria-label="{{t "footer.language"}}">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <input type="hidden" name="next" value="{{.Path}}">
+      {{- range .Languages}}
+      <button type="submit" class="link" name="lang" value="{{.Code}}" lang="{{.Code}}"{{if .Current}} aria-current="true"{{end}}>{{.Name}}</button>
+      {{- end}}
+    </form>
+  </div>
+</footer>
+{{- end}}

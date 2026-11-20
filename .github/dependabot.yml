@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: 2026 The tikker Authors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Weekly dependency updates for Go modules and GitHub Actions.
+# Minor and patch updates are grouped to keep the number of PRs low; major updates
+# stay separate so they can be reviewed on their own.
+# New dependencies must still pass the license check (SPEC §11, `make licenses`).
+
+version: 2
+
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Warsaw
+    labels:
+      - dependencies
+      - go
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      go-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:30"
+      timezone: Europe/Warsaw
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions-minor-and-patch:
+        update-types:
+          - minor
+          - patch

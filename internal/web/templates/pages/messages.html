@@ -1,0 +1,97 @@
+{{- /*
+SPDX-FileCopyrightText: 2026 The tikker Authors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/ -}}
+{{define "title"}}{{t "nav.messages"}}{{end}}
+{{define "content" -}}
+<h1>{{t "nav.messages"}}</h1>
+{{- if eq .Data.Notice "queued"}}
+<p class="notice ok" role="status">{{t "messages.notice.queued"}}</p>
+{{- else if eq .Data.Notice "queued_n"}}
+<p class="notice ok" role="status">{{t "messages.notice.queued_n" .Data.NoticeN}}</p>
+{{- else if eq .Data.Notice "cancelled"}}
+<p class="notice ok" role="status">{{t "messages.notice.cancelled"}}</p>
+{{- end}}
+
+<form method="get" action="/messages" class="filters" aria-label="{{t "messages.filters"}}">
+  <div class="grid">
+    <label for="f-direction">{{t "messages.direction"}}
+      <select id="f-direction" name="direction">
+        {{- range .Data.Dirs}}
+        <option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{t .LabelKey}}</option>
+        {{- end}}
+      </select>
+    </label>
+    <label for="f-status">{{t "messages.status"}}
+      <select id="f-status" name="status">
+        {{- range .Data.Statuses}}
+        <option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{t .LabelKey}}</option>
+        {{- end}}
+      </select>
+    </label>
+    <label for="f-channel">{{t "messages.channel"}}
+      <select id="f-channel" name="channel">
+        {{- range .Data.Channels}}
+        <option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{if .LabelKey}}{{t .LabelKey}}{{else}}{{.Label}}{{end}}</option>
+        {{- end}}
+      </select>
+    </label>
+    <label for="f-peer">{{t "messages.peer"}}
+      <input id="f-peer" name="peer" type="search" inputmode="tel" maxlength="32" value="{{.Data.Filter.Peer}}" autocomplete="off">
+    </label>
+  </div>
+  <div class="grid">
+    <label for="f-since">{{t "messages.since"}}
+      <input id="f-since" name="since" type="date" value="{{.Data.Filter.Since}}">
+    </label>
+    <label for="f-until">{{t "messages.until"}}
+      <input id="f-until" name="until" type="date" value="{{.Data.Filter.Until}}">
+    </label>
+    <div class="actions">
+      <button type="submit">{{t "messages.apply"}}</button>
+      {{- if .Data.Filtered}}
+      <a href="/messages" role="button" class="secondary outline">{{t "messages.reset"}}</a>
+      {{- end}}
+    </div>
+  </div>
+</form>
+
+<p class="muted"><small>{{t "messages.total" .Data.Total}}</small></p>
+{{- if .Data.Rows}}
+<div class="overflow-auto">
+  <table class="striped compact" id="messages">
+    <thead>
+      <tr>
+        <th scope="col">{{t "messages.col.time"}}</th>
+        <th scope="col">{{t "messages.col.direction"}}</th>
+        <th scope="col">{{t "messages.col.peer"}}</th>
+        <th scope="col">{{t "messages.col.body"}}</th>
+        <th scope="col">{{t "messages.col.status"}}</th>
+        <th scope="col">{{t "messages.col.channel"}}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{- range .Data.Rows}}
+      <tr>
+        <td class="nowrap"><a href="/messages/{{.ID}}">{{ts .At}}</a></td>
+        <td>{{t .Direction}}</td>
+        <td>{{.Peer}}</td>
+        <td class="body-cell">{{if .Preview}}{{.Preview}}{{else}}-{{end}}</td>
+        <td>
+          <span class="badge status-{{.Status}}">{{t .StatusKey}}</span>
+          {{- if .Duplicate}} <span class="badge status-duplicate" title="{{t "messages.duplicate_hint"}}">{{t "messages.duplicate"}}</span>{{end}}
+        </td>
+        <td>{{if .Channel}}{{.Channel}}{{else}}-{{end}}</td>
+      </tr>
+      {{- end}}
+    </tbody>
+  </table>
+</div>
+<nav class="pager" aria-label="{{t "messages.pager"}}">
+  {{- if .Data.Paged}}<a href="{{.Data.FirstLink}}">{{t "messages.first"}}</a>{{end}}
+  {{- if .Data.NextLink}}<a href="{{.Data.NextLink}}" rel="next">{{t "messages.next"}}</a>{{end}}
+</nav>
+{{- else}}
+<p>{{t "messages.empty"}}</p>
+{{- end}}
+{{- end}}

@@ -1,0 +1,42 @@
+# golangci-lint v2 configuration.
+# Docs: https://golangci-lint.run/docs/configuration/file/
+version: "2"
+
+run:
+  timeout: 5m
+  go: "1.25"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gosec
+    - revive
+    - misspell
+  settings:
+    errcheck:
+      # Writes to stdout/stderr in CLI code are best-effort.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    misspell:
+      # Polish words in user-facing text and test data; "routeros" is a package name.
+      ignore-rules:
+        - adres
+        - routeros
+  exclusions:
+    rules:
+      # Test fixtures use fake credentials and temp file paths.
+      - path: _test\.go
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

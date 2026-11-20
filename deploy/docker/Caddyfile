@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 The tikker Authors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Example Caddy config for the `tls` profile of compose.yaml: automatic Let's Encrypt
+# certificate and reverse proxy to tikker. The domain comes from TIKKER_DOMAIN;
+# ports 80 and 443 must be reachable from the Internet (ACME), or use another challenge.
+# Set TIKKER_BASE_URL=https://<domain> for tikker. Caddy adds X-Forwarded-For itself, and
+# tikker trusts it only from TIKKER_TRUSTED_PROXIES (the compose network).
+
+{$TIKKER_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy tikker:8080 {
+		health_uri /healthz
+		health_interval 30s
+	}
+	# tikker sets its own security headers (CSP etc.); Caddy adds only HSTS.
+	header Strict-Transport-Security "max-age=31536000"
+}
