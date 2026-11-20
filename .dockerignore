@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 The tikker Authors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Keep the build context small and free of local state (databases, keys, configs, build output).
+
+.git
+.github
+.claude
+bin
+dist
+coverage.out
+data
+docs
+scripts
+**/*.db
+**/*.db-*
+**/secret.key
+**/config.yaml
+**/.env
+**/.env.*

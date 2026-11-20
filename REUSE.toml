@@ -19,6 +19,7 @@ path = [
   "Makefile",
   ".editorconfig",
   ".gitignore",
+  ".dockerignore",
   "REUSE.toml",
 ]
 # "override" lets this annotation win over in-text SPDX-like strings in
