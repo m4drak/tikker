@@ -18,8 +18,10 @@ const (
 	problemUnauthorized    = "urn:tikker:problem:unauthorized"
 	problemForbidden       = "urn:tikker:problem:forbidden"
 	problemNotFound        = "urn:tikker:problem:not-found"
+	problemMethodNotAllow  = "urn:tikker:problem:method-not-allowed"
 	problemConflict        = "urn:tikker:problem:conflict"
 	problemIdemInUse       = "urn:tikker:problem:idempotency-key-in-use"
+	problemPayloadTooLarge = "urn:tikker:problem:payload-too-large"
 	problemBatchTooLarge   = "urn:tikker:problem:batch-too-large"
 	problemValidation      = "urn:tikker:problem:validation"
 	problemIdemMismatch    = "urn:tikker:problem:idempotency-key-mismatch"
@@ -29,22 +31,40 @@ const (
 	contentTypeProblemJSON = "application/problem+json"
 )
 
+// problemTitles are the fixed titles of the problem types (Problem.title is
+// constant per type; the examples of the contract use these).
+var problemTitles = map[string]string{
+	problemMalformed:       "Malformed request",
+	problemUnauthorized:    "Unauthorized",
+	problemForbidden:       "Forbidden",
+	problemNotFound:        "Not Found",
+	problemMethodNotAllow:  "Method Not Allowed",
+	problemConflict:        "Conflict",
+	problemIdemInUse:       "Idempotency key in use",
+	problemPayloadTooLarge: "Payload too large",
+	problemBatchTooLarge:   "Batch too large",
+	problemValidation:      "Request validation failed",
+	problemIdemMismatch:    "Idempotency key reused with different payload",
+	problemRateLimited:     "Too Many Requests",
+	problemInternal:        "Internal Server Error",
+}
+
 // Field error codes of api/openapi.yaml (errors[].code).
 const (
-	codeRequired            = "required"
-	codeInvalidFormat       = "invalid_format"
-	codeOutOfRange          = "out_of_range"
-	codeInvalidPhone        = "invalid_phone_number"
-	codeTooManySegments     = "too_many_segments"
-	codeUnknownChannel      = "unknown_channel"
-	codeChannelDisabled     = "channel_disabled"
-	codeNoMatchingChannel   = "no_matching_channel"
-	codeExpiresInPast       = "expires_at_in_past"
-	codeInsecureTransport   = "insecure_transport_not_allowed"
-	codeUnknownDevice       = "unknown_device"
-	maxReportedFieldErrors  = 100
-	maxProblemDetailRunes   = 500
-	problemTitleBatchTooBig = "Batch too large"
+	codeRequired           = "required"
+	codeInvalidFormat      = "invalid_format"
+	codeOutOfRange         = "out_of_range"
+	codeInvalidPhone       = "invalid_phone_number"
+	codeTooManySegments    = "too_many_segments"
+	codeUnsupportedChars   = "unsupported_characters"
+	codeUnknownChannel     = "unknown_channel"
+	codeChannelDisabled    = "channel_disabled"
+	codeNoMatchingChannel  = "no_matching_channel"
+	codeExpiresInPast      = "expires_at_in_past"
+	codeInsecureTransport  = "insecure_transport_not_allowed"
+	codeUnknownDevice      = "unknown_device"
+	maxReportedFieldErrors = 100
+	maxProblemDetailRunes  = 500
 )
 
 // fieldError is one entry of Problem.errors (schema FieldError).
@@ -81,7 +101,11 @@ func (e *apiError) Error() string {
 }
 
 func newProblem(status int, typ, detail string, errs ...fieldError) *apiError {
-	return &apiError{status: status, typ: typ, title: http.StatusText(status), detail: detail, errors: errs}
+	title, ok := problemTitles[typ]
+	if !ok {
+		title = http.StatusText(status)
+	}
+	return &apiError{status: status, typ: typ, title: title, detail: detail, errors: errs}
 }
 
 func malformed(detail string, errs ...fieldError) *apiError {
@@ -98,9 +122,7 @@ func conflict(detail string) *apiError {
 
 // validationFailed is the 422 "validation" problem.
 func validationFailed(detail string, errs ...fieldError) *apiError {
-	e := newProblem(http.StatusUnprocessableEntity, problemValidation, detail, errs...)
-	e.title = "Request validation failed"
-	return e
+	return newProblem(http.StatusUnprocessableEntity, problemValidation, detail, errs...)
 }
 
 func (e *apiError) withHeader(k, v string) *apiError {

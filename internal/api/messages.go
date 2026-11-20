@@ -17,24 +17,22 @@ import (
 	"github.com/m4drak/tikker/internal/connector"
 	"github.com/m4drak/tikker/internal/domain"
 	"github.com/m4drak/tikker/internal/sms"
+	"github.com/m4drak/tikker/internal/sms/gsm"
 	"github.com/m4drak/tikker/internal/sms/phone"
 	"github.com/m4drak/tikker/internal/store"
 )
 
 // Limits of schema SendMessageRequest and Tag.
 const (
-	maxToLen        = 32
-	maxBodyChars    = 1600
-	maxClientRef    = 128
-	maxTags         = 16
-	maxTagLen       = 32
-	maxIDLen        = 64
-	partIDsHeader   = "X-Tikker-Message-Ids"
-	replayedHeader  = "Idempotent-Replayed"
-	opSendMessage   = "POST /messages"
-	opSendBatch     = "POST /messages/batch"
-	titleIdemMisuse = "Idempotency key reused with different payload"
-	titleIdemInUse  = "Idempotency key in use"
+	maxToLen       = 32
+	maxBodyChars   = 1600
+	maxClientRef   = 128
+	maxTags        = 16
+	maxTagLen      = 32
+	maxIDLen       = 64
+	replayedHeader = "Idempotent-Replayed"
+	opSendMessage  = "POST /messages"
+	opSendBatch    = "POST /messages/batch"
 )
 
 var tagPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
@@ -272,10 +270,14 @@ func (a *API) planOne(rv *routingView, req sendRequest, pointer string, actor do
 	res, err := sms.Plan(*req.Body, t.caps, t.opts)
 	if err != nil {
 		code := sms.ErrorCode(err)
-		if code == "" {
+		switch {
+		case code == "":
 			return nil, fmt.Errorf("plan message: %w", err)
+		case errors.Is(err, sms.ErrUnsupportedEncoding):
+			v.add(f("body"), code, "%s", unsupportedDetail(*req.Body))
+		default:
+			v.add(f("body"), code, "%s", planDetail(err))
 		}
-		v.add(f("body"), code, "%s", planDetail(err))
 		return nil, nil
 	}
 
@@ -297,6 +299,19 @@ func (a *API) planOne(rv *routingView, req sendRequest, pointer string, actor do
 		msgs[i] = m
 	}
 	return msgs, nil
+}
+
+// unsupportedDetail explains code unsupported_characters: the text needs an
+// encoding (UCS-2) that the channels which may send it cannot use, and
+// transliteration is off for them.
+func unsupportedDetail(body string) string {
+	for _, c := range body {
+		if !gsm.InGSM(c) {
+			return fmt.Sprintf("Character %q is outside the GSM-7 alphabet, and the channel sends GSM-7 only; "+
+				"enable transliterate on the channel or remove such characters.", c)
+		}
+	}
+	return "The channel cannot send this text in any encoding it supports."
 }
 
 // planDetail turns a planner error into a sentence for the client.
@@ -351,7 +366,7 @@ func (a *API) sendBatch(w http.ResponseWriter, r *http.Request, p auth.Principal
 		return v.err()
 	case n > MaxBatchSize:
 		return newProblem(http.StatusRequestEntityTooLarge, problemBatchTooLarge,
-			fmt.Sprintf("Batch contains %d messages; the maximum is %d.", n, MaxBatchSize)).withTitle(problemTitleBatchTooBig)
+			fmt.Sprintf("Batch contains %d messages; the maximum is %d.", n, MaxBatchSize))
 	}
 	return a.enqueue(w, r, p, enqueueArgs{op: opSendBatch, raw: raw, key: key, reqs: req.Messages, batch: true})
 }
@@ -366,6 +381,11 @@ type enqueueArgs struct {
 
 // enqueue validates and plans every request, stores all resulting messages in
 // one transaction (with the idempotency record) and answers 202.
+//
+// A request with a known Idempotency-Key is answered from the record before
+// it is validated: a replay returns the original messages (in their current
+// state) even if the request would be rejected now, for example because its
+// channel was disabled meanwhile.
 func (a *API) enqueue(w http.ResponseWriter, r *http.Request, p auth.Principal, in enqueueArgs) error {
 	ctx := r.Context()
 	actor := actorOf(p)
@@ -373,12 +393,20 @@ func (a *API) enqueue(w http.ResponseWriter, r *http.Request, p auth.Principal, 
 	if err != nil {
 		return malformed("Request body is not valid JSON.")
 	}
+	idem := store.Idempotency{Key: in.key, RequestHash: hash, Since: a.clk.Now().Add(-a.opts.IdempotencyTTL)}
 	if in.key != "" {
 		if !a.inflight.acquire(actor, in.key) {
 			return newProblem(http.StatusConflict, problemIdemInUse,
-				"A request with this Idempotency-Key is still being processed; retry later.").withTitle(titleIdemInUse)
+				"A request with this Idempotency-Key is still being processed; retry later.")
 		}
 		defer a.inflight.release(actor, in.key)
+		res, ok, err := a.st.Messages().Replay(ctx, actor, idem)
+		if err != nil {
+			return enqueueError(err)
+		}
+		if ok {
+			return a.writeEnqueued(w, res, in.batch)
+		}
 	}
 
 	rv, err := a.loadRouting(ctx)
@@ -387,6 +415,7 @@ func (a *API) enqueue(w http.ResponseWriter, r *http.Request, p auth.Principal, 
 	}
 	var v validation
 	var msgs []domain.Message
+	groups := make([]int, 0, len(in.reqs))
 	invalid := 0
 	for i, req := range in.reqs {
 		pointer := ""
@@ -402,53 +431,81 @@ func (a *API) enqueue(w http.ResponseWriter, r *http.Request, p auth.Principal, 
 			invalid++
 		}
 		msgs = append(msgs, parts...)
+		groups = append(groups, len(parts))
 	}
 	if !v.ok() {
 		if in.batch {
-			e := validationFailed(fmt.Sprintf("Batch rejected: %d of %d messages are invalid.", invalid, len(in.reqs)), v.errs...)
-			return e
+			return validationFailed(fmt.Sprintf("Batch rejected: %d of %d messages are invalid.", invalid, len(in.reqs)), v.errs...)
 		}
 		return v.err()
 	}
 
-	res, err := a.st.Messages().Enqueue(ctx, msgs, store.Idempotency{
-		Key: in.key, RequestHash: hash, Since: a.clk.Now().Add(-a.opts.IdempotencyTTL),
-	})
-	switch {
-	case errors.Is(err, domain.ErrIdempotencyMismatch):
-		return newProblem(http.StatusUnprocessableEntity, problemIdemMismatch,
-			"Idempotency-Key was already used with a different request body.").withTitle(titleIdemMisuse)
-	case err != nil:
-		return fmt.Errorf("enqueue: %w", err)
+	if in.batch {
+		idem.Groups = groups
 	}
-	if res.Replayed {
-		w.Header().Set(replayedHeader, "true")
-	} else {
+	res, err := a.st.Messages().Enqueue(ctx, msgs, idem)
+	if err != nil {
+		return enqueueError(err)
+	}
+	if !res.Replayed {
 		a.disp.Notify()
 	}
+	return a.writeEnqueued(w, res, in.batch)
+}
 
-	items := make([]messageDTO, len(res.Messages))
-	for i, m := range res.Messages {
-		items[i] = toMessageDTO(m)
+// enqueueError maps errors of Enqueue and Replay.
+func enqueueError(err error) error {
+	if errors.Is(err, domain.ErrIdempotencyMismatch) {
+		return newProblem(http.StatusUnprocessableEntity, problemIdemMismatch,
+			"Idempotency-Key was already used with a different request body.")
 	}
-	if in.batch {
-		writeJSON(w, http.StatusAccepted, struct {
-			Items []messageDTO `json:"items"`
-		}{Items: items})
+	return fmt.Errorf("enqueue: %w", err)
+}
+
+// sendResponse is schema SendMessageResponse: the messages created for one
+// SendMessageRequest (several when the text was split, SPEC §12.3).
+type sendResponse struct {
+	Messages []messageDTO `json:"messages"`
+}
+
+// writeEnqueued answers 202. POST /messages returns one SendMessageResponse
+// with Location pointing at its first message; POST /messages/batch returns
+// one SendMessageResponse per batch item, in request order.
+func (a *API) writeEnqueued(w http.ResponseWriter, res store.EnqueueResult, batch bool) error {
+	if res.Replayed {
+		w.Header().Set(replayedHeader, "true")
+	}
+	all := make([]messageDTO, len(res.Messages))
+	for i, m := range res.Messages {
+		all[i] = toMessageDTO(m)
+	}
+	if !batch {
+		w.Header().Set("Location", Prefix+"/messages/"+all[0].ID)
+		writeJSON(w, http.StatusAccepted, sendResponse{Messages: all})
 		return nil
 	}
-	// POST /messages answers with one object. A text split into several
-	// messages (SPEC §12.3) returns the first part; the IDs of all parts are
-	// in the X-Tikker-Message-Ids header.
-	w.Header().Set("Location", Prefix+"/messages/"+items[0].ID)
-	if len(items) > 1 {
-		ids := make([]string, len(items))
-		for i, it := range items {
-			ids[i] = it.ID
+	groups := res.Groups
+	if groups == nil { // records written without groups: one message per item
+		groups = make([]int, len(all))
+		for i := range groups {
+			groups[i] = 1
 		}
-		w.Header().Set(partIDsHeader, strings.Join(ids, ","))
 	}
-	writeJSON(w, http.StatusAccepted, items[0])
+	items := make([]sendResponse, 0, len(groups))
+	off := 0
+	for _, n := range groups {
+		if n < 1 || off+n > len(all) {
+			return fmt.Errorf("enqueue: %d messages do not match group sizes %v", len(all), groups)
+		}
+		items = append(items, sendResponse{Messages: all[off : off+n]})
+		off += n
+	}
+	if off != len(all) {
+		return fmt.Errorf("enqueue: %d messages do not match group sizes %v", len(all), groups)
+	}
+	writeJSON(w, http.StatusAccepted, struct {
+		Items []sendResponse `json:"items"`
+	}{Items: items})
 	return nil
 }
 

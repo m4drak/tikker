@@ -27,7 +27,7 @@ func TestE2ESendAndReceive(t *testing.T) {
 	if res.Status != 202 {
 		t.Fatal(res)
 	}
-	id := res.obj()["id"].(string)
+	id := res.msg()["id"].(string)
 	m := e.waitStatus(id, "sent")
 	if m["channel_id"] != ch || m["sent_at"] == nil || m["attempts"] != float64(1) {
 		t.Errorf("sent message = %v", m)
@@ -62,12 +62,11 @@ func TestE2ESplitIsSentAsSeparateMessages(t *testing.T) {
 	e.addChannel(e.addDevice("router"), "lte1", map[string]any{"rate_per_min": 600, "max_segments": 3})
 	body := strings.Repeat("abcdefghi ", 20) // 200 characters
 	res := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": body})
-	ids := strings.Split(res.Header.Get(partIDsHeader), ",")
-	if res.Status != 202 || len(ids) != 2 {
-		t.Fatalf("split: %s %v", res, res.Header)
+	if res.Status != 202 || len(res.msgs()) != 2 {
+		t.Fatalf("split: %s", res)
 	}
-	for _, id := range ids {
-		e.waitStatus(id, "sent")
+	for _, m := range res.msgs() {
+		e.waitStatus(m["id"].(string), "sent")
 	}
 	sent := e.srv.Sent()
 	if len(sent) != 2 || !strings.HasPrefix(sent[0].Message, "(1/2) ") || !strings.HasPrefix(sent[1].Message, "(2/2) ") {
@@ -81,7 +80,7 @@ func TestE2EQueuedUntilChannelIsHealthyAndCancel(t *testing.T) {
 	// A channel that was never checked is "down": messages wait.
 	r := e.req(http.MethodPost, channelsPath, e.adminTok, map[string]any{"device_id": dev, "port": "lte1"})
 	ch := r.obj()["id"].(string)
-	id := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "wait"}).obj()["id"].(string)
+	id := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "wait"}).msg()["id"].(string)
 	time.Sleep(200 * time.Millisecond)
 	if m := e.get(messagesPath+"/"+id, e.readTok).obj(); m["status"] != "queued" {
 		t.Fatalf("status = %v", m["status"])
@@ -96,7 +95,7 @@ func TestE2EQueuedUntilChannelIsHealthyAndCancel(t *testing.T) {
 	}
 	e.markHealthy(ch)
 	// A fresh message is sent now; the cancelled one never is.
-	id2 := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "go"}).obj()["id"].(string)
+	id2 := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "go"}).msg()["id"].(string)
 	e.waitStatus(id2, "sent")
 	if n := len(e.srv.Sent()); n != 1 {
 		t.Errorf("%d messages sent", n)
@@ -110,7 +109,7 @@ func TestE2EPermanentFailure(t *testing.T) {
 	e := newEnv(t, func(c *envConfig) { c.realClock = true; c.run = true })
 	e.basic()
 	e.srv.SetPolicies(fakePolicies(false))
-	id := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "x"}).obj()["id"].(string)
+	id := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "x"}).msg()["id"].(string)
 	eventually(t, "a recorded attempt", func() bool {
 		m := e.get(messagesPath+"/"+id, e.readTok).obj()
 		return m["attempts"].(float64) >= 1
@@ -129,7 +128,7 @@ func TestSecretsNeverLogged(t *testing.T) {
 	e.req(http.MethodPatch, devicesPath+"/"+dev, e.adminTok, map[string]any{"password": "Rotated-Secret-99"})
 	e.req(http.MethodPost, devicesPath+"/"+dev+"/test", e.adminTok, nil)
 	e.req(http.MethodPost, usersPath, e.adminTok, map[string]any{"username": "pw.user", "password": "Another-Secret-Pw-1", "role": "viewer"})
-	id := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "very private text"}).obj()["id"].(string)
+	id := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "very private text"}).msg()["id"].(string)
 	e.waitStatus(id, "sent")
 	logs := e.logs.String()
 	for _, secret := range []string{routerPass, "Rotated-Secret-99", "Another-Secret-Pw-1", e.adminTok, e.sendTok, e.readTok, "very private text", "600100200"} {

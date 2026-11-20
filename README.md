@@ -52,6 +52,7 @@ curl -s -X POST localhost:8080/api/v1/channels -H "Authorization: Bearer $TOKEN"
 # 5. Wysyłka: po chwili status "sent", a SMS widać w emulatorze
 curl -s -X POST localhost:8080/api/v1/messages -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"to":"+48600100200","body":"Hello from tikker"}'
+# odpowiedź: {"messages":[{"id":"<id wiadomości>","status":"queued",...}]}
 curl -s localhost:8080/api/v1/messages/<id wiadomości> -H "Authorization: Bearer $TOKEN"
 curl -s localhost:18728/_fake/sent
 

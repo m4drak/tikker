@@ -89,6 +89,17 @@ type MessageRepo interface {
 	// requests with the same key create the messages once.
 	Enqueue(ctx context.Context, msgs []domain.Message, idem Idempotency) (EnqueueResult, error)
 
+	// Replay looks up the idempotency record (createdBy, idem.Key) without
+	// storing anything. ok is true when a record created at or after
+	// idem.Since exists with the same RequestHash; the result is then what
+	// Enqueue would return for a replay (Replayed true, the original
+	// messages in their current state, the stored Groups). A record with a
+	// different RequestHash is domain.ErrIdempotencyMismatch. The API calls
+	// it before validating a request, so a replay returns the original
+	// response even if the request would no longer be accepted (for
+	// example because its channel was disabled in the meantime).
+	Replay(ctx context.Context, createdBy domain.Actor, idem Idempotency) (res EnqueueResult, ok bool, err error)
+
 	// AcquireNext atomically picks the next outbound message the channel in
 	// req may send, moves it to StatusSending, increments Attempts, sets
 	// ChannelID = req.ChannelID and LeaseUntil = req.LeaseUntil, and
@@ -182,12 +193,22 @@ type Idempotency struct {
 	RequestHash string
 	// Since is the start of the validity window (now - 24 h).
 	Since time.Time
+	// Groups optionally partitions the enqueued messages into consecutive
+	// groups (one per item of a batch request; a group has several messages
+	// when a text was split). The sizes are positive and add up to the
+	// number of messages. They are stored with the record and returned on a
+	// replay; nil means one group.
+	Groups []int
 }
 
-// EnqueueResult is returned by [MessageRepo.Enqueue].
+// EnqueueResult is returned by [MessageRepo.Enqueue] and
+// [MessageRepo.Replay].
 type EnqueueResult struct {
 	Messages []domain.Message // in request order
 	Replayed bool             // true: an earlier request with the same key
+	// Groups are the group sizes of the request (Idempotency.Groups); nil
+	// means one group.
+	Groups []int
 }
 
 // AcquireRequest asks for the next message for one channel.

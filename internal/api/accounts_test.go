@@ -274,7 +274,7 @@ func TestAuthentication(t *testing.T) {
 func TestScopes(t *testing.T) {
 	e := newEnv(t)
 	e.basic()
-	msg := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "x"}).obj()["id"].(string)
+	msg := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "x"}).msg()["id"].(string)
 	body := map[string]any{"to": "600100200", "body": "x"}
 
 	type op struct {
@@ -378,26 +378,33 @@ func TestRateLimit(t *testing.T) {
 
 func TestRateLimitDisabled(t *testing.T) {
 	e := newEnv(t, func(c *envConfig) { c.opts.RateLimit = RateLimit{Requests: -1} })
-	// Without a limit there is nothing to report in RateLimit-* headers.
-	e.undocumented(func() {
-		for i := 0; i < 300; i++ {
-			if r := e.get(messagesPath, e.readTok); r.Status != 200 || r.Header.Get("RateLimit-Limit") != "" {
-				t.Fatalf("request %d: %s", i, r)
-			}
+	// Without a limit there is nothing to report in RateLimit-* headers
+	// (the contract says so; the contract check knows the limit is off).
+	for i := 0; i < 300; i++ {
+		if r := e.get(messagesPath, e.readTok); r.Status != 200 || r.Header.Get("RateLimit-Limit") != "" {
+			t.Fatalf("request %d: %s", i, r)
 		}
-	})
+	}
 }
 
 func TestRoutingErrors(t *testing.T) {
 	e := newEnv(t)
-	// Unknown path and wrong method: problems, outside the per-operation contract.
+	// Unknown path and wrong method: the common responses of the contract
+	// (validated by the contract check against components/responses).
 	p := e.req("GET", "/api/v1/nothing", e.readTok, nil)
 	p.problem(404, problemNotFound)
 	p = e.req("PUT", messagesPath, e.readTok, nil)
-	p.problem(405, problemMalformed)
+	pm := p.problem(405, problemMethodNotAllow)
 	if allow := p.Header.Get("Allow"); allow != "GET, POST" {
 		t.Errorf("Allow = %q", allow)
 	}
-	e.req("POST", messagesPath+"/01ARZ3NDEKTSV4RRFFQ69G5FAV", e.readTok, nil).problem(405, problemMalformed)
+	if pm["title"] != "Method Not Allowed" {
+		t.Errorf("title = %v", pm["title"])
+	}
+	r := e.req("POST", messagesPath+"/01ARZ3NDEKTSV4RRFFQ69G5FAV", "", nil)
+	r.problem(405, problemMethodNotAllow)
+	if allow := r.Header.Get("Allow"); allow != "GET, DELETE" {
+		t.Errorf("Allow = %q", allow)
+	}
 	e.req("GET", "/other", "", nil).problem(404, problemNotFound)
 }

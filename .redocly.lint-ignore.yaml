@@ -3,7 +3,11 @@
 #
 # Świadome wyjątki od reguł lintera.
 # Sondy /healthz i /readyz nie mają odpowiedzi 4xx: nie przyjmują parametrów ani autoryzacji.
+# Odpowiedź 405 jest wspólna dla wszystkich ścieżek (opis API, „Odpowiedzi wspólne”): metoda, której
+# ścieżka nie obsługuje, nie jest operacją, więc żadna operacja nie może się do niej odwołać.
 api/openapi.yaml:
+  no-unused-components:
+    - '#/components/responses/MethodNotAllowed'
   operation-4xx-response:
     - '#/paths/~1healthz/get/responses'
     - '#/paths/~1readyz/get/responses'

@@ -24,17 +24,12 @@ func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, erro
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
-			return nil, newProblem(http.StatusRequestEntityTooLarge, problemBatchTooLarge,
-				fmt.Sprintf("Request body exceeds the limit of %d bytes.", mbe.Limit)).withTitle(problemTitleBatchTooBig)
+			return nil, newProblem(http.StatusRequestEntityTooLarge, problemPayloadTooLarge,
+				fmt.Sprintf("Request body exceeds the limit of %d bytes.", mbe.Limit))
 		}
 		return nil, malformed("Request body could not be read.")
 	}
 	return b, nil
-}
-
-func (e *apiError) withTitle(t string) *apiError {
-	e.title = t
-	return e
 }
 
 // decodeStrict decodes body into v (a pointer to a struct) like a schema with

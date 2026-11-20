@@ -4,12 +4,16 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/m4drak/tikker/internal/connector"
 	"github.com/m4drak/tikker/internal/domain"
+	"github.com/m4drak/tikker/internal/secrets"
 )
 
 func TestChannelCRUD(t *testing.T) {
@@ -24,7 +28,7 @@ func TestChannelCRUD(t *testing.T) {
 	id := c["id"].(string)
 	want := map[string]any{
 		"device_id": dev, "port": "lte1", "name": "Biuro/lte1", "tags": []any{"orange", "bulk"}, "rate_per_min": float64(6),
-		"max_segments": float64(3), "transliterate": false, "enabled": true, "state": "down", "state_reason": "not checked yet",
+		"max_segments": float64(3), "transliterate": true /* RouterOS has no UCS-2 */, "enabled": true, "state": "down", "state_reason": "not checked yet",
 		"last_health_at": nil, "signal": nil, "operator": nil, "queue_depth": float64(0),
 	}
 	for k, v := range want {
@@ -209,5 +213,81 @@ func TestChannelHealthOverlay(t *testing.T) {
 	}
 	if got := e.get(channelsPath+"?state=degraded", e.readTok).obj()["items"].([]any); len(got) != 1 {
 		t.Errorf("filter by live state: %v", got)
+	}
+}
+
+// capsConnector is a connector with fixed capabilities.
+type capsConnector struct {
+	connector.Connector
+	caps   connector.Capabilities
+	closed *bool
+}
+
+func (c capsConnector) Capabilities() connector.Capabilities { return c.caps }
+func (c capsConnector) Close() error                         { *c.closed = true; return nil }
+
+type factoryFunc func(ctx context.Context, cfg connector.DeviceConfig) (connector.Connector, error)
+
+func (f factoryFunc) New(ctx context.Context, cfg connector.DeviceConfig) (connector.Connector, error) {
+	return f(ctx, cfg)
+}
+
+type failingCreds struct{}
+
+func (failingCreds) ConnectorConfig(domain.Device) (connector.DeviceConfig, error) {
+	return connector.DeviceConfig{}, errors.New("cannot decrypt")
+}
+
+func (failingCreds) Encrypt(domain.ID, secrets.Password) ([]byte, error) {
+	return nil, errors.New("no")
+}
+
+// TestChannelTransliterateDefault: an omitted transliterate follows the
+// connector's capabilities (SPEC §4.6); an explicit value always wins.
+func TestChannelTransliterateDefault(t *testing.T) {
+	e := newEnv(t)
+	dev := e.addDevice("router")
+	create := func(port string, extra map[string]any) bool {
+		t.Helper()
+		body := map[string]any{"device_id": dev, "port": port}
+		for k, v := range extra {
+			body[k] = v
+		}
+		res := e.req(http.MethodPost, channelsPath, e.adminTok, body)
+		if res.Status != http.StatusCreated {
+			t.Fatalf("create %s: %s", port, res)
+		}
+		return res.obj()["transliterate"].(bool)
+	}
+	// RouterOS (the real connector) sends GSM-7 only.
+	if !create("p1", nil) {
+		t.Error("RouterOS channel: transliterate should default to true")
+	}
+	if create("p2", map[string]any{"transliterate": false}) {
+		t.Error("explicit false ignored")
+	}
+
+	// A connector with UCS-2: off; the probe connector is closed again.
+	closed := false
+	e.api.conns = factoryFunc(func(context.Context, connector.DeviceConfig) (connector.Connector, error) {
+		return capsConnector{caps: connector.Capabilities{Encodings: []domain.Encoding{domain.EncodingGSM7, domain.EncodingUCS2}}, closed: &closed}, nil
+	})
+	if create("p3", nil) || !closed {
+		t.Errorf("UCS-2 connector: transliterate should default to false (closed=%v)", closed)
+	}
+	if !create("p4", map[string]any{"transliterate": true}) {
+		t.Error("explicit true ignored")
+	}
+
+	// Unknown capabilities: the GSM-7-safe default.
+	e.api.conns = factoryFunc(func(context.Context, connector.DeviceConfig) (connector.Connector, error) {
+		return nil, errors.New("no connector")
+	})
+	if !create("p5", nil) {
+		t.Error("connector error: transliterate should default to true")
+	}
+	e.api.creds = failingCreds{}
+	if !create("p6", nil) {
+		t.Error("credentials error: transliterate should default to true")
 	}
 }

@@ -98,7 +98,7 @@ type testEnv struct {
 	operator     domain.User
 	viewer       domain.User
 	val          *contract
-	skipContract bool // for responses the contract does not describe
+	rateLimitOff bool // the API runs without a request budget: no RateLimit-* headers
 }
 
 // countingReloader wraps ChannelSync to count reloads.
@@ -197,6 +197,7 @@ func newEnv(t *testing.T, mod ...func(*envConfig)) *testEnv {
 	})
 
 	opts := cfg.opts
+	e.rateLimitOff = opts.RateLimit.Requests < 0
 	if !cfg.noHTTP {
 		opts.AllowedHTTPHosts = append(opts.AllowedHTTPHosts, "127.0.0.1")
 	}
@@ -261,6 +262,45 @@ func (r *result) obj() map[string]any {
 
 func (r *result) String() string { return fmt.Sprintf("%d %s", r.Status, r.Body) }
 
+// msgs returns the messages of a SendMessageResponse (POST /messages).
+func (r *result) msgs() []map[string]any {
+	r.t.Helper()
+	var resp struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	r.decode(&resp)
+	if len(resp.Messages) == 0 {
+		r.t.Fatalf("no messages in the response: %s", r)
+	}
+	return resp.Messages
+}
+
+// msg returns the only message of a SendMessageResponse.
+func (r *result) msg() map[string]any {
+	r.t.Helper()
+	ms := r.msgs()
+	if len(ms) != 1 {
+		r.t.Fatalf("%d messages in the response, want 1: %s", len(ms), r)
+	}
+	return ms[0]
+}
+
+// batchItems returns the messages of each item of a SendBatchResponse.
+func (r *result) batchItems() [][]map[string]any {
+	r.t.Helper()
+	var resp struct {
+		Items []struct {
+			Messages []map[string]any `json:"messages"`
+		} `json:"items"`
+	}
+	r.decode(&resp)
+	out := make([][]map[string]any, len(resp.Items))
+	for i, it := range resp.Items {
+		out[i] = it.Messages
+	}
+	return out
+}
+
 // problem asserts a problem+json response and returns it.
 func (r *result) problem(status int, typ string) map[string]any {
 	r.t.Helper()
@@ -320,9 +360,7 @@ func (e *testEnv) req(method, path, token string, body any, hdr ...string) *resu
 	w := httptest.NewRecorder()
 	e.h.ServeHTTP(w, r)
 	res := &result{t: e.t, Status: w.Code, Header: w.Header(), Body: w.Body.Bytes()}
-	if !e.skipContract {
-		e.val.check(e.t, method, path, res)
-	}
+	e.val.check(e.t, method, path, res, !e.rateLimitOff)
 	return res
 }
 
@@ -431,14 +469,6 @@ func fakeSMS(from, text string) fake.IncomingSMS { return fake.IncomingSMS{From:
 func auditFilter() store.AuditFilter { return store.AuditFilter{} }
 
 func pageRequest(n int) store.PageRequest { return store.PageRequest{Limit: n} }
-
-// undocumented runs fn without contract validation, for responses that the
-// contract does not describe (reported as gaps).
-func (e *testEnv) undocumented(fn func()) {
-	e.skipContract = true
-	defer func() { e.skipContract = false }()
-	fn()
-}
 
 // selfSignedPEM returns a PEM encoded self-signed CA certificate.
 func selfSignedPEM(t *testing.T) string {

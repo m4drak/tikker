@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"slices"
@@ -231,9 +232,15 @@ func (a *API) createChannel(w http.ResponseWriter, r *http.Request, p auth.Princ
 		return err
 	}
 
+	var translit bool
+	if req.Transliterate != nil {
+		translit = *req.Transliterate
+	} else {
+		translit = a.defaultTransliterate(ctx, dev)
+	}
 	c := domain.Channel{
 		ID: a.ids.NewID(), DeviceID: dev.ID, Port: *req.Port, Tags: append([]string{}, req.Tags...),
-		RatePerMin: rate, MaxSegments: segs, Transliterate: req.Transliterate != nil && *req.Transliterate,
+		RatePerMin: rate, MaxSegments: segs, Transliterate: translit,
 		Enabled: req.Enabled == nil || *req.Enabled,
 		State:   domain.ChannelDown, StateReason: reasonNotCheckedYet,
 	}
@@ -270,6 +277,30 @@ func (a *API) createChannel(w http.ResponseWriter, r *http.Request, p auth.Princ
 	w.Header().Set("Location", Prefix+"/channels/"+dto.ID)
 	writeJSON(w, http.StatusCreated, dto)
 	return nil
+}
+
+// defaultTransliterate is the transliterate setting of a new channel whose
+// request leaves it out (SPEC §4.6): on when the device's connector cannot
+// send UCS-2, so that Polish text is sendable out of the box (RouterOS sends
+// GSM-7 only), off when it can. When the capabilities cannot be determined
+// (the stored password does not decrypt, the connector cannot be built) the
+// GSM-7-safe choice, on, is made; an administrator can change it with PATCH.
+func (a *API) defaultTransliterate(ctx context.Context, dev domain.Device) bool {
+	cfg, err := a.creds.ConnectorConfig(dev)
+	if err != nil {
+		a.log.Warn("device credentials unusable; transliterate defaults to on",
+			slog.String("device_id", string(dev.ID)), slog.Any("error", err))
+		return true
+	}
+	// Building a connector only prepares a client; the device is not contacted.
+	conn, err := a.conns.New(ctx, cfg)
+	if err != nil {
+		a.log.Warn("connector cannot be built; transliterate defaults to on",
+			slog.String("device_id", string(dev.ID)), slog.Any("error", err))
+		return true
+	}
+	defer func() { _ = conn.Close() }()
+	return !conn.Capabilities().SupportsEncoding(domain.EncodingUCS2)
 }
 
 var channelPatchFields = []string{"name", "tags", "rate_per_min", "max_segments", "transliterate", "enabled"}

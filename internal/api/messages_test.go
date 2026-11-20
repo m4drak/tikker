@@ -4,8 +4,10 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/m4drak/tikker/internal/domain"
 	"github.com/m4drak/tikker/internal/sms"
+	"github.com/m4drak/tikker/internal/store"
 )
 
 const messagesPath = "/api/v1/messages"
@@ -25,7 +28,7 @@ func (e *testEnv) basic() string {
 
 func TestSendMessage(t *testing.T) {
 	e := newEnv(t)
-	ch := e.addChannel(e.addDevice("router"), "lte1", map[string]any{"tags": []string{"bulk"}})
+	ch := e.addChannel(e.addDevice("router"), "lte1", map[string]any{"tags": []string{"bulk"}, "transliterate": false})
 
 	res := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{
 		"to": "600 100 200", "body": "Hello there", "client_ref": "ref-1", "tags": []string{"bulk"},
@@ -33,7 +36,7 @@ func TestSendMessage(t *testing.T) {
 	if res.Status != http.StatusAccepted {
 		t.Fatalf("want 202: %s", res)
 	}
-	m := res.obj()
+	m := res.msg()
 	id := m["id"].(string)
 	if loc := res.Header.Get("Location"); loc != "/api/v1/messages/"+id {
 		t.Errorf("Location = %q", loc)
@@ -41,7 +44,7 @@ func TestSendMessage(t *testing.T) {
 	want := map[string]any{
 		"direction": "out", "channel_id": nil, "peer": "+48600100200", "body": "Hello there", "encoding": "gsm7",
 		"segments": float64(1), "status": "queued", "attempts": float64(0), "next_attempt_at": nil, "last_error": nil,
-		"client_ref": "ref-1", "tags": []any{"bulk"}, "expires_at": nil, "created_by": "token:" + tokenID(t, e, e.sendTok),
+		"possible_duplicate": false, "client_ref": "ref-1", "tags": []any{"bulk"}, "expires_at": nil, "created_by": "token:" + tokenID(t, e, e.sendTok),
 		"created_at": "2026-11-19T12:00:00Z", "sent_at": nil, "received_at": nil,
 	}
 	for k, v := range want {
@@ -49,18 +52,30 @@ func TestSendMessage(t *testing.T) {
 			t.Errorf("%s = %#v, want %#v", k, m[k], v)
 		}
 	}
-	if res.Header.Get(replayedHeader) != "" || res.Header.Get(partIDsHeader) != "" {
+	if res.Header.Get(replayedHeader) != "" || res.Header.Get("X-Tikker-Message-Ids") != "" {
 		t.Errorf("unexpected headers: %v", res.Header)
 	}
 
 	// Explicit channel: pinned, so the channel is reported at once.
 	res = e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "+48600100200", "body": "pinned", "channel_id": ch})
-	if res.Status != http.StatusAccepted || res.obj()["channel_id"] != ch {
+	if res.Status != http.StatusAccepted || res.msg()["channel_id"] != ch {
 		t.Fatalf("pinned: %s", res)
 	}
 	// RouterOS sends GSM-7 only: Polish text without transliteration is refused.
 	res = e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "+48600100200", "body": "Zażółć gęślą jaźń"})
-	res.problem(http.StatusUnprocessableEntity, problemValidation)
+	p := res.problem(http.StatusUnprocessableEntity, problemValidation)
+	if got := problemCodes(p); !reflect.DeepEqual(got, []string{"/body:unsupported_characters"}) {
+		t.Errorf("errors = %v", got)
+	}
+	if d := p["detail"].(string); !strings.Contains(d, `'ż'`) || !strings.Contains(d, "transliterate") {
+		t.Errorf("detail = %q", d)
+	}
+}
+
+func TestUnsupportedDetail(t *testing.T) {
+	if d := unsupportedDetail("abc"); !strings.Contains(d, "cannot send") {
+		t.Errorf("detail without a non-GSM character = %q", d)
+	}
 }
 
 func tokenID(t *testing.T, e *testEnv, raw string) string {
@@ -80,7 +95,7 @@ func TestSendMessageTransliterate(t *testing.T) {
 	if res.Status != http.StatusAccepted {
 		t.Fatal(res)
 	}
-	m := res.obj()
+	m := res.msg()
 	if m["body"] != "Zazolc gesla jazn" || m["encoding"] != "gsm7" {
 		t.Errorf("body/encoding = %v / %v", m["body"], m["encoding"])
 	}
@@ -107,7 +122,6 @@ func TestSendMessageValidation(t *testing.T) {
 		{"missing body", map[string]any{"to": "600100200"}, 422, problemValidation, []string{"/body:required"}},
 		{"huge body", map[string]any{"to": "600100200", "body": strings.Repeat("a", 1601)}, 422, problemValidation, []string{"/body:out_of_range"}},
 		{"too many segments", map[string]any{"to": "600100200", "body": long}, 422, problemValidation, []string{"/body:too_many_segments"}},
-		{"ucs2 needs transliteration", map[string]any{"to": "600100200", "body": "zażółć"}, 422, problemValidation, []string{"/body:invalid_format"}},
 		{"unknown channel", map[string]any{"to": "600100200", "body": "x", "channel_id": "nope"}, 422, problemValidation, []string{"/channel_id:unknown_channel"}},
 		{"disabled channel", map[string]any{"to": "600100200", "body": "x", "channel_id": disabled}, 422, problemValidation, []string{"/channel_id:channel_disabled"}},
 		{"bad channel id", map[string]any{"to": "600100200", "body": "x", "channel_id": strings.Repeat("x", 65)}, 422, problemValidation, []string{"/channel_id:invalid_format"}},
@@ -181,13 +195,19 @@ func TestSendMessageSplit(t *testing.T) {
 	if res.Status != http.StatusAccepted {
 		t.Fatal(res)
 	}
-	ids := strings.Split(res.Header.Get(partIDsHeader), ",")
-	if len(ids) < 2 {
-		t.Fatalf("expected several parts, header %q", res.Header.Get(partIDsHeader))
+	parts := res.msgs()
+	if len(parts) < 2 {
+		t.Fatalf("expected several parts: %s", res)
 	}
-	first := res.obj()
-	if first["id"] != ids[0] || !strings.HasPrefix(first["body"].(string), fmt.Sprintf("(1/%d) ", len(ids))) {
-		t.Errorf("first part = %v", first)
+	var ids []string
+	for _, m := range parts {
+		ids = append(ids, m["id"].(string))
+	}
+	if loc := res.Header.Get("Location"); loc != messagesPath+"/"+ids[0] {
+		t.Errorf("Location = %q, want the first part", loc)
+	}
+	if !strings.HasPrefix(parts[0]["body"].(string), fmt.Sprintf("(1/%d) ", len(ids))) {
+		t.Errorf("first part = %v", parts[0])
 	}
 	var joined string
 	for i, id := range ids {
@@ -207,12 +227,97 @@ func TestSendMessageSplit(t *testing.T) {
 	// A replay returns the same parts and creates no new ones.
 	again := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": body, "client_ref": "doc-7"},
 		"Idempotency-Key", "split-1")
-	if again.Header.Get(partIDsHeader) != res.Header.Get(partIDsHeader) || again.Header.Get(replayedHeader) != "true" {
+	if again.Header.Get(replayedHeader) != "true" || again.Header.Get("Location") != res.Header.Get("Location") {
 		t.Errorf("replay headers = %v", again.Header)
+	}
+	var replayed []string
+	for _, m := range again.msgs() {
+		replayed = append(replayed, m["id"].(string))
+	}
+	if !reflect.DeepEqual(replayed, ids) {
+		t.Errorf("replay returned %v, want %v", replayed, ids)
 	}
 	page := e.get(messagesPath, e.readTok).obj()
 	if n := len(page["items"].([]any)); n != len(ids) {
 		t.Errorf("%d messages stored, want %d", n, len(ids))
+	}
+}
+
+// TestBatchSplitGroups: every batch item is answered with the messages
+// created for it, also on a replay after the channel settings changed so that
+// splitting the texts again would give other parts.
+func TestBatchSplitGroups(t *testing.T) {
+	e := newEnv(t, func(c *envConfig) { c.opts.LongMessageStrategy = sms.StrategySplit })
+	ch := e.addChannel(e.addDevice("router"), "lte1", map[string]any{"max_segments": 3})
+	long := strings.Repeat("0123456789 ", 20) // two parts
+	batch := map[string]any{"messages": []map[string]any{
+		{"to": "600100200", "body": "short"},
+		{"to": "600100201", "body": long, "client_ref": "long"},
+		{"to": "600100202", "body": "short too"},
+	}}
+	res := e.req(http.MethodPost, messagesPath+"/batch", e.sendTok, batch, "Idempotency-Key", "b-split")
+	if res.Status != 202 {
+		t.Fatal(res)
+	}
+	items := res.batchItems()
+	if len(items) != 3 || len(items[0]) != 1 || len(items[1]) != 2 || len(items[2]) != 1 {
+		t.Fatalf("groups = %v", items)
+	}
+	if items[0][0]["peer"] != "+48600100200" || items[1][1]["client_ref"] != "long" || items[2][0]["body"] != "short too" ||
+		!strings.HasPrefix(items[1][1]["body"].(string), "(2/2) ") {
+		t.Errorf("items = %v", items)
+	}
+
+	// One segment at most: the long text would now be rejected. The replay
+	// is recognised first and returns the original groups.
+	if r := e.req(http.MethodPatch, channelsPath+"/"+ch, e.adminTok, map[string]any{"max_segments": 1, "enabled": false}); r.Status != 200 {
+		t.Fatal(r)
+	}
+	again := e.req(http.MethodPost, messagesPath+"/batch", e.sendTok, batch, "Idempotency-Key", "b-split")
+	if again.Status != 202 || again.Header.Get(replayedHeader) != "true" {
+		t.Fatalf("replay: %s", again)
+	}
+	got := again.batchItems()
+	if len(got) != 3 || len(got[1]) != 2 || got[1][0]["id"] != items[1][0]["id"] || got[2][0]["id"] != items[2][0]["id"] {
+		t.Errorf("replayed groups = %v", got)
+	}
+	// Single requests are replayed before validation as well.
+	one := map[string]any{"to": "600100200", "body": "x", "channel_id": ch}
+	e.req(http.MethodPatch, channelsPath+"/"+ch, e.adminTok, map[string]any{"enabled": true})
+	first := e.req(http.MethodPost, messagesPath, e.sendTok, one, "Idempotency-Key", "one")
+	e.req(http.MethodPatch, channelsPath+"/"+ch, e.adminTok, map[string]any{"enabled": false})
+	e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "y", "channel_id": ch}).problem(422, problemValidation)
+	replay := e.req(http.MethodPost, messagesPath, e.sendTok, one, "Idempotency-Key", "one")
+	if replay.Status != 202 || replay.msg()["id"] != first.msg()["id"] {
+		t.Errorf("replay of a now invalid request: %s", replay)
+	}
+	// A key of a single request used for a batch is a mismatch, also before validation.
+	e.req(http.MethodPost, messagesPath+"/batch", e.sendTok, batch, "Idempotency-Key", "one").problem(422, problemIdemMismatch)
+}
+
+// TestWriteEnqueuedGroups covers records without groups and corrupt groups.
+func TestWriteEnqueuedGroups(t *testing.T) {
+	e := newEnv(t)
+	msgs := []domain.Message{
+		{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Direction: domain.DirectionOut, Status: domain.StatusQueued, CreatedAt: t0},
+		{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAW", Direction: domain.DirectionOut, Status: domain.StatusQueued, CreatedAt: t0},
+	}
+	w := httptest.NewRecorder()
+	if err := e.api.writeEnqueued(w, store.EnqueueResult{Messages: msgs}, true); err != nil || !strings.Contains(w.Body.String(), `"items":[{"messages":[{`) {
+		t.Fatalf("nil groups: %v %s", err, w.Body)
+	}
+	var resp struct {
+		Items []struct {
+			Messages []any `json:"messages"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || len(resp.Items) != 2 {
+		t.Fatalf("nil groups: one item per message expected: %s", w.Body)
+	}
+	for _, g := range [][]int{{3}, {1}, {0, 2}} {
+		if err := e.api.writeEnqueued(httptest.NewRecorder(), store.EnqueueResult{Messages: msgs, Groups: g}, true); err == nil {
+			t.Errorf("groups %v accepted", g)
+		}
 	}
 }
 
@@ -230,7 +335,7 @@ func TestSendMessageTruncate(t *testing.T) {
 	e := newEnv(t, func(c *envConfig) { c.opts.LongMessageStrategy = sms.StrategyTruncate })
 	e.basic()
 	res := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": strings.Repeat("a", 200)})
-	if res.Status != 202 || len(res.obj()["body"].(string)) != 160 {
+	if res.Status != 202 || len(res.msg()["body"].(string)) != 160 {
 		t.Fatal(res)
 	}
 }
@@ -240,7 +345,7 @@ func TestSendMessageShortNumbers(t *testing.T) {
 	e.basic()
 	for _, to := range []string{"8012", "MyBank"} {
 		res := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": to, "body": "x"})
-		if res.Status != 202 || res.obj()["peer"] != to {
+		if res.Status != 202 || res.msg()["peer"] != to {
 			t.Errorf("%s: %s", to, res)
 		}
 	}
@@ -260,7 +365,7 @@ func TestSendMessageExpiry(t *testing.T) {
 	res = e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{
 		"to": "600100200", "body": "x", "expires_at": "2026-11-19T13:05:00+01:00",
 	})
-	if res.Status != 202 || res.obj()["expires_at"] != "2026-11-19T12:05:00Z" {
+	if res.Status != 202 || res.msg()["expires_at"] != "2026-11-19T12:05:00Z" {
 		t.Fatal(res)
 	}
 }
@@ -280,7 +385,7 @@ func TestIdempotency(t *testing.T) {
 		if again.Status != 202 || again.Header.Get(replayedHeader) != "true" {
 			t.Fatalf("replay: %s %v", again, again.Header)
 		}
-		if again.obj()["id"] != first.obj()["id"] {
+		if again.msg()["id"] != first.msg()["id"] {
 			t.Errorf("replay returned another message")
 		}
 		if again.Header.Get("Location") != first.Header.Get("Location") {
@@ -308,8 +413,8 @@ func TestIdempotency(t *testing.T) {
 		t.Errorf("key was reserved by a failed request: %s", res)
 	}
 	// Without a key every request creates a message.
-	a := e.req(http.MethodPost, messagesPath, e.sendTok, body).obj()["id"]
-	b := e.req(http.MethodPost, messagesPath, e.sendTok, body).obj()["id"]
+	a := e.req(http.MethodPost, messagesPath, e.sendTok, body).msg()["id"]
+	b := e.req(http.MethodPost, messagesPath, e.sendTok, body).msg()["id"]
 	if a == b {
 		t.Error("requests without a key must not be merged")
 	}
@@ -363,15 +468,18 @@ func TestBatch(t *testing.T) {
 	if res.Status != 202 {
 		t.Fatal(res)
 	}
-	items := res.obj()["items"].([]any)
-	if len(items) != 2 || items[0].(map[string]any)["peer"] != "+48600100200" || items[1].(map[string]any)["body"] != "two" {
+	items := res.batchItems()
+	if len(items) != 2 || len(items[0]) != 1 || len(items[1]) != 1 || items[0][0]["peer"] != "+48600100200" || items[1][0]["body"] != "two" {
 		t.Fatalf("items = %v", items)
+	}
+	if res.Header.Get("Location") != "" {
+		t.Errorf("batch with Location %q", res.Header.Get("Location"))
 	}
 	again := e.req(http.MethodPost, messagesPath+"/batch", e.sendTok, map[string]any{"messages": []map[string]any{
 		{"to": "600100200", "body": "one", "client_ref": "1"},
 		{"to": "+48600100201", "body": "two", "tags": []string{}},
 	}}, "Idempotency-Key", "b-1")
-	if again.Header.Get(replayedHeader) != "true" || !reflect.DeepEqual(again.obj()["items"].([]any)[0].(map[string]any)["id"], items[0].(map[string]any)["id"]) {
+	if again.Header.Get(replayedHeader) != "true" || again.batchItems()[0][0]["id"] != items[0][0]["id"] {
 		t.Errorf("replay: %s", again)
 	}
 }
@@ -412,7 +520,7 @@ func TestBatchLimits(t *testing.T) {
 	}
 	// 100 are fine.
 	res = e.req(http.MethodPost, messagesPath+"/batch", e.sendTok, map[string]any{"messages": msgs[:100]})
-	if res.Status != 202 || len(res.obj()["items"].([]any)) != 100 {
+	if res.Status != 202 || len(res.batchItems()) != 100 {
 		t.Fatalf("100 messages: %d", res.Status)
 	}
 	// Empty batch.
@@ -421,12 +529,20 @@ func TestBatchLimits(t *testing.T) {
 	e.req(http.MethodPost, messagesPath+"/batch", e.sendTok, `{"messages":[{"to":"1","body":"x","bogus":1}]}`).problem(400, problemMalformed)
 	// A body above the size limit.
 	big := map[string]any{"messages": []map[string]any{{"to": "600100200", "body": strings.Repeat("a", 70<<10)}}}
-	e.req(http.MethodPost, messagesPath+"/batch", e.sendTok, big).problem(413, problemBatchTooLarge)
-	// POST /messages answers 413 for an oversized body too, which the
-	// contract only declares for the batch endpoint.
-	e.undocumented(func() {
-		e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": strings.Repeat("a", 70<<10)}).problem(413, problemBatchTooLarge)
-	})
+	p = e.req(http.MethodPost, messagesPath+"/batch", e.sendTok, big).problem(413, problemPayloadTooLarge)
+	if p["title"] != "Payload too large" {
+		t.Errorf("problem = %v", p)
+	}
+	// Every operation with a body has the same limit.
+	huge := strings.Repeat("a", 70<<10)
+	e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": huge}).problem(413, problemPayloadTooLarge)
+	for _, op := range []struct{ method, path string }{
+		{http.MethodPost, channelsPath}, {http.MethodPatch, channelsPath + "/x"},
+		{http.MethodPost, devicesPath}, {http.MethodPatch, devicesPath + "/x"},
+		{http.MethodPost, "/api/v1/tokens"}, {http.MethodPost, usersPath}, {http.MethodPatch, usersPath + "/x"},
+	} {
+		e.req(op.method, op.path, e.adminTok, map[string]any{"name": huge}).problem(413, problemPayloadTooLarge)
+	}
 }
 
 func TestListMessages(t *testing.T) {
@@ -440,7 +556,7 @@ func TestListMessages(t *testing.T) {
 			to = "+48600100201"
 		}
 		res := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": to, "body": fmt.Sprintf("m%d", i)})
-		ids = append(ids, res.obj()["id"].(string))
+		ids = append(ids, res.msg()["id"].(string))
 	}
 	// Cancel one, so statuses differ.
 	e.req(http.MethodDelete, messagesPath+"/"+ids[0], e.sendTok, nil)
@@ -569,7 +685,7 @@ func TestListMessagesBadParameters(t *testing.T) {
 func TestGetMessage(t *testing.T) {
 	e := newEnv(t)
 	e.basic()
-	id := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "hi"}).obj()["id"].(string)
+	id := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "hi"}).msg()["id"].(string)
 	res := e.get(messagesPath+"/"+id, e.readTok)
 	if res.Status != 200 || res.obj()["id"] != id {
 		t.Fatal(res)
@@ -582,7 +698,7 @@ func TestGetMessage(t *testing.T) {
 func TestCancelMessage(t *testing.T) {
 	e := newEnv(t)
 	ch := e.basic()
-	id := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "hi"}).obj()["id"].(string)
+	id := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "hi"}).msg()["id"].(string)
 
 	res := e.req(http.MethodDelete, messagesPath+"/"+id, e.sendTok, nil)
 	if res.Status != 200 || res.obj()["status"] != "cancelled" {
@@ -630,7 +746,7 @@ func TestStrictest(t *testing.T) {
 	// Tag "a": both channels. The strictest max_segments is 2 and transliteration
 	// is on if any channel has it, so one stored text can go through both.
 	res := e.req(http.MethodPost, messagesPath, e.sendTok, map[string]any{"to": "600100200", "body": "Zażółć gęślą jaźń", "tags": []string{"a"}})
-	if res.Status != 202 || res.obj()["body"] != "Zazolc gesla jazn" {
+	if res.Status != 202 || res.msg()["body"] != "Zazolc gesla jazn" {
 		t.Fatalf("tag a: %s", res)
 	}
 	// Tag "b" only matches lte2; a text needing 3 segments is too long there.

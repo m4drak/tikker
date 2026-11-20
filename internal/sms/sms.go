@@ -63,7 +63,8 @@ var (
 	// too_many_segments.
 	ErrTooLong = errors.New("sms: text exceeds the segment limit")
 	// ErrUnsupportedEncoding: the text needs an encoding the device cannot
-	// send (typically UCS-2 on RouterOS) and transliteration is off.
+	// send (typically UCS-2 on RouterOS) and transliteration is off. API
+	// code unsupported_characters.
 	ErrUnsupportedEncoding = errors.New("sms: text needs an encoding the device does not support")
 	// ErrEmptyBody: nothing to send (also after transliteration dropped
 	// invisible characters).
@@ -80,7 +81,9 @@ func ErrorCode(err error) string {
 		return "too_many_segments"
 	case errors.Is(err, phone.ErrInvalidNumber):
 		return "invalid_phone_number"
-	case errors.Is(err, ErrUnsupportedEncoding), errors.Is(err, ErrEmptyBody), errors.Is(err, ErrInvalidText):
+	case errors.Is(err, ErrUnsupportedEncoding):
+		return "unsupported_characters"
+	case errors.Is(err, ErrEmptyBody), errors.Is(err, ErrInvalidText):
 		return "invalid_format"
 	}
 	return ""

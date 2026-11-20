@@ -15,24 +15,26 @@ import (
 
 // messageDTO is schema Message.
 type messageDTO struct {
-	ID            string   `json:"id"`
-	Direction     string   `json:"direction"`
-	ChannelID     *string  `json:"channel_id"`
-	Peer          string   `json:"peer"`
-	Body          *string  `json:"body"`
-	Encoding      string   `json:"encoding"`
-	Segments      int      `json:"segments"`
-	Status        string   `json:"status"`
-	Attempts      int      `json:"attempts"`
-	NextAttemptAt *string  `json:"next_attempt_at"`
-	LastError     *string  `json:"last_error"`
-	ClientRef     *string  `json:"client_ref"`
-	Tags          []string `json:"tags"`
-	ExpiresAt     *string  `json:"expires_at"`
-	CreatedBy     *string  `json:"created_by"`
-	CreatedAt     string   `json:"created_at"`
-	SentAt        *string  `json:"sent_at"`
-	ReceivedAt    *string  `json:"received_at"`
+	ID            string  `json:"id"`
+	Direction     string  `json:"direction"`
+	ChannelID     *string `json:"channel_id"`
+	Peer          string  `json:"peer"`
+	Body          *string `json:"body"`
+	Encoding      string  `json:"encoding"`
+	Segments      int     `json:"segments"`
+	Status        string  `json:"status"`
+	Attempts      int     `json:"attempts"`
+	NextAttemptAt *string `json:"next_attempt_at"`
+	LastError     *string `json:"last_error"`
+	// PossibleDuplicate: a send may have reached the router twice (ADR 0002).
+	PossibleDuplicate bool     `json:"possible_duplicate"`
+	ClientRef         *string  `json:"client_ref"`
+	Tags              []string `json:"tags"`
+	ExpiresAt         *string  `json:"expires_at"`
+	CreatedBy         *string  `json:"created_by"`
+	CreatedAt         string   `json:"created_at"`
+	SentAt            *string  `json:"sent_at"`
+	ReceivedAt        *string  `json:"received_at"`
 }
 
 func toMessageDTO(m domain.Message) messageDTO {
@@ -40,7 +42,8 @@ func toMessageDTO(m domain.Message) messageDTO {
 		ID: string(m.ID), Direction: string(m.Direction), ChannelID: nullableString(string(m.ChannelID)),
 		Peer: m.Peer, Body: nullableString(m.Body), Encoding: string(m.Encoding), Segments: m.Segments,
 		Status: string(m.Status), Attempts: m.Attempts, LastError: nullableString(m.LastError),
-		ClientRef: nullableString(m.ClientRef), Tags: append([]string{}, m.Route.Tags...),
+		PossibleDuplicate: m.PossibleDuplicate,
+		ClientRef:         nullableString(m.ClientRef), Tags: append([]string{}, m.Route.Tags...),
 		ExpiresAt: nullableTime(m.ExpiresAt), CreatedAt: formatTime(m.CreatedAt),
 		SentAt: nullableTime(m.SentAt), ReceivedAt: nullableTime(m.ReceivedAt),
 	}

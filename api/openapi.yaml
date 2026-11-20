@@ -6,7 +6,7 @@
 openapi: 3.1.0
 info:
   title: tikker REST API
-  version: 0.1.0
+  version: 0.2.0
   summary: Bramka SMS oparta o MikroTik RouterOS 7.
   license:
     name: GPL-3.0-or-later
@@ -41,19 +41,35 @@ info:
     | `urn:tikker:problem:malformed-request` | 400 | niepoprawny JSON, zły typ pola, nieznany parametr |
     | `urn:tikker:problem:unauthorized` | 401 | brak, zły, wygasły lub unieważniony token |
     | `urn:tikker:problem:forbidden` | 403 | token nie ma wymaganego zakresu |
-    | `urn:tikker:problem:not-found` | 404 | zasób nie istnieje |
+    | `urn:tikker:problem:not-found` | 404 | zasób lub ścieżka nie istnieje |
+    | `urn:tikker:problem:method-not-allowed` | 405 | metoda niedozwolona dla ścieżki (nagłówek `Allow`) |
     | `urn:tikker:problem:conflict` | 409 | konflikt unikalności lub stanu zasobu (np. anulowanie nie-`queued`) |
     | `urn:tikker:problem:idempotency-key-in-use` | 409 | żądanie z tym `Idempotency-Key` jest właśnie przetwarzane |
-    | `urn:tikker:problem:batch-too-large` | 413 | więcej niż 100 wiadomości w paczce lub zbyt duże ciało żądania |
+    | `urn:tikker:problem:payload-too-large` | 413 | ciało żądania przekracza limit rozmiaru (domyślnie 2 MiB) |
+    | `urn:tikker:problem:batch-too-large` | 413 | więcej niż 100 wiadomości w paczce |
     | `urn:tikker:problem:validation` | 422 | błędy semantyczne; szczegóły w `errors[]` |
     | `urn:tikker:problem:idempotency-key-mismatch` | 422 | ten sam `Idempotency-Key` z innym ciałem żądania |
     | `urn:tikker:problem:rate-limited` | 429 | przekroczony limit żądań tokenu |
     | `urn:tikker:problem:internal` | 500 | błąd serwera (bez szczegółów wewnętrznych) |
 
+    Pole `title` jest stałe dla danego `type` (np. `Malformed request`, `Request validation failed`).
+
     Kody w `errors[].code` dla `validation`: `required`, `invalid_format`, `out_of_range`,
-    `invalid_phone_number`, `too_many_segments`, `unknown_channel`, `channel_disabled`,
-    `no_matching_channel`, `expires_at_in_past`, `insecure_transport_not_allowed`,
+    `invalid_phone_number`, `too_many_segments`, `unsupported_characters`, `unknown_channel`,
+    `channel_disabled`, `no_matching_channel`, `expires_at_in_past`, `insecure_transport_not_allowed`,
     `scope_exceeds_role`, `unknown_user`, `unknown_device`.
+
+    Każda operacja przyjmująca ciało żądania może zwrócić `413` (`payload-too-large`), gdy ciało
+    przekracza limit rozmiaru serwera.
+
+    ## Odpowiedzi wspólne dla wszystkich ścieżek
+    Żądania, które nie trafiają do żadnej operacji kontraktu, dostają odpowiedź **przed** uwierzytelnieniem
+    (bez nagłówków `RateLimit-*`):
+
+    | Sytuacja | Odpowiedź |
+    |---|---|
+    | nieznana ścieżka pod `/api/v1` | `404` `not-found` (`components/responses/NotFound`) |
+    | znana ścieżka, niedozwolona metoda | `405` `method-not-allowed` z nagłówkiem `Allow` (`components/responses/MethodNotAllowed`) |
 
     ## Paginacja
     Listy zwracają obiekt strony (`items`, `next_cursor`). Kolejną stronę pobiera się, przekazując
@@ -61,21 +77,37 @@ info:
     Kursor jest nieprzezroczysty; nie należy go parsować. Wiadomości są sortowane od najnowszych (malejąco po `id`).
 
     ## Limity żądań
-    Limit żądań jest liczony per token (SPEC §4.5). Każda odpowiedź pod `/api/v1` zawiera nagłówki
-    `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` (wg draft-ietf-httpapi-ratelimit-headers,
-    wariant z osobnymi polami). Po przekroczeniu limitu serwer zwraca `429` z nagłówkiem `Retry-After` (sekundy).
+    Limit żądań jest liczony per token (SPEC §4.5) jako token bucket: pojemność `RateLimit-Limit` żądań,
+    uzupełniana w całości w ciągu okna (domyślnie 120 żądań na 60 s). Żądanie z poprawnym tokenem zużywa
+    jednostkę limitu jeszcze przed sprawdzeniem zakresu, więc także odpowiedzi `403`, `4xx` walidacji i `429`
+    zawierają nagłówki `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`
+    (wg draft-ietf-httpapi-ratelimit-headers, wariant z osobnymi polami).
+    Nagłówków **nie ma** w odpowiedziach `401` (żądanie bez poprawnego tokenu niczego nie zużywa),
+    w odpowiedziach wspólnych `404`/`405` dla nieznanych ścieżek i metod ani wtedy, gdy limit jest wyłączony
+    w konfiguracji. Po wyczerpaniu limitu serwer zwraca `429` z nagłówkiem `Retry-After` (sekundy).
     Limit żądań API jest niezależny od limitu wysyłki kanału (`rate_per_min`), który nie powoduje `429`,
     tylko opóźnia wysyłkę z kolejki.
 
     ## Idempotencja
     `POST /messages` i `POST /messages/batch` przyjmują nagłówek `Idempotency-Key`
     (wg draft-ietf-httpapi-idempotency-key-header). Klucz jest unikalny w obrębie tokenu przez 24 h:
-    - powtórzenie z tym samym kluczem i tym samym ciałem zwraca pierwotną odpowiedź (ten sam status i zasób)
-      z nagłówkiem `Idempotent-Replayed: true`; nowa wiadomość nie powstaje;
-    - ten sam klucz z innym ciałem daje `422` (`idempotency-key-mismatch`);
+    - powtórzenie z tym samym kluczem i tym samym ciałem zwraca odpowiedź o tym samym statusie (`202`) i tej samej
+      strukturze, z tymi samymi wiadomościami w **bieżącym** stanie (np. już `sent`), z nagłówkiem
+      `Idempotent-Replayed: true`; nowa wiadomość nie powstaje. Powtórzenie jest rozpoznawane przed walidacją,
+      więc zwraca pierwotne wiadomości nawet wtedy, gdy samo żądanie nie przeszłoby jej teraz
+      (np. kanał wyłączono w międzyczasie);
+    - ten sam klucz z innym ciałem daje `422` (`idempotency-key-mismatch`); dotyczy to także użycia klucza
+      z `POST /messages` w `POST /messages/batch` i odwrotnie;
     - ten sam klucz, gdy pierwsze żądanie jest jeszcze przetwarzane, daje `409` (`idempotency-key-in-use`).
     Ciała porównywane są po kanonizacji JSON (kolejność pól nie ma znaczenia).
     Żądania zakończone błędem `4xx`/`5xx` nie rezerwują klucza.
+
+    ## Wiadomości dzielone (`split`)
+    Gdy serwer działa ze strategią długich wiadomości `split` (`TIKKER_LONG_MESSAGE_STRATEGY`, SPEC §4.6),
+    jedno żądanie wysyłki może utworzyć **kilka niezależnych wiadomości** (każda z prefiksem `(i/N) `,
+    wspólnym `client_ref` i własnym cyklem życia, SPEC §12 p. 3). Dlatego `POST /messages` zwraca obiekt
+    `SendMessageResponse` z listą `messages` (zwykle jednoelementową), a `POST /messages/batch` – po jednym
+    takim obiekcie na każdą pozycję paczki.
 servers:
   - url: /api/v1
     description: Względem adresu instancji tikker (np. `https://sms.example.org/api/v1`).
@@ -102,7 +134,10 @@ paths:
       operationId: sendMessage
       summary: Wyślij SMS
       description: |
-        Przyjmuje wiadomość do kolejki i zwraca `202` z obiektem w stanie `queued`.
+        Przyjmuje wiadomość do kolejki i zwraca `202` z obiektem `SendMessageResponse`: listą `messages`
+        utworzonych wiadomości w stanie `queued`. Zwykle jest to jedna wiadomość; przy strategii `split`
+        (sekcja „Wiadomości dzielone”) – kolejne części w kolejności treści. Nagłówek `Location` wskazuje
+        pierwszą wiadomość.
         Numer `to` jest normalizowany do E.164 (region domyślny z konfiguracji, SPEC §4.6),
         kodowanie (`gsm7`/`ucs2`) i liczba segmentów są wyliczane przez serwer.
         Kanał wybiera routing (SPEC §4.4): `channel_id` → `tags` → wszystkie aktywne kanały.
@@ -157,12 +192,96 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Message'
+                $ref: '#/components/schemas/SendMessageResponse'
               examples:
                 polish:
-                  $ref: '#/components/examples/MessageQueuedPolish'
+                  summary: Wiadomość UCS-2 w kolejce
+                  value:
+                    messages:
+                      - id: '01M89304ZQ61F6CVNX486V10VC'
+                        direction: out
+                        channel_id: null
+                        peer: '+48600100200'
+                        body: 'Twój kod weryfikacyjny: 482913. Ważny 5 minut.'
+                        encoding: ucs2
+                        segments: 1
+                        status: queued
+                        attempts: 0
+                        next_attempt_at: null
+                        last_error: null
+                        possible_duplicate: false
+                        client_ref: 'otp-7f3a91'
+                        tags: []
+                        expires_at: '2026-11-25T09:55:00Z'
+                        created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
+                        created_at: '2026-11-25T09:46:40Z'
+                        sent_at: null
+                        received_at: null
                 long:
-                  $ref: '#/components/examples/MessageQueuedLong'
+                  summary: Długa wiadomość GSM-7 (2 segmenty) w kolejce
+                  value:
+                    messages:
+                      - id: '01M891QES8WQZGV91A5WVKBCKF'
+                        direction: out
+                        channel_id: null
+                        peer: '+48600100201'
+                        body: 'Dzien dobry, przypominamy o planowanym przegladzie instalacji w dniu 2026-11-25 w godzinach 8:00-12:00. Prosimy o zapewnienie dostepu do pomieszczenia technicznego. W razie pytan prosimy o kontakt pod numerem 22 123 45 67.'
+                        encoding: gsm7
+                        segments: 2
+                        status: queued
+                        attempts: 0
+                        next_attempt_at: null
+                        last_error: null
+                        possible_duplicate: false
+                        client_ref: 'crm-ticket-4411'
+                        tags: ['orange', 'bulk']
+                        expires_at: null
+                        created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
+                        created_at: '2026-11-25T09:48:57Z'
+                        sent_at: null
+                        received_at: null
+                split:
+                  summary: Tekst podzielony na 2 wiadomości (strategia `split`)
+                  value:
+                    messages:
+                      - id: '01M893A4V2N9Q6S7T8W9X0Y1Z2'
+                        direction: out
+                        channel_id: null
+                        peer: '+48600100201'
+                        body: '(1/2) Dzien dobry, przypominamy o planowanym przegladzie instalacji w dniu 2026-11-25 w godzinach 8:00-12:00. Prosimy o zapewnienie dostepu do pomieszczenia'
+                        encoding: gsm7
+                        segments: 1
+                        status: queued
+                        attempts: 0
+                        next_attempt_at: null
+                        last_error: null
+                        possible_duplicate: false
+                        client_ref: 'crm-ticket-4411'
+                        tags: []
+                        expires_at: null
+                        created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
+                        created_at: '2026-11-25T09:48:57Z'
+                        sent_at: null
+                        received_at: null
+                      - id: '01M893A4V2N9Q6S7T8W9X0Y1Z3'
+                        direction: out
+                        channel_id: null
+                        peer: '+48600100201'
+                        body: '(2/2) technicznego. W razie pytan prosimy o kontakt pod numerem 22 123 45 67.'
+                        encoding: gsm7
+                        segments: 1
+                        status: queued
+                        attempts: 0
+                        next_attempt_at: null
+                        last_error: null
+                        possible_duplicate: false
+                        client_ref: 'crm-ticket-4411'
+                        tags: []
+                        expires_at: null
+                        created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
+                        created_at: '2026-11-25T09:48:57Z'
+                        sent_at: null
+                        received_at: null
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -171,6 +290,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '409':
           $ref: '#/components/responses/IdempotencyConflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '422':
           $ref: '#/components/responses/MessageUnprocessable'
         '429':
@@ -260,6 +381,7 @@ paths:
                         attempts: 0
                         next_attempt_at: null
                         last_error: null
+                        possible_duplicate: false
                         client_ref: null
                         tags: []
                         expires_at: null
@@ -278,6 +400,7 @@ paths:
                         attempts: 1
                         next_attempt_at: null
                         last_error: null
+                        possible_duplicate: false
                         client_ref: null
                         tags: []
                         expires_at: null
@@ -305,8 +428,10 @@ paths:
       description: |
         Przyjmuje od 1 do 100 wiadomości **atomowo**: albo wszystkie trafiają do kolejki, albo żadna.
         Błędy walidacji wskazują pozycję przez wskaźnik JSON w `errors[].field` (np. `/messages/3/to`).
-        Więcej niż 100 pozycji daje `413`. `Idempotency-Key` dotyczy całej paczki.
-        Kolejność `items` w odpowiedzi odpowiada kolejności `messages` w żądaniu.
+        Więcej niż 100 pozycji daje `413` (`batch-too-large`). `Idempotency-Key` dotyczy całej paczki.
+        Odpowiedź zawiera po jednej pozycji `items[i]` na każdą pozycję `messages[i]` żądania (ta sama kolejność
+        i liczba); `items[i]` ma postać odpowiedzi `POST /messages` dla tej pozycji (lista `messages`,
+        kilka elementów przy strategii `split`).
       security:
         - bearerAuth: ['sms:send']
       x-required-scopes: ['sms:send']
@@ -326,9 +451,11 @@ paths:
                     - to: '+48600100200'
                       body: 'Twój kod weryfikacyjny: 482913. Ważny 5 minut.'
                       client_ref: 'otp-7f3a91'
+                      expires_at: '2026-11-25T09:55:00Z'
                     - to: '600100201'
                       body: 'Dzien dobry, przypominamy o planowanym przegladzie instalacji w dniu 2026-11-25 w godzinach 8:00-12:00. Prosimy o zapewnienie dostepu do pomieszczenia technicznego. W razie pytan prosimy o kontakt pod numerem 22 123 45 67.'
-                      tags: ['orange']
+                      tags: ['orange', 'bulk']
+                      client_ref: 'crm-ticket-4411'
       responses:
         '202':
           description: Wszystkie wiadomości przyjęto do kolejki.
@@ -350,42 +477,46 @@ paths:
                   summary: Dwie wiadomości w kolejce
                   value:
                     items:
-                      - id: '01M89304ZQ61F6CVNX486V10VC'
-                        direction: out
-                        channel_id: null
-                        peer: '+48600100200'
-                        body: 'Twój kod weryfikacyjny: 482913. Ważny 5 minut.'
-                        encoding: ucs2
-                        segments: 1
-                        status: queued
-                        attempts: 0
-                        next_attempt_at: null
-                        last_error: null
-                        client_ref: 'otp-7f3a91'
-                        tags: []
-                        expires_at: '2026-11-25T09:55:00Z'
-                        created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
-                        created_at: '2026-11-25T09:46:40Z'
-                        sent_at: null
-                        received_at: null
-                      - id: '01M891QES8WQZGV91A5WVKBCKF'
-                        direction: out
-                        channel_id: null
-                        peer: '+48600100201'
-                        body: 'Dzien dobry, przypominamy o planowanym przegladzie instalacji w dniu 2026-11-25 w godzinach 8:00-12:00. Prosimy o zapewnienie dostepu do pomieszczenia technicznego. W razie pytan prosimy o kontakt pod numerem 22 123 45 67.'
-                        encoding: gsm7
-                        segments: 2
-                        status: queued
-                        attempts: 0
-                        next_attempt_at: null
-                        last_error: null
-                        client_ref: 'crm-ticket-4411'
-                        tags: ['orange', 'bulk']
-                        expires_at: null
-                        created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
-                        created_at: '2026-11-25T09:48:57Z'
-                        sent_at: null
-                        received_at: null
+                      - messages:
+                          - id: '01M89304ZQ61F6CVNX486V10VC'
+                            direction: out
+                            channel_id: null
+                            peer: '+48600100200'
+                            body: 'Twój kod weryfikacyjny: 482913. Ważny 5 minut.'
+                            encoding: ucs2
+                            segments: 1
+                            status: queued
+                            attempts: 0
+                            next_attempt_at: null
+                            last_error: null
+                            possible_duplicate: false
+                            client_ref: 'otp-7f3a91'
+                            tags: []
+                            expires_at: '2026-11-25T09:55:00Z'
+                            created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
+                            created_at: '2026-11-25T09:46:40Z'
+                            sent_at: null
+                            received_at: null
+                      - messages:
+                          - id: '01M891QES8WQZGV91A5WVKBCKF'
+                            direction: out
+                            channel_id: null
+                            peer: '+48600100201'
+                            body: 'Dzien dobry, przypominamy o planowanym przegladzie instalacji w dniu 2026-11-25 w godzinach 8:00-12:00. Prosimy o zapewnienie dostepu do pomieszczenia technicznego. W razie pytan prosimy o kontakt pod numerem 22 123 45 67.'
+                            encoding: gsm7
+                            segments: 2
+                            status: queued
+                            attempts: 0
+                            next_attempt_at: null
+                            last_error: null
+                            possible_duplicate: false
+                            client_ref: 'crm-ticket-4411'
+                            tags: ['orange', 'bulk']
+                            expires_at: null
+                            created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
+                            created_at: '2026-11-25T09:46:40Z'
+                            sent_at: null
+                            received_at: null
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -395,7 +526,7 @@ paths:
         '409':
           $ref: '#/components/responses/IdempotencyConflict'
         '413':
-          $ref: '#/components/responses/ContentTooLarge'
+          $ref: '#/components/responses/BatchTooLarge'
         '422':
           description: Co najmniej jedna wiadomość jest niepoprawna; żadna nie trafiła do kolejki.
           content:
@@ -629,6 +760,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '422':
           $ref: '#/components/responses/UnprocessableContent'
         '429':
@@ -710,6 +843,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '422':
           $ref: '#/components/responses/UnprocessableContent'
         '429':
@@ -852,6 +987,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '422':
           $ref: '#/components/responses/UnprocessableContent'
         '429':
@@ -938,6 +1075,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '422':
           $ref: '#/components/responses/UnprocessableContent'
         '429':
@@ -1176,6 +1315,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '422':
           $ref: '#/components/responses/UnprocessableContent'
         '429':
@@ -1325,6 +1466,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '422':
           $ref: '#/components/responses/UnprocessableContent'
         '429':
@@ -1414,6 +1557,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '422':
           $ref: '#/components/responses/UnprocessableContent'
         '429':
@@ -1603,6 +1748,11 @@ components:
         type: integer
         minimum: 0
       example: 42
+    Allow:
+      description: Metody dozwolone dla ścieżki (RFC 9110 §10.2.1).
+      schema:
+        type: string
+      example: 'GET, POST'
     WWWAuthenticate:
       description: Wyzwanie uwierzytelnienia (RFC 6750).
       schema:
@@ -1611,7 +1761,7 @@ components:
 
   responses:
     BadRequest:
-      description: Niepoprawne żądanie (składnia JSON, typ pola, niepoprawny parametr).
+      description: Niepoprawne żądanie (składnia JSON, typ pola, nieznane pole, niepoprawny parametr lub nagłówek).
       content:
         application/problem+json:
           schema:
@@ -1669,7 +1819,9 @@ components:
                 status: 403
                 detail: 'Token lacks required scope "sms:send".'
     NotFound:
-      description: Zasób nie istnieje.
+      description: |
+        Zasób nie istnieje. Ta sama odpowiedź (bez uwierzytelnienia i bez nagłówków `RateLimit-*`)
+        dotyczy nieznanej ścieżki pod `/api/v1`.
       content:
         application/problem+json:
           schema:
@@ -1718,8 +1870,23 @@ components:
                 title: Idempotency key in use
                 status: 409
                 detail: 'A request with this Idempotency-Key is still being processed; retry later.'
-    ContentTooLarge:
-      description: Paczka ma więcej niż 100 wiadomości lub ciało żądania przekracza limit rozmiaru.
+    PayloadTooLarge:
+      description: Ciało żądania przekracza limit rozmiaru serwera (domyślnie 2 MiB).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            tooLarge:
+              summary: Za duże ciało żądania
+              value:
+                type: 'urn:tikker:problem:payload-too-large'
+                title: Payload too large
+                status: 413
+                detail: 'Request body exceeds the limit of 2097152 bytes.'
+                instance: '/api/v1/messages'
+    BatchTooLarge:
+      description: Paczka ma więcej niż 100 wiadomości albo ciało żądania przekracza limit rozmiaru serwera.
       content:
         application/problem+json:
           schema:
@@ -1733,6 +1900,34 @@ components:
                 status: 413
                 detail: 'Batch contains 150 messages; the maximum is 100.'
                 instance: '/api/v1/messages/batch'
+            tooLarge:
+              summary: Za duże ciało żądania
+              value:
+                type: 'urn:tikker:problem:payload-too-large'
+                title: Payload too large
+                status: 413
+                detail: 'Request body exceeds the limit of 2097152 bytes.'
+                instance: '/api/v1/messages/batch'
+    MethodNotAllowed:
+      description: |
+        Odpowiedź wspólna dla wszystkich ścieżek (opis API, „Odpowiedzi wspólne”): ścieżka istnieje,
+        ale nie obsługuje metody żądania. Wysyłana przed uwierzytelnieniem, bez nagłówków `RateLimit-*`.
+      headers:
+        Allow:
+          $ref: '#/components/headers/Allow'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            put:
+              summary: PUT na kolekcji wiadomości
+              value:
+                type: 'urn:tikker:problem:method-not-allowed'
+                title: Method Not Allowed
+                status: 405
+                detail: 'Method PUT is not allowed for this resource.'
+                instance: '/api/v1/messages'
     UnprocessableContent:
       description: Żądanie poprawne składniowo, ale niepoprawne semantycznie.
       content:
@@ -1781,6 +1976,18 @@ components:
                   - field: '/body'
                     code: too_many_segments
                     detail: 'Body needs 5 UCS-2 segments; channel limit is 3.'
+            unsupportedCharacters:
+              summary: Znaki spoza GSM-7 na kanale bez UCS-2 i bez transliteracji
+              value:
+                type: 'urn:tikker:problem:validation'
+                title: Request validation failed
+                status: 422
+                detail: "Character 'ż' is outside the GSM-7 alphabet, and the channel sends GSM-7 only; enable transliterate on the channel or remove such characters."
+                instance: '/api/v1/messages'
+                errors:
+                  - field: '/body'
+                    code: unsupported_characters
+                    detail: "Character 'ż' is outside the GSM-7 alphabet, and the channel sends GSM-7 only; enable transliterate on the channel or remove such characters."
             idempotencyMismatch:
               summary: Klucz idempotencji z innym ciałem
               value:
@@ -1898,9 +2105,11 @@ components:
           minLength: 1
           maxLength: 1600
           description: |
-            Treść (UTF-8). Rzeczywisty limit wynika z `max_segments` kanału (domyślnie 3 segmenty);
-            przekroczenie → `422` (`too_many_segments`). Przy `transliterate` kanału polskie znaki są zamieniane na ASCII
-            przed wyliczeniem segmentów.
+            Treść (UTF-8). Rzeczywisty limit wynika z `max_segments` kanału (domyślnie 3 segmenty) i możliwości
+            konektora; przekroczenie → `422` (`too_many_segments`), chyba że serwer działa ze strategią
+            `truncate` lub `split` (SPEC §4.6). Przy `transliterate` kanału polskie znaki są zamieniane na ASCII
+            przed wyliczeniem segmentów. Znaki spoza GSM-7 przy kanale bez UCS-2 (RouterOS) i bez transliteracji
+            → `422` (`unsupported_characters`).
         channel_id:
           $ref: '#/components/schemas/Id'
           description: Jawny wybór kanału. Nieznany → `422` (`unknown_channel`), wyłączony → `422` (`channel_disabled`).
@@ -1926,20 +2135,35 @@ components:
           description: Od 1 do 100 wiadomości. Przekroczenie 100 → `413`.
           items:
             $ref: '#/components/schemas/SendMessageRequest'
+    SendMessageResponse:
+      type: object
+      description: |
+        Wiadomości utworzone z jednego `SendMessageRequest`, w kolejności treści. Zwykle jedna;
+        przy strategii `split` (SPEC §4.6, §12 p. 3) kilka niezależnych wiadomości z prefiksami `(i/N) `.
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/Message'
     SendBatchResponse:
       type: object
       required: [items]
       properties:
         items:
           type: array
+          minItems: 1
+          maxItems: 100
+          description: Po jednej pozycji na każdą pozycję `messages` żądania, w tej samej kolejności.
           items:
-            $ref: '#/components/schemas/Message'
+            $ref: '#/components/schemas/SendMessageResponse'
 
     Message:
       type: object
       description: |
         Wiadomość SMS. Pola wewnętrzne (`lease_until`, `idempotency_key`, `dedup_hash`) nie są publikowane.
-      required: [id, direction, channel_id, peer, body, encoding, segments, status, attempts, created_at]
+      required: [id, direction, channel_id, peer, body, encoding, segments, status, attempts, possible_duplicate, created_at]
       properties:
         id:
           $ref: '#/components/schemas/Ulid'
@@ -1973,6 +2197,11 @@ components:
           type: [string, 'null']
           maxLength: 1024
           description: Ostatni błąd wysyłki, przeznaczony dla człowieka.
+        possible_duplicate:
+          type: boolean
+          description: |
+            `true`, gdy wiadomość mogła zostać wysłana więcej niż raz (np. wygasła dzierżawa lub niejednoznaczny
+            błąd po przekazaniu do routera, ADR 0002, gwarancja at-least-once). Dla `in` zawsze `false`.
         client_ref:
           type: [string, 'null']
         tags:
@@ -2062,7 +2291,9 @@ components:
           description: Maksymalna liczba segmentów wiadomości (SPEC §4.6).
         transliterate:
           type: boolean
-          description: Zamiana polskich znaków na ASCII przed wysyłką (SPEC §4.6).
+          description: |
+            Zamiana polskich (i innych spoza GSM-7) znaków na ASCII przed wysyłką (SPEC §4.6).
+            Zawsze konkretna wartość: podana przy tworzeniu lub wybrana przez serwer (patrz `ChannelCreate`).
         enabled:
           type: boolean
         state:
@@ -2112,7 +2343,11 @@ components:
           default: 3
         transliterate:
           type: boolean
-          default: false
+          description: |
+            Zamiana znaków spoza GSM-7 na ASCII przed wysyłką (SPEC §4.6). Pominięte → serwer wybiera wartość
+            na podstawie możliwości konektora urządzenia: `true`, gdy konektor nie obsługuje UCS-2
+            (`routeros-rest`), w przeciwnym razie `false`; gdy możliwości nie da się ustalić (np. nie da się
+            odszyfrować hasła urządzenia) – `true`. Wybraną wartość zwraca odpowiedź i można ją zmienić przez `PATCH`.
         enabled:
           type: boolean
           default: true
@@ -2524,7 +2759,7 @@ components:
           description: Identyfikator wystąpienia (ścieżka żądania lub identyfikator żądania w logach).
         errors:
           type: array
-          description: Lista błędów walidacji (dla `validation` i `malformed-request`).
+          description: Lista błędów pól (dla `validation`; dla `malformed-request`, gdy błąd dotyczy konkretnego pola lub parametru).
           items:
             $ref: '#/components/schemas/FieldError'
     FieldError:
@@ -2566,48 +2801,6 @@ components:
             enum: [ok, fail]
 
   examples:
-    MessageQueuedPolish:
-      summary: Wiadomość UCS-2 w kolejce
-      value:
-        id: '01M89304ZQ61F6CVNX486V10VC'
-        direction: out
-        channel_id: null
-        peer: '+48600100200'
-        body: 'Twój kod weryfikacyjny: 482913. Ważny 5 minut.'
-        encoding: ucs2
-        segments: 1
-        status: queued
-        attempts: 0
-        next_attempt_at: null
-        last_error: null
-        client_ref: 'otp-7f3a91'
-        tags: []
-        expires_at: '2026-11-25T09:55:00Z'
-        created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
-        created_at: '2026-11-25T09:46:40Z'
-        sent_at: null
-        received_at: null
-    MessageQueuedLong:
-      summary: Długa wiadomość GSM-7 (2 segmenty) w kolejce
-      value:
-        id: '01M891QES8WQZGV91A5WVKBCKF'
-        direction: out
-        channel_id: null
-        peer: '+48600100201'
-        body: 'Dzien dobry, przypominamy o planowanym przegladzie instalacji w dniu 2026-11-25 w godzinach 8:00-12:00. Prosimy o zapewnienie dostepu do pomieszczenia technicznego. W razie pytan prosimy o kontakt pod numerem 22 123 45 67.'
-        encoding: gsm7
-        segments: 2
-        status: queued
-        attempts: 0
-        next_attempt_at: null
-        last_error: null
-        client_ref: 'crm-ticket-4411'
-        tags: ['orange', 'bulk']
-        expires_at: null
-        created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
-        created_at: '2026-11-25T09:48:57Z'
-        sent_at: null
-        received_at: null
     MessageSent:
       summary: Wysłana wiadomość UCS-2, 2 segmenty
       value:
@@ -2622,6 +2815,7 @@ components:
         attempts: 1
         next_attempt_at: null
         last_error: null
+        possible_duplicate: false
         client_ref: null
         tags: []
         expires_at: null
@@ -2643,6 +2837,7 @@ components:
         attempts: 2
         next_attempt_at: '2026-11-25T10:03:00Z'
         last_error: 'routeros: timeout after 10s'
+        possible_duplicate: false
         client_ref: null
         tags: []
         expires_at: null
@@ -2664,6 +2859,7 @@ components:
         attempts: 0
         next_attempt_at: null
         last_error: null
+        possible_duplicate: false
         client_ref: 'campaign-12'
         tags: ['bulk']
         expires_at: null
@@ -2685,6 +2881,7 @@ components:
         attempts: 0
         next_attempt_at: null
         last_error: null
+        possible_duplicate: false
         client_ref: null
         tags: []
         expires_at: null

@@ -154,7 +154,8 @@ queued ──(DELETE przez API/UI)──► cancelled
   wraca do `queued` z flagą `possible_duplicate`, a po wyczerpaniu prób przechodzi w `failed`.
   `attempts` działa jak numer dzierżawy: worker ze starą dzierżawą nie nadpisze stanu (`ErrLeaseLost`).
   Gwarancja jest **at-least-once** (decyzja właściciela). Szczegóły: ADR 0002.
-- Idempotencja: nagłówek `Idempotency-Key` (per token, 24 h). Ten sam klucz i treść zwracają pierwotną odpowiedź,
+- Idempotencja: nagłówek `Idempotency-Key` (per token, 24 h). Ten sam klucz i treść zwracają pierwotną odpowiedź
+  (te same wiadomości w bieżącym stanie; powtórzenie jest rozpoznawane przed walidacją),
   inna treść daje 422, równoległe żądanie w toku daje 409. Batch jest atomowy (jeden klucz na paczkę), ponad 100 pozycji daje 413.
 
 ### 4.3 Wiadomości przychodzące
@@ -189,14 +190,15 @@ pojedynczy worker i serializację wysyłek. Globalnie obowiązuje limit żądań
   Krótkie numery i numery alfanumeryczne są dopuszczone, jeśli włączy je flaga `allow_short_numbers`.
 - Licznik segmentów: GSM-7 (160/153, z rozszerzeniami liczonymi podwójnie) oraz UCS-2 (70/67).
 - Opcja `transliterate` (per kanał): zamiana polskich znaków na ASCII. Domyślnie włączona, gdy konektor nie obsługuje UCS-2
-  (dotyczy `routeros-rest` wg T00). `max_segments` to limit, powyżej którego zwracamy 422: domyślnie 3, ale nie więcej
+  (dotyczy `routeros-rest` wg T00): pominięta w `POST /channels` jest ustalana przez serwer z `Capabilities` konektora
+  urządzenia (brak UCS-2 lub nieznane możliwości → `true`), a odpowiedź zawsze podaje konkretną wartość. `max_segments` to limit, powyżej którego zwracamy 422: domyślnie 3, ale nie więcej
   niż pozwala konektor (dla `routeros-rest` 1, czyli 160 znaków GSM-7) [WERYFIKACJA].
 - Gdy konektor nie wspiera wysyłki wieloczęściowej, strategia długich wiadomości jest konfigurowalna:
   `reject` (domyślnie), `split` (osobne wiadomości z prefiksem `(1/3)`, patrz §12 p. 3) lub `truncate`.
 - Planer (`internal/sms.Plan`, T14): najpierw transliteracja (jeśli włączona), potem wybór kodowania.
   Prefiks `(i/N) ` wlicza się w limit części. Przy `split` suma segmentów wszystkich części podlega `max_segments`
   (twardy limit 999 części). Planer nigdy nie transliteruje sam: bez zgody i bez UCS-2 w konektorze zwraca błąd
-  (`invalid_format`). Przy `Concatenation=false` jedna wysyłka to jeden SMS.
+  (`422`, kod `unsupported_characters`). Przy `Concatenation=false` jedna wysyłka to jeden SMS.
 - Niekompletne SMS-y wieloczęściowe przychodzące są przechowywane do skompletowania i wygaszane po czasie (T16).
 
 ---
@@ -208,8 +210,8 @@ Autoryzacja: `Authorization: Bearer tkr_…`. Paginacja kursorowa (`?cursor=&lim
 
 | Metoda i ścieżka | Zakres | Opis |
 |---|---|---|
-| `POST /messages` | `sms:send` | wyślij: `{to, body, channel_id?, tags?, client_ref?, expires_at?}` → 202 + obiekt |
-| `POST /messages/batch` | `sms:send` | do 100 wiadomości |
+| `POST /messages` | `sms:send` | wyślij: `{to, body, channel_id?, tags?, client_ref?, expires_at?}` → 202 + `{messages: [...]}` (kilka przy `split`) |
+| `POST /messages/batch` | `sms:send` | do 100 wiadomości → 202 + `{items: [{messages: [...]}, ...]}`, pozycja odpowiedzi = pozycja żądania |
 | `GET /messages` | `sms:read` | filtry: `direction`, `status`, `peer`, `channel_id`, `since`, `until` |
 | `GET /messages/{id}` | `sms:read` | szczegóły |
 | `DELETE /messages/{id}` | `sms:send` | anuluj (tylko `queued`) |
@@ -221,6 +223,8 @@ Autoryzacja: `Authorization: Bearer tkr_…`. Paginacja kursorowa (`?cursor=&lim
 | `GET/POST/PATCH /users[/{id}]` | `admin` | użytkownicy |
 | `GET /healthz`, `GET /readyz` | – | bez autoryzacji, bez szczegółów wrażliwych |
 
+Ciało ponad limit rozmiaru daje 413 (`payload-too-large`), zła metoda na znanej ścieżce 405 z `Allow`.
+Nagłówki `RateLimit-*` są wysyłane w odpowiedziach na uwierzytelnione żądania (nie na 401).
 Zakres `admin` obejmuje `sms:read` i `sms:send`. Uprawnienia tokenu to część wspólna jego zakresów i roli właściciela
 (viewer → read, operator → read + send). PATCH stosuje JSON Merge Patch (RFC 7396). Użytkowników się nie usuwa
 (`disabled`), a ostatniego admina nie można wyłączyć (409).

@@ -50,7 +50,7 @@ func TestPlanRouterOS(t *testing.T) {
 		{name: "161 rejected", body: a(161), wantErr: ErrTooLong, code: "too_many_segments"},
 		{name: "ext at 159+1 rejected", body: a(159) + "€", wantErr: ErrTooLong, code: "too_many_segments"},
 		{name: "ext fits exactly", body: a(158) + "€", parts: 1, segments: 1},
-		{name: "polish rejected without transliterate", body: "zażółć", wantErr: ErrUnsupportedEncoding, code: "invalid_format"},
+		{name: "polish rejected without transliterate", body: "zażółć", wantErr: ErrUnsupportedEncoding, code: "unsupported_characters"},
 		{name: "polish transliterated", body: "zażółć", opts: Options{Transliterate: true}, parts: 1, segments: 1, body2: "zazolc", translit: true},
 		{name: "161 truncate", body: a(161), opts: Options{Strategy: StrategyTruncate}, parts: 1, segments: 1, body2: a(160), trunc: true},
 		{name: "ext truncate keeps escape pair whole", body: a(159) + "€", opts: Options{Strategy: StrategyTruncate}, parts: 1, segments: 1, body2: a(159), trunc: true},
@@ -284,7 +284,7 @@ func TestErrorCode(t *testing.T) {
 	}{
 		{fmt.Errorf("w: %w", ErrTooLong), "too_many_segments"},
 		{fmt.Errorf("w: %w", phone.ErrInvalidNumber), "invalid_phone_number"},
-		{ErrUnsupportedEncoding, "invalid_format"},
+		{ErrUnsupportedEncoding, "unsupported_characters"},
 		{ErrEmptyBody, "invalid_format"},
 		{ErrInvalidText, "invalid_format"},
 		{errors.New("other"), ""},

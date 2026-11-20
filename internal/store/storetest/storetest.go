@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -40,6 +41,7 @@ func Run(t *testing.T, f Factory) {
 		{"Audit", testAudit},
 		{"Enqueue", testEnqueue},
 		{"Idempotency", testIdempotency},
+		{"IdempotencyGroups", testIdempotencyGroups},
 		{"Acquire", testAcquire},
 		{"Routing", testRouting},
 		{"Lease", testLease},
@@ -788,6 +790,71 @@ func testIdempotency(t *testing.T, f Factory) {
 	}
 	if fresh != 1 {
 		t.Fatalf("%d requests created messages, want 1", fresh)
+	}
+}
+
+// testIdempotencyGroups covers Idempotency.Groups and Replay.
+func testIdempotencyGroups(t *testing.T, f Factory) {
+	e := newEnv(t, f)
+	idem := store.Idempotency{Key: "g1", RequestHash: "h1", Since: T0.Add(-24 * time.Hour), Groups: []int{2, 1}}
+	a, b, c := e.msg("+48600000001"), e.msg("+48600000002"), e.msg("+48600000003")
+
+	// Nothing recorded yet.
+	res, ok, err := e.s.Messages().Replay(e.ctx, a.CreatedBy, idem)
+	e.ok(err)
+	if ok || res.Replayed {
+		t.Fatalf("replay of an unknown key = %+v", res)
+	}
+	if _, ok, err := e.s.Messages().Replay(e.ctx, a.CreatedBy, store.Idempotency{}); err != nil || ok {
+		t.Fatalf("replay without a key: %v %v", ok, err)
+	}
+
+	// Invalid group sizes are refused.
+	for _, g := range [][]int{{2}, {1, 1, 1, 1}, {3, 0}, {-1, 4}} {
+		bad := idem
+		bad.Groups = g
+		if _, err := e.s.Messages().Enqueue(e.ctx, []domain.Message{a, b, c}, bad); err == nil {
+			t.Errorf("groups %v accepted", g)
+		}
+	}
+
+	res, err = e.s.Messages().Enqueue(e.ctx, []domain.Message{a, b, c}, idem)
+	e.ok(err)
+	if res.Replayed || !reflect.DeepEqual(res.Groups, []int{2, 1}) {
+		t.Fatalf("enqueue = %+v", res)
+	}
+	// Replay returns the stored groups, also when the caller passes others.
+	other := idem
+	other.Groups = nil
+	res, ok, err = e.s.Messages().Replay(e.ctx, a.CreatedBy, other)
+	e.ok(err)
+	if !ok || !res.Replayed || len(res.Messages) != 3 || res.Messages[2].ID != c.ID || !reflect.DeepEqual(res.Groups, []int{2, 1}) {
+		t.Fatalf("replay = %+v", res)
+	}
+	res, err = e.s.Messages().Enqueue(e.ctx, []domain.Message{e.msg("+48600000004")}, other)
+	e.ok(err)
+	if !res.Replayed || !reflect.DeepEqual(res.Groups, []int{2, 1}) {
+		t.Fatalf("enqueue replay = %+v", res)
+	}
+	// Another hash is a mismatch.
+	other.RequestHash = "h2"
+	if _, _, err := e.s.Messages().Replay(e.ctx, a.CreatedBy, other); !errors.Is(err, domain.ErrIdempotencyMismatch) {
+		t.Fatalf("mismatch: %v", err)
+	}
+	// Records without groups replay with nil groups; stale records are gone.
+	plain := store.Idempotency{Key: "g2", RequestHash: "h", Since: T0.Add(-time.Hour)}
+	d := e.msg("+48600000005")
+	if _, err := e.s.Messages().Enqueue(e.ctx, []domain.Message{d}, plain); err != nil {
+		t.Fatal(err)
+	}
+	res, ok, err = e.s.Messages().Replay(e.ctx, d.CreatedBy, plain)
+	e.ok(err)
+	if !ok || res.Groups != nil || res.Messages[0].ID != d.ID {
+		t.Fatalf("plain replay = %+v", res)
+	}
+	plain.Since = T0.Add(time.Hour)
+	if _, ok, err := e.s.Messages().Replay(e.ctx, d.CreatedBy, plain); err != nil || ok {
+		t.Fatalf("stale replay: %v %v", ok, err)
 	}
 }
 

@@ -404,7 +404,7 @@ func (a *API) notFoundOrMethod(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(allow) > 0 {
-		e := newProblem(http.StatusMethodNotAllowed, problemMalformed, "Method "+r.Method+" is not allowed for this resource.")
+		e := newProblem(http.StatusMethodNotAllowed, problemMethodNotAllow, "Method "+r.Method+" is not allowed for this resource.")
 		writeProblem(w, r, e.withHeader("Allow", strings.Join(allow, ", ")))
 		return
 	}

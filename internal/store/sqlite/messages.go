@@ -113,6 +113,9 @@ func (r *messageRepo) Enqueue(ctx context.Context, msgs []domain.Message, idem s
 	if len(msgs) == 0 {
 		return store.EnqueueResult{}, errors.New("sqlite: enqueue: no messages")
 	}
+	if err := checkGroups(idem.Groups, len(msgs)); err != nil {
+		return store.EnqueueResult{}, err
+	}
 	now := r.h.s.clk.Now()
 	prepared := make([]domain.Message, len(msgs))
 	for i, m := range msgs {
@@ -152,7 +155,7 @@ func (r *messageRepo) Enqueue(ctx context.Context, msgs []domain.Message, idem s
 				return err
 			}
 			if ok {
-				res = store.EnqueueResult{Messages: replay, Replayed: true}
+				res = replay
 				return nil
 			}
 		}
@@ -165,14 +168,14 @@ func (r *messageRepo) Enqueue(ctx context.Context, msgs []domain.Message, idem s
 		}
 		if idem.Key != "" {
 			if _, err := q.ExecContext(ctx,
-				`INSERT INTO idempotency_keys (created_by, key, request_hash, message_ids, created_at)
-				 VALUES (?, ?, ?, ?, ?)`,
+				`INSERT INTO idempotency_keys (created_by, key, request_hash, message_ids, created_at, group_sizes)
+				 VALUES (?, ?, ?, ?, ?, ?)`,
 				actorString(prepared[0].CreatedBy), idem.Key, idem.RequestHash, marshalJSON(ids),
-				toMS(prepared[0].CreatedAt)); err != nil {
+				toMS(prepared[0].CreatedAt), groupsJSON(idem.Groups)); err != nil {
 				return fmt.Errorf("sqlite: insert idempotency key: %w", mapErr(err))
 			}
 		}
-		res = store.EnqueueResult{Messages: prepared}
+		res = store.EnqueueResult{Messages: prepared, Groups: idem.Groups}
 		return nil
 	})
 	if err != nil {
@@ -181,45 +184,95 @@ func (r *messageRepo) Enqueue(ctx context.Context, msgs []domain.Message, idem s
 	return res, nil
 }
 
+// Replay implements [store.MessageRepo].
+func (r *messageRepo) Replay(ctx context.Context, createdBy domain.Actor, idem store.Idempotency) (store.EnqueueResult, bool, error) {
+	if idem.Key == "" {
+		return store.EnqueueResult{}, false, nil
+	}
+	var res store.EnqueueResult
+	var ok bool
+	err := r.h.write(ctx, func(q execer) error {
+		var err error
+		res, ok, err = checkIdempotency(ctx, q, createdBy, idem)
+		return err
+	})
+	if err != nil {
+		return store.EnqueueResult{}, false, err
+	}
+	return res, ok, nil
+}
+
+// checkGroups validates Idempotency.Groups for n messages.
+func checkGroups(groups []int, n int) error {
+	if groups == nil {
+		return nil
+	}
+	sum := 0
+	for _, g := range groups {
+		if g < 1 {
+			return errors.New("sqlite: enqueue: group sizes must be positive")
+		}
+		sum += g
+	}
+	if sum != n {
+		return fmt.Errorf("sqlite: enqueue: group sizes add up to %d, not %d messages", sum, n)
+	}
+	return nil
+}
+
+// groupsJSON is the stored form of group sizes ("" for none).
+func groupsJSON(groups []int) string {
+	if groups == nil {
+		return ""
+	}
+	return marshalJSON(groups)
+}
+
 // checkIdempotency looks up (createdBy, key). It returns the original
 // messages when a valid record with the same hash exists; a record with a
 // different hash is an error; a record older than idem.Since is deleted.
-func checkIdempotency(ctx context.Context, q execer, createdBy domain.Actor, idem store.Idempotency) ([]domain.Message, bool, error) {
+func checkIdempotency(ctx context.Context, q execer, createdBy domain.Actor, idem store.Idempotency) (store.EnqueueResult, bool, error) {
 	by := actorString(createdBy)
-	var hash, idsJSON string
+	var hash, idsJSON, groupsRaw string
 	var created int64
 	err := q.QueryRowContext(ctx,
-		`SELECT request_hash, message_ids, created_at FROM idempotency_keys WHERE created_by = ? AND key = ?`,
-		by, idem.Key).Scan(&hash, &idsJSON, &created)
+		`SELECT request_hash, message_ids, created_at, group_sizes FROM idempotency_keys WHERE created_by = ? AND key = ?`,
+		by, idem.Key).Scan(&hash, &idsJSON, &created, &groupsRaw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, false, nil
+		return store.EnqueueResult{}, false, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("sqlite: read idempotency key: %w", err)
+		return store.EnqueueResult{}, false, fmt.Errorf("sqlite: read idempotency key: %w", err)
 	}
 	if created < toMS(idem.Since) {
 		if _, err := q.ExecContext(ctx,
 			`DELETE FROM idempotency_keys WHERE created_by = ? AND key = ?`, by, idem.Key); err != nil {
-			return nil, false, fmt.Errorf("sqlite: delete stale idempotency key: %w", err)
+			return store.EnqueueResult{}, false, fmt.Errorf("sqlite: delete stale idempotency key: %w", err)
 		}
-		return nil, false, nil
+		return store.EnqueueResult{}, false, nil
 	}
 	if hash != idem.RequestHash {
-		return nil, false, fmt.Errorf("%w: key %q", domain.ErrIdempotencyMismatch, idem.Key)
+		return store.EnqueueResult{}, false, fmt.Errorf("%w: key %q", domain.ErrIdempotencyMismatch, idem.Key)
 	}
 	var ids []string
 	if err := json.Unmarshal([]byte(idsJSON), &ids); err != nil {
-		return nil, false, fmt.Errorf("sqlite: corrupt idempotency record: %w", err)
+		return store.EnqueueResult{}, false, fmt.Errorf("sqlite: corrupt idempotency record: %w", err)
+	}
+	var groups []int
+	if groupsRaw != "" {
+		if err := json.Unmarshal([]byte(groupsRaw), &groups); err != nil || checkGroups(groups, len(ids)) != nil {
+			return store.EnqueueResult{}, false, errors.New("sqlite: corrupt idempotency record: bad group sizes")
+		}
 	}
 	msgs := make([]domain.Message, 0, len(ids))
 	for _, id := range ids {
 		m, err := getMessage(ctx, q, domain.ID(id))
 		if err != nil {
-			return nil, false, err
+			return store.EnqueueResult{}, false, err
 		}
 		msgs = append(msgs, m)
 	}
-	return msgs, true, nil
+	return store.EnqueueResult{Messages: msgs, Replayed: true, Groups: groups}, true, nil
 }
 
 func getMessage(ctx context.Context, q execer, id domain.ID) (domain.Message, error) {

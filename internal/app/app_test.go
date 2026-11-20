@@ -205,10 +205,16 @@ func TestServeEndToEnd(t *testing.T) {
 	})
 	waitFor(t, "inbox poller", func() bool { return a.pollers.count() == 1 })
 
-	code, msg := c.do(http.MethodPost, "/api/v1/messages", map[string]any{"to": "600100200", "body": "Hello from tikker"})
+	code, resp := c.do(http.MethodPost, "/api/v1/messages", map[string]any{"to": "600100200", "body": "Hello from tikker"})
 	if code != http.StatusAccepted {
-		t.Fatalf("send: %d %v", code, msg)
+		t.Fatalf("send: %d %v", code, resp)
 	}
+	// SendMessageResponse: {"messages": [Message, ...]}.
+	parts, _ := resp["messages"].([]any)
+	if len(parts) != 1 {
+		t.Fatalf("send: want one message, got %v", resp)
+	}
+	msg := parts[0].(map[string]any)
 	msgPath := fmt.Sprintf("/api/v1/messages/%s", msg["id"])
 	waitFor(t, "message sent", func() bool {
 		_, got := c.do(http.MethodGet, msgPath, nil)
