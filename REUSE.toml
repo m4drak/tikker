@@ -32,3 +32,29 @@ SPDX-License-Identifier = "GPL-3.0-or-later"
 path = ["LICENSE", "LICENSES/*.txt"]
 SPDX-FileCopyrightText = "2007 Free Software Foundation, Inc."
 SPDX-License-Identifier = "GPL-3.0-or-later"
+
+# Translation files (JSON cannot carry comments).
+[[annotations]]
+path = ["internal/web/i18n/*.json"]
+SPDX-FileCopyrightText = "2026 The tikker Authors"
+SPDX-License-Identifier = "GPL-3.0-or-later"
+
+# Vendored front-end assets embedded in the web panel (see
+# internal/web/static/VENDOR.md for versions and checksums).
+[[annotations]]
+path = ["internal/web/static/htmx.min.js", "internal/web/static/LICENSES/htmx-0BSD.txt"]
+precedence = "override"
+SPDX-FileCopyrightText = "Big Sky Software and htmx contributors"
+SPDX-License-Identifier = "0BSD"
+
+[[annotations]]
+path = ["internal/web/static/pico.min.css", "internal/web/static/LICENSES/pico-MIT.txt"]
+precedence = "override"
+SPDX-FileCopyrightText = "2019-2025 Pico (Lucas Larroche)"
+SPDX-License-Identifier = "MIT"
+
+# Screenshots of the web panel (generated from the tikker UI).
+[[annotations]]
+path = ["docs/screenshots/*.png"]
+SPDX-FileCopyrightText = "2026 The tikker Authors"
+SPDX-License-Identifier = "GPL-3.0-or-later"
