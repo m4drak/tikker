@@ -53,6 +53,7 @@ import (
 	"github.com/m4drak/tikker/internal/secrets"
 	"github.com/m4drak/tikker/internal/sms"
 	"github.com/m4drak/tikker/internal/store/sqlite"
+	"github.com/m4drak/tikker/internal/web"
 )
 
 // DatabaseFile is the SQLite file name inside the data directory.
@@ -263,9 +264,8 @@ func (a *App) initAuth(ctx context.Context, opts Options) error {
 	}
 	switch res {
 	case auth.BootstrapSetupRequired:
-		// There is no web panel yet (T30), so the wizard cannot be used.
-		a.log.Warn("no users exist and the web panel is not available yet: set TIKKER_ADMIN_PASSWORD " +
-			"(at least 12 characters) and restart to create the admin, then create an API token with `tikker token create`")
+		a.log.Warn("no users exist: open the web panel to create the administrator (first-run wizard), " +
+			"or set TIKKER_ADMIN_PASSWORD (at least 12 characters) and restart")
 	case auth.BootstrapCreated, auth.BootstrapNotNeeded: // logged by auth
 	}
 	return nil
@@ -369,11 +369,16 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	if err != nil {
 		return nil, fmt.Errorf("probes: %w", err)
 	}
+	panel, err := web.New(web.Options{Auth: a.auth, Logger: a.log, BaseURL: a.cfg.BaseURL})
+	if err != nil {
+		return nil, fmt.Errorf("web panel: %w", err)
+	}
 	mux := http.NewServeMux()
 	mux.Handle(api.Prefix+"/", apiH)
 	routes := pr.Routes()
 	mux.Handle("/healthz", routes)
 	mux.Handle("/readyz", routes)
+	mux.Handle("/", panel.Handler()) // the web panel owns everything else
 	return mux, nil
 }
 

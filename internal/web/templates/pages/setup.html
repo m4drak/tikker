@@ -1,0 +1,37 @@
+{{- /*
+SPDX-FileCopyrightText: 2026 The tikker Authors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/ -}}
+{{define "title"}}{{t "setup.title"}}{{end}}
+{{define "content" -}}
+<article class="auth-card">
+  <header>
+    <h1>{{t "setup.heading"}}</h1>
+    <p>{{t "setup.intro"}}</p>
+  </header>
+  <form method="post" action="/setup">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label for="username">{{t "setup.username"}}</label>
+    <input id="username" name="username" type="text" value="{{.Data.Username}}" autocomplete="username" autocapitalize="none" spellcheck="false" required aria-describedby="username-hint{{if .Data.Errors.username}} username-error{{end}}"{{if .Data.Errors.username}} aria-invalid="true"{{end}}>
+    <small id="username-hint">{{t "setup.username_hint"}}</small>
+    {{- if .Data.Errors.username}}
+    <small id="username-error" class="field-error" role="alert">{{.Data.Errors.username}}</small>
+    {{- end}}
+
+    <label for="password">{{t "setup.password"}}</label>
+    <input id="password" name="password" type="password" autocomplete="new-password" required aria-describedby="password-hint{{if .Data.Errors.password}} password-error{{end}}"{{if .Data.Errors.password}} aria-invalid="true"{{end}}>
+    <small id="password-hint">{{t "setup.password_hint"}}</small>
+    {{- if .Data.Errors.password}}
+    <small id="password-error" class="field-error" role="alert">{{.Data.Errors.password}}</small>
+    {{- end}}
+
+    <label for="confirm">{{t "setup.confirm"}}</label>
+    <input id="confirm" name="confirm" type="password" autocomplete="new-password" required{{if .Data.Errors.confirm}} aria-invalid="true" aria-describedby="confirm-error"{{end}}>
+    {{- if .Data.Errors.confirm}}
+    <small id="confirm-error" class="field-error" role="alert">{{.Data.Errors.confirm}}</small>
+    {{- end}}
+
+    <button type="submit">{{t "setup.submit"}}</button>
+  </form>
+</article>
+{{- end}}

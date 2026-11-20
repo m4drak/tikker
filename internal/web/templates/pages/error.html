@@ -1,0 +1,12 @@
+{{- /*
+SPDX-FileCopyrightText: 2026 The tikker Authors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/ -}}
+{{define "title"}}{{t .Data.TitleKey}}{{end}}
+{{define "content" -}}
+<article class="auth-card">
+  <header><h1>{{.Data.Status}} - {{t .Data.TitleKey}}</h1></header>
+  <p>{{t .Data.TextKey}}</p>
+  <footer><a href="/" role="button">{{t "error.home"}}</a></footer>
+</article>
+{{- end}}
