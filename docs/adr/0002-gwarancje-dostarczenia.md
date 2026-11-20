@@ -94,7 +94,9 @@ z `last_error` zaczynającym się od `expired` (`MessageRepo.ExpireQueued`). `Ac
 Wiadomość już w `sending` nie wygasa, bo nie wiadomo, czy wyszła.
 
 **Łagodne zamknięcie (SIGTERM).** Worker nie pobiera nowych dzierżaw i czeka na bieżącą wysyłkę do timeoutu.
-Wysyłka przerwana przez timeout zamknięcia jest niejednoznaczna, więc trafia do `Requeue` z flagą duplikatu.
+Wysyłka przerwana przez timeout zamknięcia jest niejednoznaczna: przechodzi zgodnie z `NextStatus` jak przy
+wygasłej dzierżawie, czyli przy `attempts < max` wraca do kolejki (`next_attempt_at = now`) z flagą duplikatu,
+a przy `attempts ≥ max` kończy jako `failed` z `possible_duplicate` (decyzja właściciela, 2026-11-20).
 Jeśli proces nie zdąży zapisać wyniku, zadziała odzysk dzierżawy przy następnym starcie.
 
 ### 2. Routing w chwili pobrania (pull)
