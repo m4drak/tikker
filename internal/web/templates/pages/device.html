@@ -1,0 +1,260 @@
+{{- /*
+SPDX-FileCopyrightText: 2026 The tikker Authors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/ -}}
+{{define "title"}}{{if .Data.Form.ID}}{{.Data.Device.Name}}{{else}}{{t "dev.add"}}{{end}}{{end}}
+{{define "content" -}}
+{{- if .Data.Form.ID}}
+<h1>{{.Data.Device.Name}}</h1>
+{{- if eq .Data.Notice "created"}}
+<p class="notice ok" role="status">{{t "dev.notice.created"}}</p>
+{{- else if eq .Data.Notice "saved"}}
+<p class="notice ok" role="status">{{t "dev.notice.saved"}}</p>
+{{- else if eq .Data.Notice "enabled"}}
+<p class="notice ok" role="status">{{t "dev.notice.enabled"}}</p>
+{{- else if eq .Data.Notice "disabled"}}
+<p class="notice ok" role="status">{{t "dev.notice.disabled"}}</p>
+{{- else if eq .Data.Notice "channel_added"}}
+<p class="notice ok" role="status">{{t "ch.notice.added"}}</p>
+{{- else if eq .Data.Notice "channel_deleted"}}
+<p class="notice ok" role="status">{{t "ch.notice.deleted"}}</p>
+{{- end}}
+{{- if .Data.Alert}}
+<p class="notice" role="alert" id="device-alert">{{.Data.Alert}}</p>
+{{- end}}
+{{- if .Data.Insecure}}
+<p class="notice warn" role="note" id="insecure-banner">{{t "dev.insecure_banner"}}</p>
+{{- end}}
+
+<section aria-labelledby="test-heading">
+  <h2 id="test-heading">{{t "dev.test.heading"}}</h2>
+  <form hx-post="/devices/{{.Data.Device.ID}}/test" hx-target="#device-test" hx-swap="innerHTML" hx-disabled-elt="find button" method="post" action="/devices/{{.Data.Device.ID}}/test">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <button type="submit">{{t "dev.test.button"}}</button>
+  </form>
+  <div id="device-test" aria-live="polite"></div>
+</section>
+
+<section aria-labelledby="channels-heading">
+  <h2 id="channels-heading">{{t "ch.heading"}}</h2>
+  {{- if .Data.Channels}}
+  <div class="overflow-auto">
+    <table class="striped compact" id="channels">
+      <thead>
+        <tr>
+          <th scope="col">{{t "dash.channel"}}</th>
+          <th scope="col">{{t "dash.state"}}</th>
+          <th scope="col">{{t "ch.col.limits"}}</th>
+          <th scope="col">{{t "dev.col.actions"}}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{- range .Data.Channels}}
+        <tr>
+          <td>
+            <a href="/channels/{{.ID}}"><strong>{{.Name}}</strong></a><br>
+            <small class="muted">{{.Port}}{{range .Tags}} <span class="tag">{{.}}</span>{{end}}</small>
+          </td>
+          <td>
+            <span class="badge state-{{.State}}">{{t .StateKey}}</span>
+            {{- if .Reason}}<br><small class="muted">{{.Reason}}</small>{{end}}
+          </td>
+          <td><small>{{t "ch.limits" .RatePerMin .MaxSegments}}</small></td>
+          <td>
+            <form method="post" action="/channels/{{.ID}}/toggle">
+              <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+              {{- if .Enabled}}
+              <input type="hidden" name="enabled" value="false">
+              <button type="submit" class="secondary outline">{{t "dev.disable"}}</button>
+              {{- else}}
+              <input type="hidden" name="enabled" value="true">
+              <button type="submit" class="secondary outline">{{t "dev.enable"}}</button>
+              {{- end}}
+            </form>
+          </td>
+        </tr>
+        {{- end}}
+      </tbody>
+    </table>
+  </div>
+  {{- else}}
+  <p>{{t "ch.empty"}}</p>
+  {{- end}}
+  <form method="post" action="/devices/{{.Data.Device.ID}}/channels" class="inline-add">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label for="new-port">{{t "ch.add_port"}}</label>
+    <input id="new-port" name="port" type="text" maxlength="32" pattern="[A-Za-z0-9._\-]+" autocomplete="off" autocapitalize="none" spellcheck="false" required aria-describedby="new-port-hint">
+    <small id="new-port-hint" class="muted">{{t "ch.add_port_hint"}}</small>
+    <button type="submit" class="secondary">{{t "ch.add"}}</button>
+  </form>
+</section>
+{{- else}}
+<h1>{{t "dev.add"}}</h1>
+{{- end}}
+
+<section aria-labelledby="settings-heading">
+  <h2 id="settings-heading">{{if .Data.Form.ID}}{{t "dev.settings"}}{{else}}{{t "dev.new_settings"}}{{end}}</h2>
+  {{template "device_form" .}}
+</section>
+
+{{- if .Data.Form.ID}}
+<section aria-labelledby="danger-heading">
+  <h2 id="danger-heading">{{t "dev.danger"}}</h2>
+  <p><a href="/devices/{{.Data.Device.ID}}/delete" role="button" class="secondary outline">{{t "dev.delete.link"}}</a></p>
+</section>
+{{- end}}
+{{- end}}
+
+{{- /* The settings form; GET /devices/{id}/form renders only this block. */ -}}
+{{define "device_form" -}}
+{{- $d := .Data.Form}}
+<form method="post" id="device-form" action="{{if $d.ID}}/devices/{{$d.ID}}{{else}}/devices{{end}}">
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+
+  <label for="dev-name">{{t "dev.name"}}</label>
+  <input id="dev-name" name="name" type="text" maxlength="64" value="{{$d.Form.Name}}" autocomplete="off" required
+    {{- if $d.Errors.name}} aria-invalid="true" aria-describedby="dev-name-error"{{end}}>
+  {{- if $d.Errors.name}}
+  <small id="dev-name-error" class="field-error" role="alert">{{$d.Errors.name}}</small>
+  {{- end}}
+
+  <label for="dev-url">{{t "dev.url"}}</label>
+  <input id="dev-url" name="base_url" type="url" maxlength="255" value="{{$d.Form.BaseURL}}" autocomplete="off" autocapitalize="none" spellcheck="false" required
+    {{- if $d.Errors.base_url}} aria-invalid="true" aria-describedby="dev-url-error"{{else}} aria-describedby="dev-url-hint"{{end}}>
+  {{- if $d.Errors.base_url}}
+  <small id="dev-url-error" class="field-error" role="alert">{{$d.Errors.base_url}}</small>
+  {{- else}}
+  <small id="dev-url-hint" class="muted">{{t "dev.url_hint"}}</small>
+  {{- end}}
+
+  <div class="grid">
+    <div>
+      <label for="dev-user">{{t "dev.username"}}</label>
+      <input id="dev-user" name="username" type="text" maxlength="64" value="{{$d.Form.Username}}" autocomplete="off" autocapitalize="none" spellcheck="false" required
+        {{- if $d.Errors.username}} aria-invalid="true" aria-describedby="dev-user-error"{{end}}>
+      {{- if $d.Errors.username}}
+      <small id="dev-user-error" class="field-error" role="alert">{{$d.Errors.username}}</small>
+      {{- end}}
+    </div>
+    <div>
+      <label for="dev-pass">{{t "dev.password"}}</label>
+      <input id="dev-pass" name="password" type="password" maxlength="256" value="" autocomplete="new-password"
+        {{- if not $d.ID}} required{{end}}
+        {{- if $d.Errors.password}} aria-invalid="true" aria-describedby="dev-pass-error"{{else}} aria-describedby="dev-pass-hint"{{end}}>
+      {{- if $d.Errors.password}}
+      <small id="dev-pass-error" class="field-error" role="alert">{{$d.Errors.password}}</small>
+      {{- else}}
+      <small id="dev-pass-hint" class="muted">{{if $d.ID}}{{t "dev.password_keep"}}{{else}}{{t "dev.password_hint"}}{{end}}</small>
+      {{- end}}
+    </div>
+  </div>
+
+  <label for="dev-tls">{{t "dev.tls_mode"}}</label>
+  <select id="dev-tls" name="tls_mode" aria-describedby="dev-tls-hint">
+    {{- range $d.Modes}}
+    <option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{t .LabelKey}}</option>
+    {{- end}}
+  </select>
+  <small id="dev-tls-hint" class="muted">{{t "dev.tls_hint"}}</small>
+  {{- if $d.Insecure}}
+  <p class="notice warn" role="note" id="form-insecure">{{t "dev.insecure_banner"}}</p>
+  {{- end}}
+
+  <label for="dev-fp">{{t "dev.fingerprint"}}</label>
+  <input id="dev-fp" name="fingerprint" type="text" maxlength="95" value="{{$d.Form.Fingerprint}}" autocomplete="off" autocapitalize="none" spellcheck="false"
+    {{- if $d.Errors.fingerprint}} aria-invalid="true" aria-describedby="dev-fp-error"{{else}} aria-describedby="dev-fp-hint"{{end}}>
+  {{- if $d.Errors.fingerprint}}
+  <small id="dev-fp-error" class="field-error" role="alert">{{$d.Errors.fingerprint}}</small>
+  {{- else}}
+  <small id="dev-fp-hint" class="muted">{{t "dev.fingerprint_hint"}}</small>
+  {{- end}}
+
+  <label for="dev-ca">{{t "dev.ca_pem"}}</label>
+  <textarea id="dev-ca" name="ca_pem" rows="5" maxlength="16384" spellcheck="false"
+    {{- if $d.Errors.ca_pem}} aria-invalid="true" aria-describedby="dev-ca-error"{{else}} aria-describedby="dev-ca-hint"{{end}}>{{$d.Form.CAPEM}}</textarea>
+  {{- if $d.Errors.ca_pem}}
+  <small id="dev-ca-error" class="field-error" role="alert">{{$d.Errors.ca_pem}}</small>
+  {{- else}}
+  <small id="dev-ca-hint" class="muted">{{t "dev.ca_hint"}}</small>
+  {{- end}}
+
+  <label for="dev-enabled">
+    <input id="dev-enabled" name="enabled" type="checkbox" value="1"{{if $d.Form.Enabled}} checked{{end}}>
+    {{t "dev.enabled"}}
+  </label>
+
+  <button type="submit">{{if $d.ID}}{{t "common.save"}}{{else}}{{t "dev.create"}}{{end}}</button>
+</form>
+{{- end}}
+
+{{- /* The result of "test connection"; POST /devices/{id}/test renders only this block. */ -}}
+{{define "device_test" -}}
+<article id="test-result" class="{{if .Data.OK}}test-ok{{else}}test-failed{{end}}">
+  {{- if .Data.OK}}
+  <p class="notice ok" role="status">{{t "dev.test.ok"}}</p>
+  {{- else}}
+  <p class="notice" role="alert">{{t .Data.ErrorKey}}{{if .Data.ErrorDetail}} <small>({{.Data.ErrorDetail}})</small>{{end}}</p>
+  {{- end}}
+  <dl class="props">
+    {{- if .Data.Version}}
+    <dt>{{t "dev.test.version"}}</dt><dd id="test-version">{{.Data.Version}}</dd>
+    {{- end}}
+    {{- if .Data.Board}}
+    <dt>{{t "dev.test.board"}}</dt><dd id="test-board">{{.Data.Board}}</dd>
+    {{- end}}
+    {{- if .Data.HasLatency}}
+    <dt>{{t "dev.test.latency"}}</dt><dd>{{.Data.LatencyMS}} ms</dd>
+    {{- end}}
+    {{- if .Data.TLS}}
+    <dt>{{t "dev.test.tls"}}</dt>
+    <dd>{{t .Data.TLS.ModeKey}}, {{if .Data.TLS.Verified}}{{t "dev.test.verified"}}{{else}}{{t "dev.test.unverified"}}{{end}}</dd>
+    {{- if .Data.TLS.Fingerprint}}
+    <dt>{{t "dev.test.fingerprint"}}</dt>
+    <dd><code id="test-fingerprint">{{.Data.TLS.Fingerprint}}</code></dd>
+    {{- end}}
+    {{- end}}
+    <dt>{{t "dev.test.checked_at"}}</dt><dd>{{.Data.CheckedAt}} UTC</dd>
+  </dl>
+  {{- if and .Data.TLS .Data.TLS.PinURL}}
+  <p class="muted"><small>{{t "dev.test.pin_hint"}}</small></p>
+  <button type="button" id="pin-fingerprint" class="secondary" hx-get="{{.Data.TLS.PinURL}}" hx-target="#device-form" hx-swap="outerHTML">{{t "dev.test.pin"}}</button>
+  {{- end}}
+  {{- if .Data.Ports}}
+  <h3>{{t "dev.test.ports"}}</h3>
+  <div class="overflow-auto">
+    <table class="compact" id="test-ports">
+      <thead>
+        <tr>
+          <th scope="col">{{t "ch.port"}}</th>
+          <th scope="col">{{t "dash.operator"}}</th>
+          <th scope="col">{{t "dev.test.registration"}}</th>
+          <th scope="col">{{t "dash.signal"}}</th>
+          <th scope="col">{{t "dev.col.actions"}}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{- range .Data.Ports}}
+        <tr>
+          <td>{{.Port}}{{if not .Running}} <small class="muted">({{t "dev.test.down"}})</small>{{end}}</td>
+          <td>{{if .Operator}}{{.Operator}}{{else}}-{{end}}</td>
+          <td>{{if .Registration}}{{.Registration}}{{else}}-{{end}}</td>
+          <td>{{if .Signal}}{{.Signal}}{{else}}-{{end}}</td>
+          <td>
+            {{- if .Channel}}
+            <a href="/channels/{{.Channel}}">{{t "ch.configured"}}</a>
+            {{- else}}
+            <form method="post" action="/devices/{{$.Data.DeviceID}}/channels">
+              <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+              <input type="hidden" name="port" value="{{.Port}}">
+              <button type="submit" class="secondary">{{t "ch.add"}}</button>
+            </form>
+            {{- end}}
+          </td>
+        </tr>
+        {{- end}}
+      </tbody>
+    </table>
+  </div>
+  {{- end}}
+</article>
+{{- end}}

@@ -1,0 +1,2976 @@
+# SPDX-FileCopyrightText: 2026 The tikker Authors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Kontrakt REST API tikker (SPEC §5). Źródło prawdy dla handlerów w internal/api.
+# Zmiana kontraktu wymaga osobnego PR (PLAN §1.2 p. 3).
+openapi: 3.1.0
+info:
+  title: tikker REST API
+  version: 0.2.0
+  summary: Bramka SMS oparta o MikroTik RouterOS 7.
+  license:
+    name: GPL-3.0-or-later
+    identifier: GPL-3.0-or-later
+  description: |
+    REST API bramki SMS **tikker**. Wszystkie zasoby są dostępne pod `/api/v1`, w formacie JSON
+    (`application/json`, UTF-8). Wyjątkiem są sondy `/healthz` i `/readyz` (bez prefiksu i bez autoryzacji).
+
+    ## Autoryzacja i zakresy
+    Każde żądanie pod `/api/v1` wymaga nagłówka `Authorization: Bearer tkr_<prefix>_<secret>`.
+    Token ma zestaw zakresów (`scopes`):
+
+    | Zakres | Uprawnia do |
+    |---|---|
+    | `sms:read` | odczyt wiadomości i kanałów |
+    | `sms:send` | wysyłka i anulowanie wiadomości |
+    | `admin` | zarządzanie urządzeniami, kanałami, tokenami i użytkownikami; **implikuje** `sms:read` i `sms:send` |
+
+    Wymagane zakresy operacji podaje rozszerzenie `x-required-scopes` oraz lista ról w wymaganiu
+    `security` (OpenAPI 3.1 dopuszcza ją dla schematów innych niż OAuth2). Operacja wymaga
+    **dowolnego** z wymienionych zakresów (`admin` zawsze wystarcza).
+    Efektywne uprawnienia tokenu to część wspólna jego zakresów i roli właściciela
+    (`viewer` → `sms:read`; `operator` → `sms:read`, `sms:send`; `admin` → wszystko).
+    Token wyłączonego użytkownika, wygasły lub unieważniony daje `401`; brak zakresu daje `403`.
+
+    ## Błędy
+    Błędy są zwracane jako RFC 9457 `application/problem+json` (schemat `Problem`).
+    Pole `type` przyjmuje jedną z wartości:
+
+    | `type` | Status | Znaczenie |
+    |---|---|---|
+    | `urn:tikker:problem:malformed-request` | 400 | niepoprawny JSON, zły typ pola, nieznany parametr |
+    | `urn:tikker:problem:unauthorized` | 401 | brak, zły, wygasły lub unieważniony token |
+    | `urn:tikker:problem:forbidden` | 403 | token nie ma wymaganego zakresu |
+    | `urn:tikker:problem:not-found` | 404 | zasób lub ścieżka nie istnieje |
+    | `urn:tikker:problem:method-not-allowed` | 405 | metoda niedozwolona dla ścieżki (nagłówek `Allow`) |
+    | `urn:tikker:problem:conflict` | 409 | konflikt unikalności lub stanu zasobu (np. anulowanie nie-`queued`) |
+    | `urn:tikker:problem:idempotency-key-in-use` | 409 | żądanie z tym `Idempotency-Key` jest właśnie przetwarzane |
+    | `urn:tikker:problem:payload-too-large` | 413 | ciało żądania przekracza limit rozmiaru (domyślnie 2 MiB) |
+    | `urn:tikker:problem:batch-too-large` | 413 | więcej niż 100 wiadomości w paczce |
+    | `urn:tikker:problem:validation` | 422 | błędy semantyczne; szczegóły w `errors[]` |
+    | `urn:tikker:problem:idempotency-key-mismatch` | 422 | ten sam `Idempotency-Key` z innym ciałem żądania |
+    | `urn:tikker:problem:rate-limited` | 429 | przekroczony limit żądań tokenu |
+    | `urn:tikker:problem:internal` | 500 | błąd serwera (bez szczegółów wewnętrznych) |
+
+    Pole `title` jest stałe dla danego `type` (np. `Malformed request`, `Request validation failed`).
+
+    Kody w `errors[].code` dla `validation`: `required`, `invalid_format`, `out_of_range`,
+    `invalid_phone_number`, `too_many_segments`, `unsupported_characters`, `unknown_channel`,
+    `channel_disabled`, `no_matching_channel`, `expires_at_in_past`, `insecure_transport_not_allowed`,
+    `scope_exceeds_role`, `unknown_user`, `unknown_device`.
+
+    Każda operacja przyjmująca ciało żądania może zwrócić `413` (`payload-too-large`), gdy ciało
+    przekracza limit rozmiaru serwera.
+
+    ## Odpowiedzi wspólne dla wszystkich ścieżek
+    Żądania, które nie trafiają do żadnej operacji kontraktu, dostają odpowiedź **przed** uwierzytelnieniem
+    (bez nagłówków `RateLimit-*`):
+
+    | Sytuacja | Odpowiedź |
+    |---|---|
+    | nieznana ścieżka pod `/api/v1` | `404` `not-found` (`components/responses/NotFound`) |
+    | znana ścieżka, niedozwolona metoda | `405` `method-not-allowed` z nagłówkiem `Allow` (`components/responses/MethodNotAllowed`) |
+
+    ## Paginacja
+    Listy zwracają obiekt strony (`items`, `next_cursor`). Kolejną stronę pobiera się, przekazując
+    `cursor=<next_cursor>` z tymi samymi filtrami. `next_cursor` równy `null` oznacza ostatnią stronę.
+    Kursor jest nieprzezroczysty; nie należy go parsować. Wiadomości są sortowane od najnowszych (malejąco po `id`).
+
+    ## Limity żądań
+    Limit żądań jest liczony per token (SPEC §4.5) jako token bucket: pojemność `RateLimit-Limit` żądań,
+    uzupełniana w całości w ciągu okna (domyślnie 120 żądań na 60 s). Żądanie z poprawnym tokenem zużywa
+    jednostkę limitu jeszcze przed sprawdzeniem zakresu, więc także odpowiedzi `403`, `4xx` walidacji i `429`
+    zawierają nagłówki `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`
+    (wg draft-ietf-httpapi-ratelimit-headers, wariant z osobnymi polami).
+    Nagłówków **nie ma** w odpowiedziach `401` (żądanie bez poprawnego tokenu niczego nie zużywa),
+    w odpowiedziach wspólnych `404`/`405` dla nieznanych ścieżek i metod ani wtedy, gdy limit jest wyłączony
+    w konfiguracji. Po wyczerpaniu limitu serwer zwraca `429` z nagłówkiem `Retry-After` (sekundy).
+    Limit żądań API jest niezależny od limitu wysyłki kanału (`rate_per_min`), który nie powoduje `429`,
+    tylko opóźnia wysyłkę z kolejki.
+
+    ## Idempotencja
+    `POST /messages` i `POST /messages/batch` przyjmują nagłówek `Idempotency-Key`
+    (wg draft-ietf-httpapi-idempotency-key-header). Klucz jest unikalny w obrębie tokenu przez 24 h:
+    - powtórzenie z tym samym kluczem i tym samym ciałem zwraca odpowiedź o tym samym statusie (`202`) i tej samej
+      strukturze, z tymi samymi wiadomościami w **bieżącym** stanie (np. już `sent`), z nagłówkiem
+      `Idempotent-Replayed: true`; nowa wiadomość nie powstaje. Powtórzenie jest rozpoznawane przed walidacją,
+      więc zwraca pierwotne wiadomości nawet wtedy, gdy samo żądanie nie przeszłoby jej teraz
+      (np. kanał wyłączono w międzyczasie);
+    - ten sam klucz z innym ciałem daje `422` (`idempotency-key-mismatch`); dotyczy to także użycia klucza
+      z `POST /messages` w `POST /messages/batch` i odwrotnie;
+    - ten sam klucz, gdy pierwsze żądanie jest jeszcze przetwarzane, daje `409` (`idempotency-key-in-use`).
+    Ciała porównywane są po kanonizacji JSON (kolejność pól nie ma znaczenia).
+    Żądania zakończone błędem `4xx`/`5xx` nie rezerwują klucza.
+
+    ## Wiadomości dzielone (`split`)
+    Gdy serwer działa ze strategią długich wiadomości `split` (`TIKKER_LONG_MESSAGE_STRATEGY`, SPEC §4.6),
+    jedno żądanie wysyłki może utworzyć **kilka niezależnych wiadomości** (każda z prefiksem `(i/N) `,
+    wspólnym `client_ref` i własnym cyklem życia, SPEC §12 p. 3). Dlatego `POST /messages` zwraca obiekt
+    `SendMessageResponse` z listą `messages` (zwykle jednoelementową), a `POST /messages/batch` – po jednym
+    takim obiekcie na każdą pozycję paczki.
+servers:
+  - url: /api/v1
+    description: Względem adresu instancji tikker (np. `https://sms.example.org/api/v1`).
+tags:
+  - name: messages
+    description: Wysyłka, historia i anulowanie wiadomości SMS (wychodzących i przychodzących).
+  - name: channels
+    description: Kanały (urządzenie + port LTE) ze stanem zdrowia.
+  - name: devices
+    description: Urządzenia MikroTik RouterOS (tylko `admin`).
+  - name: tokens
+    description: Tokeny API (tylko `admin`).
+  - name: users
+    description: Użytkownicy panelu i właściciele tokenów (tylko `admin`).
+  - name: health
+    description: Sondy żywotności i gotowości (bez autoryzacji, poza `/api/v1`).
+security:
+  - bearerAuth: []
+
+paths:
+  /messages:
+    post:
+      tags: [messages]
+      operationId: sendMessage
+      summary: Wyślij SMS
+      description: |
+        Przyjmuje wiadomość do kolejki i zwraca `202` z obiektem `SendMessageResponse`: listą `messages`
+        utworzonych wiadomości w stanie `queued`. Zwykle jest to jedna wiadomość; przy strategii `split`
+        (sekcja „Wiadomości dzielone”) – kolejne części w kolejności treści. Nagłówek `Location` wskazuje
+        pierwszą wiadomość.
+        Numer `to` jest normalizowany do E.164 (region domyślny z konfiguracji, SPEC §4.6),
+        kodowanie (`gsm7`/`ucs2`) i liczba segmentów są wyliczane przez serwer.
+        Kanał wybiera routing (SPEC §4.4): `channel_id` → `tags` → wszystkie aktywne kanały.
+        Pole `channel_id` w odpowiedzi jest `null`, dopóki dispatcher nie przydzieli kanału
+        (chyba że podano go jawnie).
+      security:
+        - bearerAuth: ['sms:send']
+      x-required-scopes: ['sms:send']
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+            examples:
+              polish:
+                summary: SMS z polskimi znakami (UCS-2)
+                value:
+                  to: '+48600100200'
+                  body: 'Twój kod weryfikacyjny: 482913. Ważny 5 minut.'
+                  client_ref: 'otp-7f3a91'
+                  expires_at: '2026-11-25T09:55:00Z'
+              long:
+                summary: Długi SMS GSM-7 (2 segmenty), wybór kanału po tagach
+                value:
+                  to: '600100201'
+                  body: 'Dzien dobry, przypominamy o planowanym przegladzie instalacji w dniu 2026-11-25 w godzinach 8:00-12:00. Prosimy o zapewnienie dostepu do pomieszczenia technicznego. W razie pytan prosimy o kontakt pod numerem 22 123 45 67.'
+                  tags: ['orange', 'bulk']
+                  client_ref: 'crm-ticket-4411'
+              explicitChannel:
+                summary: Jawny kanał
+                value:
+                  to: '+48600100202'
+                  body: 'Alarm: temperatura w serwerowni 31 C'
+                  channel_id: '01M88ZA4DC268MPN2Z7ECB2KZ6'
+      responses:
+        '202':
+          description: Przyjęto do kolejki (lub powtórzenie idempotentne – patrz `Idempotent-Replayed`).
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendMessageResponse'
+              examples:
+                polish:
+                  summary: Wiadomość UCS-2 w kolejce
+                  value:
+                    messages:
+                      - id: '01M89304ZQ61F6CVNX486V10VC'
+                        direction: out
+                        channel_id: null
+                        peer: '+48600100200'
+                        body: 'Twój kod weryfikacyjny: 482913. Ważny 5 minut.'
+                        encoding: ucs2
+                        segments: 1
+                        status: queued
+                        attempts: 0
+                        next_attempt_at: null
+                        last_error: null
+                        possible_duplicate: false
+                        client_ref: 'otp-7f3a91'
+                        tags: []
+                        expires_at: '2026-11-25T09:55:00Z'
+                        created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
+                        created_at: '2026-11-25T09:46:40Z'
+                        sent_at: null
+                        received_at: null
+                long:
+                  summary: Długa wiadomość GSM-7 (2 segmenty) w kolejce
+                  value:
+                    messages:
+                      - id: '01M891QES8WQZGV91A5WVKBCKF'
+                        direction: out
+                        channel_id: null
+                        peer: '+48600100201'
+                        body: 'Dzien dobry, przypominamy o planowanym przegladzie instalacji w dniu 2026-11-25 w godzinach 8:00-12:00. Prosimy o zapewnienie dostepu do pomieszczenia technicznego. W razie pytan prosimy o kontakt pod numerem 22 123 45 67.'
+                        encoding: gsm7
+                        segments: 2
+                        status: queued
+                        attempts: 0
+                        next_attempt_at: null
+                        last_error: null
+                        possible_duplicate: false
+                        client_ref: 'crm-ticket-4411'
+                        tags: ['orange', 'bulk']
+                        expires_at: null
+                        created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
+                        created_at: '2026-11-25T09:48:57Z'
+                        sent_at: null
+                        received_at: null
+                split:
+                  summary: Tekst podzielony na 2 wiadomości (strategia `split`)
+                  value:
+                    messages:
+                      - id: '01M893A4V2N9Q6S7T8W9X0Y1Z2'
+                        direction: out
+                        channel_id: null
+                        peer: '+48600100201'
+                        body: '(1/2) Dzien dobry, przypominamy o planowanym przegladzie instalacji w dniu 2026-11-25 w godzinach 8:00-12:00. Prosimy o zapewnienie dostepu do pomieszczenia'
+                        encoding: gsm7
+                        segments: 1
+                        status: queued
+                        attempts: 0
+                        next_attempt_at: null
+                        last_error: null
+                        possible_duplicate: false
+                        client_ref: 'crm-ticket-4411'
+                        tags: []
+                        expires_at: null
+                        created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
+                        created_at: '2026-11-25T09:48:57Z'
+                        sent_at: null
+                        received_at: null
+                      - id: '01M893A4V2N9Q6S7T8W9X0Y1Z3'
+                        direction: out
+                        channel_id: null
+                        peer: '+48600100201'
+                        body: '(2/2) technicznego. W razie pytan prosimy o kontakt pod numerem 22 123 45 67.'
+                        encoding: gsm7
+                        segments: 1
+                        status: queued
+                        attempts: 0
+                        next_attempt_at: null
+                        last_error: null
+                        possible_duplicate: false
+                        client_ref: 'crm-ticket-4411'
+                        tags: []
+                        expires_at: null
+                        created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
+                        created_at: '2026-11-25T09:48:57Z'
+                        sent_at: null
+                        received_at: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/MessageUnprocessable'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    get:
+      tags: [messages]
+      operationId: listMessages
+      summary: Lista wiadomości
+      description: |
+        Zwraca wiadomości wychodzące i przychodzące, od najnowszych. Filtry łączone są koniunkcją,
+        a powtórzony parametr `status` daje alternatywę (`status=queued&status=sending`).
+        `since` (włącznie) i `until` (wyłącznie) dotyczą `created_at`.
+      security:
+        - bearerAuth: ['sms:read']
+      x-required-scopes: ['sms:read']
+      parameters:
+        - name: direction
+          in: query
+          schema:
+            $ref: '#/components/schemas/Direction'
+        - name: status
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/MessageStatus'
+            uniqueItems: true
+          example: [queued, sending]
+        - name: peer
+          in: query
+          description: Numer rozmówcy; normalizowany jak `to` w `SendMessageRequest`, porównanie dokładne.
+          schema:
+            type: string
+            maxLength: 32
+          example: '+48600100200'
+        - name: channel_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/Id'
+        - name: since
+          in: query
+          description: '`created_at >= since` (RFC 3339).'
+          schema:
+            type: string
+            format: date-time
+          example: '2026-11-25T00:00:00Z'
+        - name: until
+          in: query
+          description: '`created_at < until` (RFC 3339).'
+          schema:
+            type: string
+            format: date-time
+          example: '2026-11-26T00:00:00Z'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Strona wiadomości.
+          headers:
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessagePage'
+              examples:
+                mixed:
+                  summary: Wychodząca wysłana i przychodząca
+                  value:
+                    items:
+                      - id: '01M8924050XWV0PQGR9F58E24E'
+                        direction: in
+                        channel_id: '01M88ZA4DC268MPN2Z7ECB2KZ6'
+                        peer: '+48600100200'
+                        body: 'Potwierdzam wizytę, dziękuję.'
+                        encoding: ucs2
+                        segments: 1
+                        status: received
+                        attempts: 0
+                        next_attempt_at: null
+                        last_error: null
+                        possible_duplicate: false
+                        client_ref: null
+                        tags: []
+                        expires_at: null
+                        created_by: null
+                        created_at: '2026-11-25T09:55:48Z'
+                        sent_at: null
+                        received_at: '2026-11-25T09:55:31Z'
+                      - id: '01M89316X8MQM8Y3TW4S14MKFP'
+                        direction: out
+                        channel_id: '01M88ZA4DC268MPN2Z7ECB2KZ6'
+                        peer: '+48600100201'
+                        body: 'Dzień dobry! Przypominamy o wizycie jutro o 10:00. Prosimy zabrać dowód osobisty.'
+                        encoding: ucs2
+                        segments: 2
+                        status: sent
+                        attempts: 1
+                        next_attempt_at: null
+                        last_error: null
+                        possible_duplicate: false
+                        client_ref: null
+                        tags: []
+                        expires_at: null
+                        created_by: 'user:01M892RX38GF5SDDMYJSPTB8E4'
+                        created_at: '2026-11-25T09:48:57Z'
+                        sent_at: '2026-11-25T09:49:03Z'
+                        received_at: null
+                    next_cursor: 'eyJpZCI6IjAxTTg5MVFFUzhXUVpHVjkxQTVXVktCQ0tGIn0'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /messages/batch:
+    post:
+      tags: [messages]
+      operationId: sendMessageBatch
+      summary: Wyślij paczkę SMS (do 100)
+      description: |
+        Przyjmuje od 1 do 100 wiadomości **atomowo**: albo wszystkie trafiają do kolejki, albo żadna.
+        Błędy walidacji wskazują pozycję przez wskaźnik JSON w `errors[].field` (np. `/messages/3/to`).
+        Więcej niż 100 pozycji daje `413` (`batch-too-large`). `Idempotency-Key` dotyczy całej paczki.
+        Odpowiedź zawiera po jednej pozycji `items[i]` na każdą pozycję `messages[i]` żądania (ta sama kolejność
+        i liczba); `items[i]` ma postać odpowiedzi `POST /messages` dla tej pozycji (lista `messages`,
+        kilka elementów przy strategii `split`).
+      security:
+        - bearerAuth: ['sms:send']
+      x-required-scopes: ['sms:send']
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendBatchRequest'
+            examples:
+              twoMessages:
+                summary: Dwie wiadomości
+                value:
+                  messages:
+                    - to: '+48600100200'
+                      body: 'Twój kod weryfikacyjny: 482913. Ważny 5 minut.'
+                      client_ref: 'otp-7f3a91'
+                      expires_at: '2026-11-25T09:55:00Z'
+                    - to: '600100201'
+                      body: 'Dzien dobry, przypominamy o planowanym przegladzie instalacji w dniu 2026-11-25 w godzinach 8:00-12:00. Prosimy o zapewnienie dostepu do pomieszczenia technicznego. W razie pytan prosimy o kontakt pod numerem 22 123 45 67.'
+                      tags: ['orange', 'bulk']
+                      client_ref: 'crm-ticket-4411'
+      responses:
+        '202':
+          description: Wszystkie wiadomości przyjęto do kolejki.
+          headers:
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendBatchResponse'
+              examples:
+                twoMessages:
+                  summary: Dwie wiadomości w kolejce
+                  value:
+                    items:
+                      - messages:
+                          - id: '01M89304ZQ61F6CVNX486V10VC'
+                            direction: out
+                            channel_id: null
+                            peer: '+48600100200'
+                            body: 'Twój kod weryfikacyjny: 482913. Ważny 5 minut.'
+                            encoding: ucs2
+                            segments: 1
+                            status: queued
+                            attempts: 0
+                            next_attempt_at: null
+                            last_error: null
+                            possible_duplicate: false
+                            client_ref: 'otp-7f3a91'
+                            tags: []
+                            expires_at: '2026-11-25T09:55:00Z'
+                            created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
+                            created_at: '2026-11-25T09:46:40Z'
+                            sent_at: null
+                            received_at: null
+                      - messages:
+                          - id: '01M891QES8WQZGV91A5WVKBCKF'
+                            direction: out
+                            channel_id: null
+                            peer: '+48600100201'
+                            body: 'Dzien dobry, przypominamy o planowanym przegladzie instalacji w dniu 2026-11-25 w godzinach 8:00-12:00. Prosimy o zapewnienie dostepu do pomieszczenia technicznego. W razie pytan prosimy o kontakt pod numerem 22 123 45 67.'
+                            encoding: gsm7
+                            segments: 2
+                            status: queued
+                            attempts: 0
+                            next_attempt_at: null
+                            last_error: null
+                            possible_duplicate: false
+                            client_ref: 'crm-ticket-4411'
+                            tags: ['orange', 'bulk']
+                            expires_at: null
+                            created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
+                            created_at: '2026-11-25T09:46:40Z'
+                            sent_at: null
+                            received_at: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+        '413':
+          $ref: '#/components/responses/BatchTooLarge'
+        '422':
+          description: Co najmniej jedna wiadomość jest niepoprawna; żadna nie trafiła do kolejki.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                batchValidation:
+                  summary: Błąd w pozycji 1
+                  value:
+                    type: 'urn:tikker:problem:validation'
+                    title: Request validation failed
+                    status: 422
+                    detail: 'Batch rejected: 1 of 2 messages is invalid.'
+                    instance: '/api/v1/messages/batch'
+                    errors:
+                      - field: '/messages/1/to'
+                        code: invalid_phone_number
+                        detail: 'Not a valid phone number for region PL.'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /messages/{id}:
+    parameters:
+      - $ref: '#/components/parameters/MessageId'
+    get:
+      tags: [messages]
+      operationId: getMessage
+      summary: Szczegóły wiadomości
+      security:
+        - bearerAuth: ['sms:read']
+      x-required-scopes: ['sms:read']
+      responses:
+        '200':
+          description: Wiadomość.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+              examples:
+                sent:
+                  $ref: '#/components/examples/MessageSent'
+                retrying:
+                  $ref: '#/components/examples/MessageRetrying'
+                inbound:
+                  $ref: '#/components/examples/MessageInbound'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [messages]
+      operationId: cancelMessage
+      summary: Anuluj wiadomość
+      description: |
+        Anuluje wiadomość wychodzącą w stanie `queued` (przejście `queued → cancelled`, SPEC §4.2)
+        i zwraca ją w nowym stanie. Wiadomość nie jest usuwana z historii.
+        Dla każdego innego stanu (w tym `sending`, `sent`, `cancelled`) oraz dla wiadomości
+        przychodzących zwracany jest `409`.
+      security:
+        - bearerAuth: ['sms:send']
+      x-required-scopes: ['sms:send']
+      responses:
+        '200':
+          description: Anulowano.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+              examples:
+                cancelled:
+                  $ref: '#/components/examples/MessageCancelled'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Wiadomość nie jest w stanie `queued`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                notQueued:
+                  summary: Wiadomość już wysłana
+                  value:
+                    type: 'urn:tikker:problem:conflict'
+                    title: Conflict
+                    status: 409
+                    detail: 'Message 01M89316X8MQM8Y3TW4S14MKFP is in status "sent"; only "queued" messages can be cancelled.'
+                    instance: '/api/v1/messages/01M89316X8MQM8Y3TW4S14MKFP'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /channels:
+    get:
+      tags: [channels]
+      operationId: listChannels
+      summary: Lista kanałów ze stanem
+      security:
+        - bearerAuth: ['sms:read']
+      x-required-scopes: ['sms:read']
+      parameters:
+        - name: device_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/Id'
+        - name: state
+          in: query
+          schema:
+            $ref: '#/components/schemas/ChannelState'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Strona kanałów.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelPage'
+              examples:
+                twoChannels:
+                  summary: Kanał zdrowy i zdegradowany
+                  value:
+                    items:
+                      - id: '01M88ZA4DC268MPN2Z7ECB2KZ6'
+                        device_id: '01M892CBQGHA3FGHBEPHY2KDRX'
+                        port: lte1
+                        name: 'Biuro – Orange'
+                        tags: ['orange', 'bulk']
+                        rate_per_min: 6
+                        max_segments: 3
+                        transliterate: false
+                        enabled: true
+                        state: ok
+                        state_reason: null
+                        last_health_at: '2026-11-25T09:50:00Z'
+                        signal:
+                          rssi: -71
+                          rsrp: -98
+                          rsrq: -11
+                          sinr: 9
+                        operator: 'Orange PL'
+                        queue_depth: 2
+                      - id: '01M89285Y8QPJV5SY5PZHKSKZM'
+                        device_id: '01M892X2WGBAMWWTTBYG1G9R62'
+                        port: lte1
+                        name: 'Magazyn – Play'
+                        tags: ['play']
+                        rate_per_min: 6
+                        max_segments: 3
+                        transliterate: true
+                        enabled: true
+                        state: degraded
+                        state_reason: 'RouterOS returned 401 Unauthorized'
+                        last_health_at: '2026-11-25T09:49:30Z'
+                        signal: null
+                        operator: null
+                        queue_depth: 7
+                    next_cursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [channels]
+      operationId: createChannel
+      summary: Dodaj kanał (port LTE urządzenia)
+      description: |
+        **Rozszerzenie względem tabeli SPEC §5** (luka: brak sposobu tworzenia kanałów).
+        Tworzy kanał dla portu wykrytego przez `POST /devices/{id}/test`. Para (`device_id`, `port`) jest unikalna.
+      security:
+        - bearerAuth: ['admin']
+      x-required-scopes: ['admin']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelCreate'
+            examples:
+              lte1:
+                summary: Kanał na lte1
+                value:
+                  device_id: '01M892CBQGHA3FGHBEPHY2KDRX'
+                  port: lte1
+                  name: 'Biuro – Orange'
+                  tags: ['orange', 'bulk']
+                  rate_per_min: 6
+                  max_segments: 3
+      responses:
+        '201':
+          description: Utworzono.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
+              examples:
+                created:
+                  $ref: '#/components/examples/ChannelOk'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /channels/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ChannelId'
+    get:
+      tags: [channels]
+      operationId: getChannel
+      summary: Szczegóły kanału
+      security:
+        - bearerAuth: ['sms:read']
+      x-required-scopes: ['sms:read']
+      responses:
+        '200':
+          description: Kanał.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
+              examples:
+                ok:
+                  $ref: '#/components/examples/ChannelOk'
+                degraded:
+                  $ref: '#/components/examples/ChannelDegraded'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [channels]
+      operationId: updateChannel
+      summary: Zmień ustawienia kanału
+      description: |
+        **Rozszerzenie względem SPEC §5.** Semantyka JSON Merge Patch (RFC 7396): pominięte pola się nie zmieniają.
+        `enabled: false` ustawia stan `disabled`; włączenie przywraca stan po następnym sprawdzeniu zdrowia.
+      security:
+        - bearerAuth: ['admin']
+      x-required-scopes: ['admin']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelUpdate'
+            examples:
+              throttle:
+                summary: Zmiana limitu i wyłączenie
+                value:
+                  rate_per_min: 3
+                  enabled: false
+      responses:
+        '200':
+          description: Zaktualizowano.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
+              examples:
+                updated:
+                  $ref: '#/components/examples/ChannelOk'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [channels]
+      operationId: deleteChannel
+      summary: Usuń kanał
+      description: |
+        **Rozszerzenie względem SPEC §5.** Zwraca `409`, jeśli kanał ma wiadomości w stanie `queued` lub `sending`
+        (należy je anulować albo poczekać). Historia wiadomości zachowuje `channel_id`.
+      security:
+        - bearerAuth: ['admin']
+      x-required-scopes: ['admin']
+      responses:
+        '204':
+          description: Usunięto.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /devices:
+    get:
+      tags: [devices]
+      operationId: listDevices
+      summary: Lista urządzeń
+      security:
+        - bearerAuth: ['admin']
+      x-required-scopes: ['admin']
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Strona urządzeń.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DevicePage'
+              examples:
+                two:
+                  summary: Urządzenie lokalne (veth, HTTP) i zdalne (fingerprint)
+                  value:
+                    items:
+                      - id: '01M892X2WGBAMWWTTBYG1G9R62'
+                        name: 'Lokalny router'
+                        base_url: 'http://172.17.0.1'
+                        username: tikker
+                        tls_mode: verify
+                        ca_pem: null
+                        fingerprint: null
+                        enabled: true
+                        insecure_transport: true
+                        created_at: '2026-11-19T10:05:00Z'
+                      - id: '01M892CBQGHA3FGHBEPHY2KDRX'
+                        name: 'Oddział Kraków'
+                        base_url: 'https://10.20.0.1'
+                        username: tikker
+                        tls_mode: fingerprint
+                        ca_pem: null
+                        fingerprint: 'AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89'
+                        enabled: true
+                        insecure_transport: false
+                        created_at: '2026-11-25T09:40:00Z'
+                    next_cursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [devices]
+      operationId: createDevice
+      summary: Dodaj urządzenie
+      description: |
+        Hasło jest polem tylko do zapisu: serwer szyfruje je (AES-256-GCM, SPEC §7) i nigdy go nie zwraca.
+        Dodanie urządzenia nie tworzy kanałów – służy do tego `POST /channels` po teście połączenia.
+      security:
+        - bearerAuth: ['admin']
+      x-required-scopes: ['admin']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceCreate'
+            examples:
+              fingerprint:
+                summary: Router zdalny z certyfikatem self-signed (pinning)
+                value:
+                  name: 'Oddział Kraków'
+                  base_url: 'https://10.20.0.1'
+                  username: tikker
+                  password: 'S3cret-router-pass'
+                  tls_mode: fingerprint
+                  fingerprint: 'AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89'
+              localHttp:
+                summary: Kontener na MikroTiku, HTTP przez veth
+                value:
+                  name: 'Lokalny router'
+                  base_url: 'http://172.17.0.1'
+                  username: tikker
+                  password: 'S3cret-router-pass'
+      responses:
+        '201':
+          description: Utworzono.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+              examples:
+                created:
+                  $ref: '#/components/examples/DeviceRemote'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /devices/{id}:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    get:
+      tags: [devices]
+      operationId: getDevice
+      summary: Szczegóły urządzenia
+      security:
+        - bearerAuth: ['admin']
+      x-required-scopes: ['admin']
+      responses:
+        '200':
+          description: Urządzenie (bez hasła).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+              examples:
+                remote:
+                  $ref: '#/components/examples/DeviceRemote'
+                local:
+                  $ref: '#/components/examples/DeviceLocal'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [devices]
+      operationId: updateDevice
+      summary: Zmień urządzenie
+      description: |
+        Semantyka JSON Merge Patch (RFC 7396). Pominięte `password` oznacza „bez zmian”.
+        Po zmianie `tls_mode` serwer sprawdza spójność z `ca_pem`/`fingerprint` (wynik scalenia) i zwraca `422` przy braku.
+      security:
+        - bearerAuth: ['admin']
+      x-required-scopes: ['admin']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceUpdate'
+            examples:
+              rotatePassword:
+                summary: Zmiana hasła
+                value:
+                  password: 'N3w-router-pass'
+              disable:
+                summary: Wyłączenie urządzenia
+                value:
+                  enabled: false
+      responses:
+        '200':
+          description: Zaktualizowano.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+              examples:
+                updated:
+                  $ref: '#/components/examples/DeviceRemote'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [devices]
+      operationId: deleteDevice
+      summary: Usuń urządzenie
+      description: |
+        Usuwa urządzenie wraz z jego kanałami. Zwraca `409`, jeśli którykolwiek kanał urządzenia
+        ma wiadomości w stanie `queued` lub `sending`.
+      security:
+        - bearerAuth: ['admin']
+      x-required-scopes: ['admin']
+      responses:
+        '204':
+          description: Usunięto.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /devices/{id}/test:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    post:
+      tags: [devices]
+      operationId: testDevice
+      summary: Test połączenia i wykrycie portów LTE
+      description: |
+        Łączy się z RouterOS zapisanymi danymi urządzenia, sprawdza TLS, uwierzytelnienie i uprawnienia,
+        odczytuje wersję systemu i listę interfejsów LTE. Niepowodzenie testu **nie** jest błędem HTTP:
+        zwracany jest `200` z `ok: false` i opisem w `error`. Test nie zmienia stanu urządzenia ani kanałów.
+        Czas wykonania jest ograniczony (domyślnie 10 s).
+      security:
+        - bearerAuth: ['admin']
+      x-required-scopes: ['admin']
+      responses:
+        '200':
+          description: Wynik testu.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceTestResult'
+              examples:
+                success:
+                  summary: Połączenie poprawne, dwa porty LTE
+                  value:
+                    ok: true
+                    checked_at: '2026-11-25T09:50:12Z'
+                    latency_ms: 84
+                    routeros_version: '7.16.1 (stable)'
+                    board_name: 'Chateau LTE12'
+                    tls:
+                      mode: fingerprint
+                      verified: true
+                      peer_fingerprint: 'AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89'
+                    lte_ports:
+                      - port: lte1
+                        running: true
+                        operator: 'Orange PL'
+                        registration: registered
+                        signal:
+                          rssi: -71
+                          rsrp: -98
+                          rsrq: -11
+                          sinr: 9
+                        channel_id: '01M88ZA4DC268MPN2Z7ECB2KZ6'
+                      - port: lte2
+                        running: false
+                        operator: null
+                        registration: no-sim
+                        signal: null
+                        channel_id: null
+                    error: null
+                authFailed:
+                  summary: Złe hasło
+                  value:
+                    ok: false
+                    checked_at: '2026-11-25T09:51:03Z'
+                    latency_ms: 61
+                    routeros_version: null
+                    board_name: null
+                    tls:
+                      mode: fingerprint
+                      verified: true
+                      peer_fingerprint: 'AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89'
+                    lte_ports: []
+                    error:
+                      code: auth_failed
+                      detail: 'RouterOS returned 401 Unauthorized.'
+                tlsMismatch:
+                  summary: Niezgodny odcisk certyfikatu
+                  value:
+                    ok: false
+                    checked_at: '2026-11-25T09:52:40Z'
+                    latency_ms: 40
+                    routeros_version: null
+                    board_name: null
+                    tls:
+                      mode: fingerprint
+                      verified: false
+                      peer_fingerprint: '11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00'
+                    lte_ports: []
+                    error:
+                      code: tls_error
+                      detail: 'Certificate fingerprint does not match the pinned value.'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /tokens:
+    get:
+      tags: [tokens]
+      operationId: listTokens
+      summary: Lista tokenów API
+      description: Sekret tokenu nigdy nie jest zwracany na liście.
+      security:
+        - bearerAuth: ['admin']
+      x-required-scopes: ['admin']
+      parameters:
+        - name: user_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/Id'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Strona tokenów.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPage'
+              examples:
+                one:
+                  summary: Jeden token
+                  value:
+                    items:
+                      - id: '01M892MQA05HWZW8AF2ZXZHMH3'
+                        user_id: '01M892GHGRFNK90F0ZMDF6GEZR'
+                        name: 'CRM produkcja'
+                        prefix: 'k7Qm2xPa'
+                        scopes: ['sms:send', 'sms:read']
+                        expires_at: '2027-11-25T00:00:00Z'
+                        last_used_at: '2026-11-25T09:48:57Z'
+                        created_at: '2026-11-25T09:53:00Z'
+                    next_cursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [tokens]
+      operationId: createToken
+      summary: Utwórz token API
+      description: |
+        Zwraca pełny token (`token`) **tylko w tej odpowiedzi**; serwer przechowuje wyłącznie jego hash.
+        Właścicielem jest `user_id` (domyślnie użytkownik tokenu wykonującego żądanie).
+        Zakresy nie mogą przekraczać roli właściciela (`422`, kod `scope_exceeds_role`).
+      security:
+        - bearerAuth: ['admin']
+      x-required-scopes: ['admin']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenCreate'
+            examples:
+              crm:
+                summary: Token dla systemu CRM
+                value:
+                  name: 'CRM produkcja'
+                  scopes: ['sms:send', 'sms:read']
+                  expires_at: '2027-11-25T00:00:00Z'
+                  user_id: '01M892GHGRFNK90F0ZMDF6GEZR'
+      responses:
+        '201':
+          description: Utworzono. Zapisz `token` – nie będzie już dostępny.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Cache-Control:
+              description: Odpowiedź zawiera sekret i nie może być buforowana.
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenCreated'
+              examples:
+                created:
+                  summary: Nowy token z sekretem
+                  value:
+                    id: '01M892MQA05HWZW8AF2ZXZHMH3'
+                    user_id: '01M892GHGRFNK90F0ZMDF6GEZR'
+                    name: 'CRM produkcja'
+                    prefix: 'k7Qm2xPa'
+                    scopes: ['sms:send', 'sms:read']
+                    expires_at: '2027-11-25T00:00:00Z'
+                    last_used_at: null
+                    created_at: '2026-11-25T09:53:00Z'
+                    token: 'tkr_k7Qm2xPa_V9pL3rT8wZ1nB6cX4yH0sD2fG5jK7mQ9'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /tokens/{id}:
+    parameters:
+      - $ref: '#/components/parameters/TokenId'
+    get:
+      tags: [tokens]
+      operationId: getToken
+      summary: Szczegóły tokenu (bez sekretu)
+      security:
+        - bearerAuth: ['admin']
+      x-required-scopes: ['admin']
+      responses:
+        '200':
+          description: Token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Token'
+              examples:
+                token:
+                  $ref: '#/components/examples/Token'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [tokens]
+      operationId: revokeToken
+      summary: Unieważnij token
+      description: Unieważnienie działa natychmiast. Token może unieważnić sam siebie.
+      security:
+        - bearerAuth: ['admin']
+      x-required-scopes: ['admin']
+      responses:
+        '204':
+          description: Unieważniono.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /users:
+    get:
+      tags: [users]
+      operationId: listUsers
+      summary: Lista użytkowników
+      security:
+        - bearerAuth: ['admin']
+      x-required-scopes: ['admin']
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Strona użytkowników.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPage'
+              examples:
+                two:
+                  summary: Admin i operator
+                  value:
+                    items:
+                      - id: '01M892RX38GF5SDDMYJSPTB8E4'
+                        username: admin
+                        role: admin
+                        disabled: false
+                        created_at: '2026-11-19T10:00:00Z'
+                      - id: '01M892GHGRFNK90F0ZMDF6GEZR'
+                        username: jkowalska
+                        role: operator
+                        disabled: false
+                        created_at: '2026-11-25T09:30:00Z'
+                    next_cursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [users]
+      operationId: createUser
+      summary: Utwórz użytkownika
+      description: Hasło jest polem tylko do zapisu (argon2id po stronie serwera). Nazwa użytkownika jest unikalna (`409`).
+      security:
+        - bearerAuth: ['admin']
+      x-required-scopes: ['admin']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserCreate'
+            examples:
+              operator:
+                summary: Operator
+                value:
+                  username: jkowalska
+                  password: 'correct-horse-battery-staple'
+                  role: operator
+      responses:
+        '201':
+          description: Utworzono.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+              examples:
+                created:
+                  $ref: '#/components/examples/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /users/{id}:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    get:
+      tags: [users]
+      operationId: getUser
+      summary: Szczegóły użytkownika
+      security:
+        - bearerAuth: ['admin']
+      x-required-scopes: ['admin']
+      responses:
+        '200':
+          description: Użytkownik.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+              examples:
+                operator:
+                  $ref: '#/components/examples/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [users]
+      operationId: updateUser
+      summary: Zmień użytkownika
+      description: |
+        Semantyka JSON Merge Patch (RFC 7396). Usuwanie użytkowników nie jest dostępne – służy do tego `disabled: true`
+        (zachowanie śladu audytu). Wyłączenie użytkownika natychmiast unieważnia jego sesje i blokuje jego tokeny.
+        Odebranie roli `admin` lub wyłączenie ostatniego aktywnego administratora daje `409`.
+      security:
+        - bearerAuth: ['admin']
+      x-required-scopes: ['admin']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdate'
+            examples:
+              demote:
+                summary: Zmiana roli na viewer
+                value:
+                  role: viewer
+              disable:
+                summary: Wyłączenie konta
+                value:
+                  disabled: true
+              resetPassword:
+                summary: Ustawienie nowego hasła
+                value:
+                  password: 'another-long-passphrase'
+      responses:
+        '200':
+          description: Zaktualizowano.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+              examples:
+                updated:
+                  $ref: '#/components/examples/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /healthz:
+    servers:
+      - url: /
+        description: Poza prefiksem `/api/v1`, względem adresu instancji.
+    get:
+      tags: [health]
+      operationId: getLiveness
+      summary: Sonda żywotności
+      description: Proces działa i obsługuje HTTP. Nie sprawdza zależności. Bez autoryzacji, bez limitu żądań.
+      security: []
+      x-required-scopes: []
+      responses:
+        '200':
+          description: Proces żyje.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              examples:
+                ok:
+                  summary: OK
+                  value:
+                    status: ok
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /readyz:
+    servers:
+      - url: /
+        description: Poza prefiksem `/api/v1`, względem adresu instancji.
+    get:
+      tags: [health]
+      operationId: getReadiness
+      summary: Sonda gotowości
+      description: |
+        Instancja jest gotowa do obsługi ruchu: baza otwarta i zmigrowana, klucz szyfrujący wczytany,
+        dispatcher uruchomiony. Stan kanałów **nie** wpływa na gotowość (kolejka przyjmuje wiadomości
+        także bez zdrowego kanału). Odpowiedź nie zawiera szczegółów wrażliwych (bez komunikatów błędów, ścieżek, wersji).
+      security: []
+      x-required-scopes: []
+      responses:
+        '200':
+          description: Gotowa.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+              examples:
+                ready:
+                  summary: Gotowa
+                  value:
+                    status: ready
+                    checks:
+                      database: ok
+                      secret_key: ok
+                      dispatcher: ok
+        '503':
+          description: Niegotowa.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+              examples:
+                notReady:
+                  summary: Baza niedostępna
+                  value:
+                    status: not_ready
+                    checks:
+                      database: fail
+                      secret_key: ok
+                      dispatcher: ok
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: 'tkr_<prefix>_<secret>'
+      description: |
+        Token API w formacie `tkr_<prefix>_<secret>`, gdzie `prefix` i `secret` składają się ze znaków
+        `[A-Za-z0-9]` (bez `_`). `prefix` jest jawny i identyfikuje token (widoczny w UI i na liście),
+        `secret` jest znany tylko klientowi (serwer przechowuje SHA-256). Długości ustala implementacja (T11).
+        Zakresy: `sms:read`, `sms:send`, `admin` (opis w sekcji „Autoryzacja i zakresy”).
+
+  parameters:
+    MessageId:
+      name: id
+      in: path
+      required: true
+      description: Identyfikator wiadomości (ULID).
+      schema:
+        $ref: '#/components/schemas/Ulid'
+    ChannelId:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    DeviceId:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    TokenId:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    UserId:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    Cursor:
+      name: cursor
+      in: query
+      description: Nieprzezroczysty kursor z `next_cursor` poprzedniej strony.
+      schema:
+        type: string
+        maxLength: 512
+    Limit:
+      name: limit
+      in: query
+      description: Maksymalna liczba elementów na stronie.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Klucz idempotencji (draft-ietf-httpapi-idempotency-key-header), unikalny w obrębie tokenu przez 24 h.
+        Zalecany UUID v4 lub ULID. Semantyka: patrz sekcja „Idempotencja” w opisie API.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+        pattern: '^[\x21-\x7E]+$'
+      example: '8e03978e-40d5-43e8-bc93-6894a57f9324'
+
+  headers:
+    Location:
+      description: Ścieżka utworzonego zasobu.
+      schema:
+        type: string
+        format: uri-reference
+      example: '/api/v1/messages/01M89304ZQ61F6CVNX486V10VC'
+    IdempotentReplayed:
+      description: '`true`, jeśli odpowiedź jest powtórzeniem wcześniejszego żądania z tym samym `Idempotency-Key`.'
+      schema:
+        type: string
+        enum: ['true']
+    RateLimitLimit:
+      description: Limit żądań tokenu w bieżącym oknie.
+      schema:
+        type: integer
+        minimum: 0
+      example: 120
+    RateLimitRemaining:
+      description: Liczba żądań pozostałych w bieżącym oknie.
+      schema:
+        type: integer
+        minimum: 0
+      example: 117
+    RateLimitReset:
+      description: Liczba sekund do odnowienia limitu.
+      schema:
+        type: integer
+        minimum: 0
+      example: 42
+    RetryAfter:
+      description: Liczba sekund, po której można ponowić żądanie.
+      schema:
+        type: integer
+        minimum: 0
+      example: 42
+    Allow:
+      description: Metody dozwolone dla ścieżki (RFC 9110 §10.2.1).
+      schema:
+        type: string
+      example: 'GET, POST'
+    WWWAuthenticate:
+      description: Wyzwanie uwierzytelnienia (RFC 6750).
+      schema:
+        type: string
+      example: 'Bearer realm="tikker", error="invalid_token"'
+
+  responses:
+    BadRequest:
+      description: Niepoprawne żądanie (składnia JSON, typ pola, nieznane pole, niepoprawny parametr lub nagłówek).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            malformed:
+              summary: Niepoprawny JSON
+              value:
+                type: 'urn:tikker:problem:malformed-request'
+                title: Malformed request
+                status: 400
+                detail: 'Request body is not valid JSON: unexpected end of input at offset 57.'
+                instance: '/api/v1/messages'
+            badParam:
+              summary: Zły parametr zapytania
+              value:
+                type: 'urn:tikker:problem:malformed-request'
+                title: Malformed request
+                status: 400
+                detail: 'Invalid query parameters.'
+                instance: '/api/v1/messages'
+                errors:
+                  - field: 'limit'
+                    code: out_of_range
+                    detail: 'Must be between 1 and 200.'
+    Unauthorized:
+      description: Brak lub niepoprawny token.
+      headers:
+        WWW-Authenticate:
+          $ref: '#/components/headers/WWWAuthenticate'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            invalidToken:
+              summary: Niepoprawny token
+              value:
+                type: 'urn:tikker:problem:unauthorized'
+                title: Unauthorized
+                status: 401
+                detail: 'Missing, invalid, expired or revoked API token.'
+    Forbidden:
+      description: Token nie ma wymaganego zakresu.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            insufficientScope:
+              summary: Brak zakresu
+              value:
+                type: 'urn:tikker:problem:forbidden'
+                title: Forbidden
+                status: 403
+                detail: 'Token lacks required scope "sms:send".'
+    NotFound:
+      description: |
+        Zasób nie istnieje. Ta sama odpowiedź (bez uwierzytelnienia i bez nagłówków `RateLimit-*`)
+        dotyczy nieznanej ścieżki pod `/api/v1`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            notFound:
+              summary: Nie znaleziono
+              value:
+                type: 'urn:tikker:problem:not-found'
+                title: Not Found
+                status: 404
+                detail: 'Resource not found.'
+                instance: '/api/v1/messages/01M89318NRW5XR0Q6R54W9CZZT'
+    Conflict:
+      description: Konflikt unikalności lub stanu zasobu.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            duplicate:
+              summary: Nazwa zajęta
+              value:
+                type: 'urn:tikker:problem:conflict'
+                title: Conflict
+                status: 409
+                detail: 'A resource with this name already exists.'
+            busy:
+              summary: Zasób ma aktywne wiadomości
+              value:
+                type: 'urn:tikker:problem:conflict'
+                title: Conflict
+                status: 409
+                detail: 'Channel has 4 messages in status "queued" or "sending".'
+    IdempotencyConflict:
+      description: Żądanie z tym samym `Idempotency-Key` jest w trakcie przetwarzania.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            inUse:
+              summary: Klucz w użyciu
+              value:
+                type: 'urn:tikker:problem:idempotency-key-in-use'
+                title: Idempotency key in use
+                status: 409
+                detail: 'A request with this Idempotency-Key is still being processed; retry later.'
+    PayloadTooLarge:
+      description: Ciało żądania przekracza limit rozmiaru serwera (domyślnie 2 MiB).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            tooLarge:
+              summary: Za duże ciało żądania
+              value:
+                type: 'urn:tikker:problem:payload-too-large'
+                title: Payload too large
+                status: 413
+                detail: 'Request body exceeds the limit of 2097152 bytes.'
+                instance: '/api/v1/messages'
+    BatchTooLarge:
+      description: Paczka ma więcej niż 100 wiadomości albo ciało żądania przekracza limit rozmiaru serwera.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            tooMany:
+              summary: 150 wiadomości
+              value:
+                type: 'urn:tikker:problem:batch-too-large'
+                title: Batch too large
+                status: 413
+                detail: 'Batch contains 150 messages; the maximum is 100.'
+                instance: '/api/v1/messages/batch'
+            tooLarge:
+              summary: Za duże ciało żądania
+              value:
+                type: 'urn:tikker:problem:payload-too-large'
+                title: Payload too large
+                status: 413
+                detail: 'Request body exceeds the limit of 2097152 bytes.'
+                instance: '/api/v1/messages/batch'
+    MethodNotAllowed:
+      description: |
+        Odpowiedź wspólna dla wszystkich ścieżek (opis API, „Odpowiedzi wspólne”): ścieżka istnieje,
+        ale nie obsługuje metody żądania. Wysyłana przed uwierzytelnieniem, bez nagłówków `RateLimit-*`.
+      headers:
+        Allow:
+          $ref: '#/components/headers/Allow'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            put:
+              summary: PUT na kolekcji wiadomości
+              value:
+                type: 'urn:tikker:problem:method-not-allowed'
+                title: Method Not Allowed
+                status: 405
+                detail: 'Method PUT is not allowed for this resource.'
+                instance: '/api/v1/messages'
+    UnprocessableContent:
+      description: Żądanie poprawne składniowo, ale niepoprawne semantycznie.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            validation:
+              summary: Błędy walidacji
+              value:
+                type: 'urn:tikker:problem:validation'
+                title: Request validation failed
+                status: 422
+                errors:
+                  - field: '/fingerprint'
+                    code: required
+                    detail: 'Required when tls_mode is "fingerprint".'
+    MessageUnprocessable:
+      description: |
+        Wiadomość niepoprawna semantycznie (np. zły numer, za dużo segmentów, nieznany kanał)
+        albo ten sam `Idempotency-Key` użyty z innym ciałem żądania.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            invalidNumber:
+              summary: Niepoprawny numer
+              value:
+                type: 'urn:tikker:problem:validation'
+                title: Request validation failed
+                status: 422
+                instance: '/api/v1/messages'
+                errors:
+                  - field: '/to'
+                    code: invalid_phone_number
+                    detail: 'Not a valid phone number for region PL.'
+            tooManySegments:
+              summary: Za dużo segmentów
+              value:
+                type: 'urn:tikker:problem:validation'
+                title: Request validation failed
+                status: 422
+                instance: '/api/v1/messages'
+                errors:
+                  - field: '/body'
+                    code: too_many_segments
+                    detail: 'Body needs 5 UCS-2 segments; channel limit is 3.'
+            unsupportedCharacters:
+              summary: Znaki spoza GSM-7 na kanale bez UCS-2 i bez transliteracji
+              value:
+                type: 'urn:tikker:problem:validation'
+                title: Request validation failed
+                status: 422
+                detail: "Character 'ż' is outside the GSM-7 alphabet, and the channel sends GSM-7 only; enable transliterate on the channel or remove such characters."
+                instance: '/api/v1/messages'
+                errors:
+                  - field: '/body'
+                    code: unsupported_characters
+                    detail: "Character 'ż' is outside the GSM-7 alphabet, and the channel sends GSM-7 only; enable transliterate on the channel or remove such characters."
+            idempotencyMismatch:
+              summary: Klucz idempotencji z innym ciałem
+              value:
+                type: 'urn:tikker:problem:idempotency-key-mismatch'
+                title: Idempotency key reused with different payload
+                status: 422
+                detail: 'Idempotency-Key was already used with a different request body.'
+    TooManyRequests:
+      description: Przekroczony limit żądań tokenu.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimitLimit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimitRemaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimitReset'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            limited:
+              summary: Limit wyczerpany
+              value:
+                type: 'urn:tikker:problem:rate-limited'
+                title: Too Many Requests
+                status: 429
+                detail: 'Rate limit of 120 requests per 60 s exceeded; retry in 42 s.'
+    InternalError:
+      description: Błąd serwera. Szczegóły tylko w logach (identyfikator w `instance`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            internal:
+              summary: Błąd wewnętrzny
+              value:
+                type: 'urn:tikker:problem:internal'
+                title: Internal Server Error
+                status: 500
+                instance: 'urn:tikker:request:01M89318NRW5XR0Q6R54W9CZZT'
+
+  schemas:
+    Ulid:
+      type: string
+      description: ULID (Crockford base32, 26 znaków, sortowalny czasowo).
+      pattern: '^[0-7][0-9A-HJKMNP-TV-Z]{25}$'
+      examples: ['01M89304ZQ61F6CVNX486V10VC']
+    Id:
+      type: string
+      description: |
+        Nieprzezroczysty identyfikator zasobu. Implementacja referencyjna używa ULID,
+        ale klient nie powinien zakładać formatu (poza wiadomościami, gdzie ULID jest gwarantowany).
+      minLength: 1
+      maxLength: 64
+      examples: ['01M892CBQGHA3FGHBEPHY2KDRX']
+    Timestamp:
+      type: string
+      format: date-time
+      description: RFC 3339 w UTC.
+      examples: ['2026-11-25T09:46:40Z']
+    NullableTimestamp:
+      type: [string, 'null']
+      format: date-time
+      description: RFC 3339 w UTC albo `null`.
+    Tag:
+      type: string
+      minLength: 1
+      maxLength: 32
+      pattern: '^[a-z0-9][a-z0-9_.-]*$'
+      examples: ['orange']
+    Tags:
+      type: array
+      items:
+        $ref: '#/components/schemas/Tag'
+      maxItems: 16
+      uniqueItems: true
+
+    Direction:
+      type: string
+      enum: [out, in]
+      description: '`out` – wychodząca, `in` – przychodząca.'
+    MessageStatus:
+      type: string
+      enum: [queued, sending, sent, failed, cancelled, received]
+      description: |
+        Wychodzące (SPEC §4.2): `queued` → `sending` → `sent` | `failed`; `queued` → `cancelled`;
+        `sending` → `queued` przy błędzie przejściowym. `sent` oznacza przyjęcie przez RouterOS (brak raportów doręczenia).
+        Wygaśnięcie (`expires_at`) kończy wiadomość stanem `failed` z `last_error` zaczynającym się od `expired`.
+        Przychodzące mają zawsze stan `received`.
+    Encoding:
+      type: string
+      enum: [gsm7, ucs2]
+      description: 'Kodowanie wyliczone z treści: `gsm7` (160/153 znaków na segment) lub `ucs2` (70/67).'
+
+    SendMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [to, body]
+      properties:
+        to:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: |
+            Numer odbiorcy. Normalizowany do E.164 z regionem domyślnym (`TIKKER_DEFAULT_REGION`, domyślnie `PL`),
+            więc `600100200` i `+48 600 100 200` są równoważne. Numery krótkie i alfanumeryczne tylko przy
+            włączonym `allow_short_numbers`. Niepoprawny numer → `422` (`invalid_phone_number`).
+          examples: ['+48600100200']
+        body:
+          type: string
+          minLength: 1
+          maxLength: 1600
+          description: |
+            Treść (UTF-8). Rzeczywisty limit wynika z `max_segments` kanału (domyślnie 3 segmenty) i możliwości
+            konektora; przekroczenie → `422` (`too_many_segments`), chyba że serwer działa ze strategią
+            `truncate` lub `split` (SPEC §4.6). Przy `transliterate` kanału polskie znaki są zamieniane na ASCII
+            przed wyliczeniem segmentów. Znaki spoza GSM-7 przy kanale bez UCS-2 (RouterOS) i bez transliteracji
+            → `422` (`unsupported_characters`).
+        channel_id:
+          $ref: '#/components/schemas/Id'
+          description: Jawny wybór kanału. Nieznany → `422` (`unknown_channel`), wyłączony → `422` (`channel_disabled`).
+        tags:
+          $ref: '#/components/schemas/Tags'
+          description: Wybór spośród kanałów mających **wszystkie** tagi. Brak takiego kanału → `422` (`no_matching_channel`). Ignorowane, gdy podano `channel_id`.
+        client_ref:
+          type: string
+          maxLength: 128
+          description: Dowolny identyfikator klienta, zwracany w obiekcie wiadomości (bez gwarancji unikalności).
+        expires_at:
+          $ref: '#/components/schemas/Timestamp'
+          description: Po tym czasie niewysłana wiadomość przechodzi w `failed` (`expired`). Musi być w przyszłości (`expires_at_in_past`).
+    SendBatchRequest:
+      type: object
+      additionalProperties: false
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          minItems: 1
+          maxItems: 100
+          description: Od 1 do 100 wiadomości. Przekroczenie 100 → `413`.
+          items:
+            $ref: '#/components/schemas/SendMessageRequest'
+    SendMessageResponse:
+      type: object
+      description: |
+        Wiadomości utworzone z jednego `SendMessageRequest`, w kolejności treści. Zwykle jedna;
+        przy strategii `split` (SPEC §4.6, §12 p. 3) kilka niezależnych wiadomości z prefiksami `(i/N) `.
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/Message'
+    SendBatchResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          description: Po jednej pozycji na każdą pozycję `messages` żądania, w tej samej kolejności.
+          items:
+            $ref: '#/components/schemas/SendMessageResponse'
+
+    Message:
+      type: object
+      description: |
+        Wiadomość SMS. Pola wewnętrzne (`lease_until`, `idempotency_key`, `dedup_hash`) nie są publikowane.
+      required: [id, direction, channel_id, peer, body, encoding, segments, status, attempts, possible_duplicate, created_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/Ulid'
+        direction:
+          $ref: '#/components/schemas/Direction'
+        channel_id:
+          type: [string, 'null']
+          description: Kanał. Dla wychodzących `null`, dopóki routing nie przydzieli kanału.
+        peer:
+          type: string
+          description: Rozmówca – odbiorca (`out`) lub nadawca (`in`). E.164; dla `in` może być nadawcą alfanumerycznym.
+          examples: ['+48600100200']
+        body:
+          type: [string, 'null']
+          description: Treść; `null` po usunięciu treści przez retencję (SPEC §7, `TIKKER_RETENTION`).
+        encoding:
+          $ref: '#/components/schemas/Encoding'
+        segments:
+          type: integer
+          minimum: 1
+        status:
+          $ref: '#/components/schemas/MessageStatus'
+        attempts:
+          type: integer
+          minimum: 0
+          description: Liczba podjętych prób wysyłki (dla `in` zawsze 0).
+        next_attempt_at:
+          $ref: '#/components/schemas/NullableTimestamp'
+          description: Najwcześniejszy czas kolejnej próby (stan `queued` po błędzie przejściowym).
+        last_error:
+          type: [string, 'null']
+          maxLength: 1024
+          description: Ostatni błąd wysyłki, przeznaczony dla człowieka.
+        possible_duplicate:
+          type: boolean
+          description: |
+            `true`, gdy wiadomość mogła zostać wysłana więcej niż raz (np. wygasła dzierżawa lub niejednoznaczny
+            błąd po przekazaniu do routera, ADR 0002, gwarancja at-least-once). Dla `in` zawsze `false`.
+        client_ref:
+          type: [string, 'null']
+        tags:
+          type: array
+          items:
+            $ref: '#/components/schemas/Tag'
+          description: Tagi routingu z żądania (puste dla `in`).
+        expires_at:
+          $ref: '#/components/schemas/NullableTimestamp'
+        created_by:
+          type: [string, 'null']
+          pattern: '^(user|token):.+$'
+          description: 'Autor: `user:<id>` (panel) lub `token:<id>` (API); `null` dla przychodzących.'
+          examples: ['token:01M892MQA05HWZW8AF2ZXZHMH3']
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+        sent_at:
+          $ref: '#/components/schemas/NullableTimestamp'
+          description: Czas przyjęcia przez RouterOS (`sent`).
+        received_at:
+          $ref: '#/components/schemas/NullableTimestamp'
+          description: Czas odbioru wg routera (tylko `in`).
+    MessagePage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Message'
+
+    PageMeta:
+      type: object
+      description: Wspólna część strony wyników.
+      required: [next_cursor]
+      properties:
+        next_cursor:
+          type: [string, 'null']
+          description: Kursor następnej strony; `null` na ostatniej stronie.
+
+    ChannelState:
+      type: string
+      enum: [ok, degraded, down, disabled]
+      description: |
+        `ok` – zdrowy; `degraded` – działa z problemami (np. błąd autoryzacji do routera, słaby sygnał);
+        `down` – niedostępny; `disabled` – wyłączony przez administratora (lub urządzenie wyłączone).
+    Signal:
+      type: [object, 'null']
+      description: Parametry radiowe z ostatniego sprawdzenia; brakujące wartości to `null`.
+      properties:
+        rssi:
+          type: [integer, 'null']
+          description: dBm.
+        rsrp:
+          type: [integer, 'null']
+          description: dBm.
+        rsrq:
+          type: [integer, 'null']
+          description: dB.
+        sinr:
+          type: [integer, 'null']
+          description: dB.
+    Channel:
+      type: object
+      required: [id, device_id, port, name, tags, rate_per_min, max_segments, transliterate, enabled, state, last_health_at, signal, operator]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        device_id:
+          $ref: '#/components/schemas/Id'
+        port:
+          type: string
+          examples: ['lte1']
+        name:
+          type: string
+        tags:
+          $ref: '#/components/schemas/Tags'
+        rate_per_min:
+          type: integer
+          minimum: 1
+          description: Limit wysyłki kanału (token bucket, SPEC §4.5).
+        max_segments:
+          type: integer
+          minimum: 1
+          description: Maksymalna liczba segmentów wiadomości (SPEC §4.6).
+        transliterate:
+          type: boolean
+          description: |
+            Zamiana polskich (i innych spoza GSM-7) znaków na ASCII przed wysyłką (SPEC §4.6).
+            Zawsze konkretna wartość: podana przy tworzeniu lub wybrana przez serwer (patrz `ChannelCreate`).
+        enabled:
+          type: boolean
+        state:
+          $ref: '#/components/schemas/ChannelState'
+        state_reason:
+          type: [string, 'null']
+          description: Krótki opis przyczyny stanu innego niż `ok`.
+        last_health_at:
+          $ref: '#/components/schemas/NullableTimestamp'
+        signal:
+          $ref: '#/components/schemas/Signal'
+        operator:
+          type: [string, 'null']
+          examples: ['Orange PL']
+        queue_depth:
+          type: integer
+          minimum: 0
+          readOnly: true
+          description: Liczba wiadomości `queued` i `sending` przypisanych do kanału.
+    ChannelCreate:
+      type: object
+      additionalProperties: false
+      required: [device_id, port]
+      properties:
+        device_id:
+          $ref: '#/components/schemas/Id'
+        port:
+          type: string
+          minLength: 1
+          maxLength: 32
+          pattern: '^[A-Za-z0-9._-]+$'
+        name:
+          type: string
+          maxLength: 64
+          description: Domyślnie `<nazwa urządzenia>/<port>`.
+        tags:
+          $ref: '#/components/schemas/Tags'
+        rate_per_min:
+          type: integer
+          minimum: 1
+          maximum: 600
+          default: 6
+        max_segments:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 3
+        transliterate:
+          type: boolean
+          description: |
+            Zamiana znaków spoza GSM-7 na ASCII przed wysyłką (SPEC §4.6). Pominięte → serwer wybiera wartość
+            na podstawie możliwości konektora urządzenia: `true`, gdy konektor nie obsługuje UCS-2
+            (`routeros-rest`), w przeciwnym razie `false`; gdy możliwości nie da się ustalić (np. nie da się
+            odszyfrować hasła urządzenia) – `true`. Wybraną wartość zwraca odpowiedź i można ją zmienić przez `PATCH`.
+        enabled:
+          type: boolean
+          default: true
+    ChannelUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        tags:
+          $ref: '#/components/schemas/Tags'
+        rate_per_min:
+          type: integer
+          minimum: 1
+          maximum: 600
+        max_segments:
+          type: integer
+          minimum: 1
+          maximum: 10
+        transliterate:
+          type: boolean
+        enabled:
+          type: boolean
+    ChannelPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Channel'
+
+    TlsMode:
+      type: string
+      enum: [verify, ca, fingerprint, insecure]
+      description: |
+        Dotyczy tylko `base_url` z `https://` (SPEC §3.3):
+        - `verify` – weryfikacja certyfikatu systemowymi CA (domyślnie);
+        - `ca` – weryfikacja własnym CA z `ca_pem`;
+        - `fingerprint` – przypięcie odcisku SHA-256 certyfikatu z `fingerprint` (self-signed RouterOS);
+        - `insecure` – brak weryfikacji (ostrzeżenie w UI).
+
+        `base_url` z `http://` jest dozwolony wyłącznie dla adresu bramy `veth` w trybie kontenerowym
+        (adresy dozwolone konfiguruje serwer; inaczej `422` `insecure_transport_not_allowed`).
+        Wtedy `tls_mode` jest ignorowany, a `insecure_transport` w odpowiedzi ma wartość `true`.
+    Fingerprint:
+      type: string
+      description: SHA-256 certyfikatu, 32 bajty hex (wielkość liter i dwukropki dowolne; serwer zwraca postać `AB:CD:…`).
+      pattern: '^([0-9A-Fa-f]{2}:?){31}[0-9A-Fa-f]{2}$'
+    Device:
+      type: object
+      description: Urządzenie RouterOS. Hasło nigdy nie jest zwracane.
+      required: [id, name, base_url, username, tls_mode, ca_pem, fingerprint, enabled, insecure_transport, created_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        name:
+          type: string
+        base_url:
+          type: string
+          format: uri
+          examples: ['https://10.20.0.1']
+        username:
+          type: string
+        tls_mode:
+          $ref: '#/components/schemas/TlsMode'
+        ca_pem:
+          type: [string, 'null']
+          description: Certyfikat CA (PEM), gdy `tls_mode` = `ca`.
+        fingerprint:
+          type: [string, 'null']
+          description: Przypięty odcisk, gdy `tls_mode` = `fingerprint`.
+        enabled:
+          type: boolean
+        insecure_transport:
+          type: boolean
+          readOnly: true
+          description: '`true` dla `http://` lub `tls_mode` = `insecure` – UI pokazuje ostrzeżenie.'
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+    DeviceCreate:
+      type: object
+      additionalProperties: false
+      required: [name, base_url, username, password]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Unikalna (`409`).
+        base_url:
+          type: string
+          format: uri
+          pattern: '^https?://'
+          maxLength: 255
+          description: Adres REST API RouterOS bez `/rest` (np. `https://10.20.0.1:8443`).
+        username:
+          type: string
+          minLength: 1
+          maxLength: 64
+        password:
+          type: string
+          writeOnly: true
+          minLength: 1
+          maxLength: 256
+          format: password
+        tls_mode:
+          $ref: '#/components/schemas/TlsMode'
+          default: verify
+        ca_pem:
+          type: string
+          maxLength: 16384
+        fingerprint:
+          $ref: '#/components/schemas/Fingerprint'
+        enabled:
+          type: boolean
+          default: true
+      allOf:
+        - if:
+            required: [tls_mode]
+            properties:
+              tls_mode:
+                const: ca
+          then:
+            required: [ca_pem]
+        - if:
+            required: [tls_mode]
+            properties:
+              tls_mode:
+                const: fingerprint
+          then:
+            required: [fingerprint]
+    DeviceUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: Merge patch; `ca_pem`/`fingerprint` równe `null` usuwają wartość.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        base_url:
+          type: string
+          format: uri
+          pattern: '^https?://'
+          maxLength: 255
+        username:
+          type: string
+          minLength: 1
+          maxLength: 64
+        password:
+          type: string
+          writeOnly: true
+          minLength: 1
+          maxLength: 256
+          format: password
+        tls_mode:
+          $ref: '#/components/schemas/TlsMode'
+        ca_pem:
+          type: [string, 'null']
+          maxLength: 16384
+        fingerprint:
+          oneOf:
+            - $ref: '#/components/schemas/Fingerprint'
+            - type: 'null'
+        enabled:
+          type: boolean
+    DevicePage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Device'
+    DeviceTestResult:
+      type: object
+      required: [ok, checked_at, latency_ms, routeros_version, board_name, tls, lte_ports, error]
+      properties:
+        ok:
+          type: boolean
+          description: '`true`, jeśli połączenie, TLS, logowanie i odczyt interfejsów się powiodły.'
+        checked_at:
+          $ref: '#/components/schemas/Timestamp'
+        latency_ms:
+          type: [integer, 'null']
+          minimum: 0
+          description: Czas odpowiedzi pierwszego żądania; `null`, gdy brak połączenia.
+        routeros_version:
+          type: [string, 'null']
+          examples: ['7.16.1 (stable)']
+        board_name:
+          type: [string, 'null']
+        tls:
+          type: [object, 'null']
+          description: '`null` dla `http://`.'
+          required: [mode, verified, peer_fingerprint]
+          properties:
+            mode:
+              $ref: '#/components/schemas/TlsMode'
+            verified:
+              type: boolean
+            peer_fingerprint:
+              type: [string, 'null']
+              description: Odcisk SHA-256 certyfikatu przedstawionego przez router (do skopiowania jako `fingerprint`).
+        lte_ports:
+          type: array
+          items:
+            $ref: '#/components/schemas/LtePort'
+        error:
+          type: [object, 'null']
+          required: [code, detail]
+          properties:
+            code:
+              type: string
+              enum: [unreachable, timeout, tls_error, auth_failed, insufficient_policy, unsupported_version, unexpected_response]
+            detail:
+              type: string
+    LtePort:
+      type: object
+      required: [port, running, operator, registration, signal, channel_id]
+      properties:
+        port:
+          type: string
+          examples: ['lte1']
+        running:
+          type: boolean
+        operator:
+          type: [string, 'null']
+        registration:
+          type: [string, 'null']
+          description: Stan rejestracji w sieci wg RouterOS (np. `registered`, `searching`, `no-sim`) [WERYFIKACJA T00].
+        signal:
+          $ref: '#/components/schemas/Signal'
+        channel_id:
+          type: [string, 'null']
+          description: Istniejący kanał dla tego portu albo `null`, jeśli kanału jeszcze nie utworzono.
+
+    Scope:
+      type: string
+      enum: ['sms:send', 'sms:read', 'admin']
+    Token:
+      type: object
+      description: Token API bez sekretu.
+      required: [id, user_id, name, prefix, scopes, expires_at, last_used_at, created_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        user_id:
+          $ref: '#/components/schemas/Id'
+        name:
+          type: string
+        prefix:
+          type: string
+          pattern: '^[A-Za-z0-9]+$'
+          description: Jawna część tokenu (`tkr_<prefix>_…`).
+        scopes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Scope'
+          uniqueItems: true
+          minItems: 1
+        expires_at:
+          $ref: '#/components/schemas/NullableTimestamp'
+          description: '`null` – bezterminowy.'
+        last_used_at:
+          $ref: '#/components/schemas/NullableTimestamp'
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+    TokenCreated:
+      allOf:
+        - $ref: '#/components/schemas/Token'
+        - type: object
+          required: [token]
+          properties:
+            token:
+              type: string
+              pattern: '^tkr_[A-Za-z0-9]+_[A-Za-z0-9]+$'
+              description: Pełny token. Zwracany **wyłącznie** w odpowiedzi na `POST /tokens`.
+    TokenCreate:
+      type: object
+      additionalProperties: false
+      required: [name, scopes]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        scopes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Scope'
+          uniqueItems: true
+          minItems: 1
+        expires_at:
+          $ref: '#/components/schemas/Timestamp'
+          description: Pominięte – token bezterminowy. Musi być w przyszłości.
+        user_id:
+          $ref: '#/components/schemas/Id'
+          description: Właściciel; domyślnie użytkownik wykonujący żądanie. Nieznany → `422` (`unknown_user`).
+    TokenPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Token'
+
+    Role:
+      type: string
+      enum: [admin, operator, viewer]
+      description: '`viewer` – podgląd; `operator` – wysyłka i anulowanie; `admin` – wszystko.'
+    Username:
+      type: string
+      minLength: 3
+      maxLength: 64
+      pattern: '^[A-Za-z0-9._-]+$'
+    Password:
+      type: string
+      writeOnly: true
+      format: password
+      minLength: 12
+      maxLength: 1024
+      description: Hasło (min. 12 znaków). Przechowywane jako argon2id, nigdy nie zwracane.
+    User:
+      type: object
+      required: [id, username, role, disabled, created_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        username:
+          $ref: '#/components/schemas/Username'
+        role:
+          $ref: '#/components/schemas/Role'
+        disabled:
+          type: boolean
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+    UserCreate:
+      type: object
+      additionalProperties: false
+      required: [username, password, role]
+      properties:
+        username:
+          $ref: '#/components/schemas/Username'
+        password:
+          $ref: '#/components/schemas/Password'
+        role:
+          $ref: '#/components/schemas/Role'
+        disabled:
+          type: boolean
+          default: false
+    UserUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        password:
+          $ref: '#/components/schemas/Password'
+        role:
+          $ref: '#/components/schemas/Role'
+        disabled:
+          type: boolean
+    UserPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/User'
+
+    Problem:
+      type: object
+      description: Szczegóły problemu wg RFC 9457. Dopuszczalne są dodatkowe pola rozszerzeń.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          description: Identyfikator typu problemu (lista w opisie API).
+          examples: ['urn:tikker:problem:validation']
+        title:
+          type: string
+          description: Krótki, stały dla danego `type` opis.
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+          description: Opis konkretnego wystąpienia (dla człowieka; nie parsować).
+        instance:
+          type: string
+          format: uri-reference
+          description: Identyfikator wystąpienia (ścieżka żądania lub identyfikator żądania w logach).
+        errors:
+          type: array
+          description: Lista błędów pól (dla `validation`; dla `malformed-request`, gdy błąd dotyczy konkretnego pola lub parametru).
+          items:
+            $ref: '#/components/schemas/FieldError'
+    FieldError:
+      type: object
+      required: [field, code, detail]
+      properties:
+        field:
+          type: string
+          description: |
+            Wskaźnik JSON (RFC 6901) do pola ciała żądania (np. `/messages/3/to`)
+            albo nazwa parametru zapytania/nagłówka (np. `limit`, `Idempotency-Key`).
+          examples: ['/to']
+        code:
+          type: string
+          description: Kod maszynowy (lista w opisie API). Lista może się rozszerzać – klient musi tolerować nieznane kody.
+          examples: ['invalid_phone_number']
+        detail:
+          type: string
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: ok
+    Readiness:
+      type: object
+      required: [status, checks]
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+        checks:
+          type: object
+          description: Wynik poszczególnych sprawdzeń (bez komunikatów błędów).
+          additionalProperties:
+            type: string
+            enum: [ok, fail]
+
+  examples:
+    MessageSent:
+      summary: Wysłana wiadomość UCS-2, 2 segmenty
+      value:
+        id: '01M89316X8MQM8Y3TW4S14MKFP'
+        direction: out
+        channel_id: '01M88ZA4DC268MPN2Z7ECB2KZ6'
+        peer: '+48600100201'
+        body: 'Dzień dobry! Przypominamy o wizycie jutro o 10:00. Prosimy zabrać dowód osobisty.'
+        encoding: ucs2
+        segments: 2
+        status: sent
+        attempts: 1
+        next_attempt_at: null
+        last_error: null
+        possible_duplicate: false
+        client_ref: null
+        tags: []
+        expires_at: null
+        created_by: 'user:01M892RX38GF5SDDMYJSPTB8E4'
+        created_at: '2026-11-25T09:48:57Z'
+        sent_at: '2026-11-25T09:49:03Z'
+        received_at: null
+    MessageRetrying:
+      summary: Ponowienie po błędzie przejściowym
+      value:
+        id: '01M891VMJGHZV9DNCXCVW4FZD1'
+        direction: out
+        channel_id: '01M88ZA4DC268MPN2Z7ECB2KZ6'
+        peer: '+48600100202'
+        body: 'Alarm: temperatura w serwerowni 31 C'
+        encoding: gsm7
+        segments: 1
+        status: queued
+        attempts: 2
+        next_attempt_at: '2026-11-25T10:03:00Z'
+        last_error: 'routeros: timeout after 10s'
+        possible_duplicate: false
+        client_ref: null
+        tags: []
+        expires_at: null
+        created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
+        created_at: '2026-11-25T09:51:14Z'
+        sent_at: null
+        received_at: null
+    MessageCancelled:
+      summary: Anulowana wiadomość
+      value:
+        id: '01M891ZTBRJCWQ2QRVQTV5D12B'
+        direction: out
+        channel_id: null
+        peer: '+48600100203'
+        body: 'Promocja tylko dziś!'
+        encoding: gsm7
+        segments: 1
+        status: cancelled
+        attempts: 0
+        next_attempt_at: null
+        last_error: null
+        possible_duplicate: false
+        client_ref: 'campaign-12'
+        tags: ['bulk']
+        expires_at: null
+        created_by: 'token:01M892MQA05HWZW8AF2ZXZHMH3'
+        created_at: '2026-11-25T09:53:31Z'
+        sent_at: null
+        received_at: null
+    MessageInbound:
+      summary: Wiadomość przychodząca
+      value:
+        id: '01M8924050XWV0PQGR9F58E24E'
+        direction: in
+        channel_id: '01M88ZA4DC268MPN2Z7ECB2KZ6'
+        peer: '+48600100200'
+        body: 'Potwierdzam wizytę, dziękuję.'
+        encoding: ucs2
+        segments: 1
+        status: received
+        attempts: 0
+        next_attempt_at: null
+        last_error: null
+        possible_duplicate: false
+        client_ref: null
+        tags: []
+        expires_at: null
+        created_by: null
+        created_at: '2026-11-25T09:55:48Z'
+        sent_at: null
+        received_at: '2026-11-25T09:55:31Z'
+    ChannelOk:
+      summary: Kanał zdrowy
+      value:
+        id: '01M88ZA4DC268MPN2Z7ECB2KZ6'
+        device_id: '01M892CBQGHA3FGHBEPHY2KDRX'
+        port: lte1
+        name: 'Biuro – Orange'
+        tags: ['orange', 'bulk']
+        rate_per_min: 6
+        max_segments: 3
+        transliterate: false
+        enabled: true
+        state: ok
+        state_reason: null
+        last_health_at: '2026-11-25T09:50:00Z'
+        signal:
+          rssi: -71
+          rsrp: -98
+          rsrq: -11
+          sinr: 9
+        operator: 'Orange PL'
+        queue_depth: 2
+    ChannelDegraded:
+      summary: Kanał zdegradowany (błąd autoryzacji)
+      value:
+        id: '01M89285Y8QPJV5SY5PZHKSKZM'
+        device_id: '01M892X2WGBAMWWTTBYG1G9R62'
+        port: lte1
+        name: 'Magazyn – Play'
+        tags: ['play']
+        rate_per_min: 6
+        max_segments: 3
+        transliterate: true
+        enabled: true
+        state: degraded
+        state_reason: 'RouterOS returned 401 Unauthorized'
+        last_health_at: '2026-11-25T09:49:30Z'
+        signal: null
+        operator: null
+        queue_depth: 7
+    DeviceLocal:
+      summary: Router lokalny (kontener, HTTP przez veth)
+      value:
+        id: '01M892X2WGBAMWWTTBYG1G9R62'
+        name: 'Lokalny router'
+        base_url: 'http://172.17.0.1'
+        username: tikker
+        tls_mode: verify
+        ca_pem: null
+        fingerprint: null
+        enabled: true
+        insecure_transport: true
+        created_at: '2026-11-19T10:05:00Z'
+    DeviceRemote:
+      summary: Router zdalny z przypiętym odciskiem
+      value:
+        id: '01M892CBQGHA3FGHBEPHY2KDRX'
+        name: 'Oddział Kraków'
+        base_url: 'https://10.20.0.1'
+        username: tikker
+        tls_mode: fingerprint
+        ca_pem: null
+        fingerprint: 'AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89'
+        enabled: true
+        insecure_transport: false
+        created_at: '2026-11-25T09:40:00Z'
+    Token:
+      summary: Token bez sekretu
+      value:
+        id: '01M892MQA05HWZW8AF2ZXZHMH3'
+        user_id: '01M892GHGRFNK90F0ZMDF6GEZR'
+        name: 'CRM produkcja'
+        prefix: 'k7Qm2xPa'
+        scopes: ['sms:send', 'sms:read']
+        expires_at: '2027-11-25T00:00:00Z'
+        last_used_at: '2026-11-25T09:48:57Z'
+        created_at: '2026-11-25T09:53:00Z'
+    User:
+      summary: Operator
+      value:
+        id: '01M892GHGRFNK90F0ZMDF6GEZR'
+        username: jkowalska
+        role: operator
+        disabled: false
+        created_at: '2026-11-25T09:30:00Z'

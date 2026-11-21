@@ -1,0 +1,23 @@
+# Build output
+/bin/
+/dist/
+coverage.out
+# Generated at release time (make notices)
+/THIRD_PARTY_NOTICES
+
+# Local runtime data (database, generated keys, local config)
+/data/
+*.db
+*.db-wal
+*.db-shm
+secret.key
+/config.yaml
+
+# Editors and OS files
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Claude Code agent worktrees
+/.claude/worktrees/

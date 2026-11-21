@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: 2026 The tikker Authors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Konfiguracja lintera kontraktu OpenAPI (Redocly CLI, licencja MIT).
+# Użycie: npx @redocly/cli@1.34.5 lint
+apis:
+  tikker@v1:
+    root: api/openapi.yaml
+extends:
+  - recommended-strict
+rules:
+  # Każda odpowiedź 4xx musi być w formacie RFC 9457 (application/problem+json).
+  operation-4xx-problem-details-rfc7807: error
+  # Każda operacja musi mieć opisane błędy 4xx.
+  operation-4xx-response: error
+  # Wszystkie przykłady muszą być zgodne ze schematami.
+  no-invalid-media-type-examples:
+    severity: error
+    allowAdditionalProperties: false
+  no-invalid-parameter-examples: error
+  no-invalid-schema-examples: error
+  # Wymagane rozszerzenie z zakresami tokenu na każdej operacji.
+  rule/operation-required-scopes:
+    subject:
+      type: Operation
+      property: x-required-scopes
+    assertions:
+      defined: true
+    message: Każda operacja musi deklarować x-required-scopes.
+    severity: error

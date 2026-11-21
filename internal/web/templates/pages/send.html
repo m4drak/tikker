@@ -1,0 +1,90 @@
+{{- /*
+SPDX-FileCopyrightText: 2026 The tikker Authors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/ -}}
+{{define "title"}}{{t "nav.send"}}{{end}}
+{{define "content" -}}
+<h1>{{t "nav.send"}}</h1>
+{{- if .Data.NoChan}}
+<p class="notice" role="alert" id="no-channels">{{t "send.no_channels"}}</p>
+{{- end}}
+<form method="post" action="/send" id="send-form"
+      hx-post="/send/preview" hx-trigger="input changed delay:300ms" hx-target="#send-preview" hx-swap="innerHTML" hx-sync="this:replace">
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  <input type="hidden" name="nonce" value="{{.Data.Form.Nonce}}">
+
+  <label for="to">{{t "send.to"}}</label>
+  <input id="to" name="to" type="tel" inputmode="tel" maxlength="{{.Data.MaxTo}}" value="{{.Data.Form.To}}" autocomplete="off" required
+    {{- if .Data.Errors.to}} aria-invalid="true" aria-describedby="to-error"{{else}} aria-describedby="to-hint"{{end}}>
+  {{- if .Data.Errors.to}}
+  <small id="to-error" class="field-error" role="alert">{{range .Data.Errors.to}}{{.}} {{end}}</small>
+  {{- else}}
+  <small id="to-hint" class="muted">{{t "send.to_hint"}}</small>
+  {{- end}}
+
+  <label for="body">{{t "send.body"}}</label>
+  <textarea id="body" name="body" rows="6" maxlength="{{.Data.MaxBody}}" required
+    {{- if .Data.Errors.body}} aria-invalid="true" aria-describedby="body-error send-preview"{{else}} aria-describedby="send-preview"{{end}}>{{.Data.Form.Body}}</textarea>
+  {{- if .Data.Errors.body}}
+  <small id="body-error" class="field-error" role="alert">{{range .Data.Errors.body}}{{.}} {{end}}</small>
+  {{- end}}
+
+  <div id="send-preview" class="preview" aria-live="polite">
+    {{- template "send_preview" .}}
+  </div>
+
+  <div class="grid">
+    <div>
+      <label for="channel">{{t "send.channel"}}</label>
+      <select id="channel" name="channel"{{if .Data.Errors.channel}} aria-invalid="true" aria-describedby="channel-error"{{end}}>
+        {{- range .Data.Channels}}
+        <option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{if .LabelKey}}{{t .LabelKey}}{{else}}{{.Label}}{{end}}</option>
+        {{- end}}
+      </select>
+      {{- if .Data.Errors.channel}}
+      <small id="channel-error" class="field-error" role="alert">{{range .Data.Errors.channel}}{{.}} {{end}}</small>
+      {{- end}}
+    </div>
+    <div>
+      <label for="tags">{{t "send.tags"}}</label>
+      <input id="tags" name="tags" type="text" value="{{.Data.Form.Tags}}" autocomplete="off" autocapitalize="none" spellcheck="false"
+        {{- if .Data.Errors.tags}} aria-invalid="true" aria-describedby="tags-error"{{else}} aria-describedby="tags-hint"{{end}}>
+      {{- if .Data.Errors.tags}}
+      <small id="tags-error" class="field-error" role="alert">{{range .Data.Errors.tags}}{{.}} {{end}}</small>
+      {{- else}}
+      <small id="tags-hint" class="muted">{{t "send.tags_hint"}}</small>
+      {{- end}}
+    </div>
+  </div>
+
+  <button type="submit">{{t "send.submit"}}</button>
+</form>
+{{- end}}
+
+{{- /* The live counter; POST /send/preview renders only this block. */ -}}
+{{define "send_preview" -}}
+<ul class="preview-stats">
+  <li>{{t "send.preview.chars"}}: <strong id="pv-chars">{{.Data.Preview.Chars}}</strong> / {{.Data.Preview.Limit}}</li>
+  <li>{{t "send.preview.encoding"}}: <strong id="pv-encoding">{{.Data.Preview.EncodingLabel}}</strong></li>
+  <li>{{t "send.preview.segments"}}: <strong id="pv-segments">{{.Data.Preview.ShownSegments}}</strong>
+    {{- if .Data.Preview.MaxSegments}} ({{t "send.preview.limit"}}: {{.Data.Preview.MaxSegments}}){{end}}</li>
+  {{- if .Data.Preview.PerSegment}}
+  <li>{{t "send.preview.remaining"}}: <strong id="pv-remaining">{{.Data.Preview.Remaining}}</strong></li>
+  {{- end}}
+</ul>
+{{- if gt .Data.Preview.Parts 1}}
+<p class="preview-note" id="pv-split">{{t "send.preview.split" .Data.Preview.Parts .Data.Preview.TotalSegments}}</p>
+{{- end}}
+{{- if .Data.Preview.Transliterate}}
+<p class="preview-note" id="pv-translit">{{t "send.preview.translit"}}{{if .Data.Preview.Changed}} {{t "send.preview.translit_changed"}}{{end}}</p>
+{{- end}}
+{{- if .Data.Preview.SubstitutedText}}
+<p class="preview-note warn" id="pv-substituted">{{t "send.preview.substituted" .Data.Preview.SubstitutedText}}</p>
+{{- end}}
+{{- if and .Data.Preview.NonGSMText (not .Data.Preview.Transliterate)}}
+<p class="preview-note" id="pv-nongsm">{{t "send.preview.nongsm" .Data.Preview.NonGSMText}}</p>
+{{- end}}
+{{- range .Data.Preview.Problems}}
+<p class="preview-note field-error" role="alert">{{.}}</p>
+{{- end}}
+{{- end}}

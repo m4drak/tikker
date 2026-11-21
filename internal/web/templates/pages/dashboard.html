@@ -1,0 +1,101 @@
+{{- /*
+SPDX-FileCopyrightText: 2026 The tikker Authors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/ -}}
+{{define "title"}}{{t "nav.dashboard"}}{{end}}
+{{define "content" -}}
+<h1>{{t "nav.dashboard"}}</h1>
+{{template "dashboard_status" .}}
+{{- end}}
+
+{{- /* The fragment htmx replaces every 10 seconds (GET /dashboard/status). */ -}}
+{{define "dashboard_status" -}}
+<div id="dashboard" hx-get="/dashboard/status" hx-trigger="every 10s" hx-swap="outerHTML">
+  <section class="stats" aria-label="{{t "dash.stats"}}">
+    <article>
+      <small>{{t "dash.queued"}}</small>
+      <strong id="stat-queued">{{.Data.Queued}}</strong>
+    </article>
+    <article>
+      <small>{{t "dash.sending"}}</small>
+      <strong id="stat-sending">{{.Data.Sending}}</strong>
+    </article>
+    <article>
+      <small>{{t "dash.sent"}}</small>
+      <strong id="stat-sent">{{.Data.Counters.Sent}}</strong>
+    </article>
+    <article>
+      <small>{{t "dash.failed"}}</small>
+      <strong id="stat-failed">{{.Data.Counters.Failed}}</strong>
+    </article>
+  </section>
+  <p class="muted"><small>{{t "dash.since_start"}}</small></p>
+
+  <h2>{{t "dash.channels"}}</h2>
+  {{- if .Data.Channels}}
+  <div class="overflow-auto">
+    <table class="striped compact" id="channels">
+      <thead>
+        <tr>
+          <th scope="col">{{t "dash.channel"}}</th>
+          <th scope="col">{{t "dash.state"}}</th>
+          <th scope="col">{{t "dash.operator"}}</th>
+          <th scope="col">{{t "dash.signal"}}</th>
+          <th scope="col">{{t "dash.traffic"}}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{- range .Data.Channels}}
+        <tr>
+          <td>
+            <strong>{{.Name}}</strong><br>
+            <small class="muted">{{.Device}} / {{.Port}}{{range .Tags}} <span class="tag">{{.}}</span>{{end}}</small>
+          </td>
+          <td>
+            <span class="badge state-{{.State}}">{{t .StateKey}}</span>
+            {{- if .Reason}}<br><small class="muted">{{.Reason}}</small>{{end}}
+          </td>
+          <td>{{if .Operator}}{{.Operator}}{{if .Technology}} <small class="muted">{{.Technology}}</small>{{end}}{{else}}-{{end}}</td>
+          <td>{{if .Signal}}{{.Signal}}{{else}}-{{end}}</td>
+          <td>
+            {{t "dash.sent"}}: {{.Sent}}, {{t "dash.failed"}}: {{.Failed}}
+            {{- if .Sending}} <span class="badge status-sending">{{t "status.sending"}}</span>{{end}}
+          </td>
+        </tr>
+        {{- end}}
+      </tbody>
+    </table>
+  </div>
+  {{- else}}
+  <p>{{t "dash.no_channels"}}</p>
+  {{- end}}
+
+  <h2>{{t "dash.errors"}}</h2>
+  {{- if .Data.Errors}}
+  <div class="overflow-auto">
+    <table class="striped compact" id="recent-errors">
+      <thead>
+        <tr>
+          <th scope="col">{{t "messages.col.time"}}</th>
+          <th scope="col">{{t "messages.col.peer"}}</th>
+          <th scope="col">{{t "messages.col.channel"}}</th>
+          <th scope="col">{{t "dash.error"}}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{- range .Data.Errors}}
+        <tr>
+          <td class="nowrap"><a href="/messages/{{.ID}}">{{ts .At}}</a></td>
+          <td>{{.Peer}}</td>
+          <td>{{if .Channel}}{{.Channel}}{{else}}-{{end}}</td>
+          <td>{{if .Error}}{{.Error}}{{else}}-{{end}}</td>
+        </tr>
+        {{- end}}
+      </tbody>
+    </table>
+  </div>
+  {{- else}}
+  <p>{{t "dash.no_errors"}}</p>
+  {{- end}}
+</div>
+{{- end}}
