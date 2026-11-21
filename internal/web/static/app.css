@@ -279,3 +279,41 @@ pre.body-text {
   color: var(--pico-mark-color);
   background: var(--pico-mark-background-color);
 }
+
+/* Administration pages (T32). */
+
+.notice.warn {
+  padding: var(--pico-spacing);
+  border: var(--pico-border-width) solid var(--pico-mark-background-color);
+  border-radius: var(--pico-border-radius);
+  background: var(--pico-mark-background-color);
+  color: var(--pico-mark-color);
+}
+
+button.danger {
+  --pico-background-color: var(--pico-del-color);
+  --pico-border-color: var(--pico-del-color);
+  --pico-color: #fff;
+}
+
+.inline-add {
+  max-width: 28rem;
+}
+
+table form {
+  margin: 0;
+}
+
+table form button {
+  margin: 0;
+  padding: 0.3rem 0.7rem;
+}
+
+#test-result,
+#check-result {
+  margin: var(--pico-spacing) 0;
+}
+
+fieldset label {
+  display: block;
+}

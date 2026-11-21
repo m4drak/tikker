@@ -1,0 +1,70 @@
+{{- /*
+SPDX-FileCopyrightText: 2026 The tikker Authors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/ -}}
+{{define "title"}}{{.Data.U.Username}}{{end}}
+{{define "content" -}}
+<h1>{{.Data.U.Username}}</h1>
+{{- if eq .Data.Notice "created"}}
+<p class="notice ok" role="status">{{t "usr.notice.created"}}</p>
+{{- else if eq .Data.Notice "saved"}}
+<p class="notice ok" role="status">{{t "usr.notice.saved"}}</p>
+{{- else if eq .Data.Notice "password"}}
+<p class="notice ok" role="status">{{t "usr.notice.password"}}</p>
+{{- end}}
+{{- if .Data.Alert}}
+<p class="notice" role="alert" id="user-alert">{{.Data.Alert}}</p>
+{{- end}}
+<p class="muted">{{t .Data.U.RoleKey}} &middot; {{if .Data.U.Disabled}}{{t "usr.disabled"}}{{else}}{{t "usr.active"}}{{end}} &middot; {{ts .Data.U.Created}} UTC</p>
+{{- if .Data.U.Self}}
+<p class="notice warn" role="note">{{t "usr.self_note"}}</p>
+{{- end}}
+
+<section aria-labelledby="u-role-heading">
+  <h2 id="u-role-heading">{{t "usr.col.role"}}</h2>
+  <form method="post" action="/users/{{.Data.U.ID}}/role">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <select name="role" aria-label="{{t "usr.col.role"}}"{{if .Data.Errors.role}} aria-invalid="true" aria-describedby="u-role-error"{{end}}>
+      {{- range .Data.Roles}}
+      <option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+      {{- end}}
+    </select>
+    {{- if .Data.Errors.role}}
+    <small id="u-role-error" class="field-error" role="alert">{{.Data.Errors.role}}</small>
+    {{- end}}
+    <button type="submit">{{t "usr.change_role"}}</button>
+  </form>
+</section>
+
+<section aria-labelledby="u-status-heading">
+  <h2 id="u-status-heading">{{t "usr.col.status"}}</h2>
+  <form method="post" action="/users/{{.Data.U.ID}}/status">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    {{- if .Data.U.Disabled}}
+    <input type="hidden" name="disabled" value="false">
+    <button type="submit" class="secondary">{{t "usr.enable"}}</button>
+    {{- else}}
+    <input type="hidden" name="disabled" value="true">
+    <button type="submit" class="secondary outline">{{t "usr.disable"}}</button>
+    {{- end}}
+  </form>
+</section>
+
+<section aria-labelledby="u-pass-heading">
+  <h2 id="u-pass-heading">{{t "usr.reset_password"}}</h2>
+  <form method="post" action="/users/{{.Data.U.ID}}/password">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label for="u-pass">{{t "usr.new_password"}}</label>
+    <input id="u-pass" name="password" type="password" value="" autocomplete="new-password" required
+      {{- if .Data.Errors.password}} aria-invalid="true" aria-describedby="u-pass-error"{{else}} aria-describedby="u-pass-hint"{{end}}>
+    {{- if .Data.Errors.password}}
+    <small id="u-pass-error" class="field-error" role="alert">{{.Data.Errors.password}}</small>
+    {{- else}}
+    <small id="u-pass-hint" class="muted">{{t "usr.reset_hint"}}</small>
+    {{- end}}
+    <label for="u-confirm">{{t "setup.confirm"}}</label>
+    <input id="u-confirm" name="confirm" type="password" value="" autocomplete="new-password" required>
+    <button type="submit">{{t "usr.reset_password"}}</button>
+  </form>
+</section>
+{{- end}}

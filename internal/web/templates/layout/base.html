@@ -35,7 +35,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
       {{- end}}
     </ul>
     <ul>
-      <li class="who">{{.User.Username}} ({{.RoleLabel}})</li>
+      <li class="who"><a href="/profile"{{if eq .Path "/profile"}} aria-current="page"{{end}} title="{{t "nav.profile"}}">{{.User.Username}}</a> ({{.RoleLabel}})</li>
       <li>
         <form method="post" action="/logout">
           <input type="hidden" name="csrf_token" value="{{.CSRF}}">

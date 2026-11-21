@@ -1,0 +1,66 @@
+{{- /*
+SPDX-FileCopyrightText: 2026 The tikker Authors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/ -}}
+{{define "title"}}{{t "nav.devices"}}{{end}}
+{{define "content" -}}
+<h1>{{t "nav.devices"}}</h1>
+{{- if eq .Data.Notice "device_deleted"}}
+<p class="notice ok" role="status">{{t "dev.notice.deleted"}}</p>
+{{- else if eq .Data.Notice "enabled"}}
+<p class="notice ok" role="status">{{t "dev.notice.enabled"}}</p>
+{{- else if eq .Data.Notice "disabled"}}
+<p class="notice ok" role="status">{{t "dev.notice.disabled"}}</p>
+{{- end}}
+<p><a href="/devices/new" role="button">{{t "dev.add"}}</a></p>
+{{- if .Data.Rows}}
+<div class="overflow-auto">
+  <table class="striped compact" id="devices">
+    <thead>
+      <tr>
+        <th scope="col">{{t "dev.col.name"}}</th>
+        <th scope="col">{{t "dev.col.url"}}</th>
+        <th scope="col">{{t "dev.col.tls"}}</th>
+        <th scope="col">{{t "dev.col.channels"}}</th>
+        <th scope="col">{{t "dev.col.actions"}}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{- range .Data.Rows}}
+      <tr>
+        <td>
+          <a href="/devices/{{.D.ID}}"><strong>{{.D.Name}}</strong></a>
+          {{- if not .D.Enabled}} <span class="badge state-disabled">{{t "state.disabled"}}</span>{{end}}
+        </td>
+        <td>{{.D.BaseURL}}</td>
+        <td>
+          {{t .TLSKey}}
+          {{- if .Insecure}} <span class="badge state-degraded" title="{{t "dev.insecure_short"}}">{{t "dev.insecure_badge"}}</span>{{end}}
+        </td>
+        <td>
+          {{- range .Channels}}
+          <a href="/channels/{{.ID}}">{{.Name}}</a> <span class="badge state-{{.State}}">{{t .StateKey}}</span><br>
+          {{- else}}-{{end}}
+        </td>
+        <td>
+          <form method="post" action="/devices/{{.D.ID}}/toggle">
+            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+            <input type="hidden" name="next" value="/devices">
+            {{- if .D.Enabled}}
+            <input type="hidden" name="enabled" value="false">
+            <button type="submit" class="secondary outline">{{t "dev.disable"}}</button>
+            {{- else}}
+            <input type="hidden" name="enabled" value="true">
+            <button type="submit" class="secondary outline">{{t "dev.enable"}}</button>
+            {{- end}}
+          </form>
+        </td>
+      </tr>
+      {{- end}}
+    </tbody>
+  </table>
+</div>
+{{- else}}
+<p>{{t "dev.empty"}}</p>
+{{- end}}
+{{- end}}

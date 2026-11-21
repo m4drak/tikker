@@ -207,6 +207,7 @@ func TestChannelHealthOverlay(t *testing.T) {
 	e := newEnv(t)
 	ch := e.addChannel(e.addDevice("d"), "lte1", nil)
 	e.api.hv = stubHealth{state: domain.ChannelDegraded}
+	e.rebuildAdmin(nil)
 	c := e.get(channelsPath+"/"+ch, e.readTok).obj()
 	if c["state"] != "degraded" || c["state_reason"] != "live" {
 		t.Errorf("channel = %v", c)
@@ -272,6 +273,7 @@ func TestChannelTransliterateDefault(t *testing.T) {
 	e.api.conns = factoryFunc(func(context.Context, connector.DeviceConfig) (connector.Connector, error) {
 		return capsConnector{caps: connector.Capabilities{Encodings: []domain.Encoding{domain.EncodingGSM7, domain.EncodingUCS2}}, closed: &closed}, nil
 	})
+	e.rebuildAdmin(nil)
 	if create("p3", nil) || !closed {
 		t.Errorf("UCS-2 connector: transliterate should default to false (closed=%v)", closed)
 	}
@@ -283,10 +285,12 @@ func TestChannelTransliterateDefault(t *testing.T) {
 	e.api.conns = factoryFunc(func(context.Context, connector.DeviceConfig) (connector.Connector, error) {
 		return nil, errors.New("no connector")
 	})
+	e.rebuildAdmin(nil)
 	if !create("p5", nil) {
 		t.Error("connector error: transliterate should default to true")
 	}
 	e.api.creds = failingCreds{}
+	e.rebuildAdmin(nil)
 	if !create("p6", nil) {
 		t.Error("credentials error: transliterate should default to true")
 	}

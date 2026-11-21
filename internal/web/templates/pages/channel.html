@@ -1,0 +1,104 @@
+{{- /*
+SPDX-FileCopyrightText: 2026 The tikker Authors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/ -}}
+{{define "title"}}{{.Data.Row.Name}}{{end}}
+{{define "content" -}}
+<h1>{{.Data.Row.Name}}</h1>
+<p class="muted"><a href="/devices/{{.Data.Device.ID}}">{{.Data.Device.Name}}</a> / {{.Data.Row.Port}}</p>
+{{- if eq .Data.Notice "saved"}}
+<p class="notice ok" role="status">{{t "ch.notice.saved"}}</p>
+{{- end}}
+
+<section aria-labelledby="health-heading">
+  <h2 id="health-heading">{{t "ch.health"}}</h2>
+  <p>
+    <span class="badge state-{{.Data.Row.State}}">{{t .Data.Row.StateKey}}</span>
+    {{- if .Data.Row.Reason}} <small class="muted">{{.Data.Row.Reason}}</small>{{end}}
+  </p>
+  <form hx-post="/channels/{{.Data.Row.ID}}/check" hx-target="#channel-check" hx-swap="innerHTML" hx-disabled-elt="find button" method="post" action="/channels/{{.Data.Row.ID}}/check">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <button type="submit" class="secondary">{{t "ch.check"}}</button>
+  </form>
+  <div id="channel-check" aria-live="polite"></div>
+</section>
+
+<section aria-labelledby="ch-settings-heading">
+  <h2 id="ch-settings-heading">{{t "ch.settings"}}</h2>
+  <form method="post" action="/channels/{{.Data.Row.ID}}">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+
+    <label for="ch-name">{{t "ch.name"}}</label>
+    <input id="ch-name" name="name" type="text" maxlength="64" value="{{.Data.Form.Name}}" autocomplete="off" required
+      {{- if .Data.Errors.name}} aria-invalid="true" aria-describedby="ch-name-error"{{end}}>
+    {{- if .Data.Errors.name}}
+    <small id="ch-name-error" class="field-error" role="alert">{{.Data.Errors.name}}</small>
+    {{- end}}
+
+    <label for="ch-tags">{{t "send.tags"}}</label>
+    <input id="ch-tags" name="tags" type="text" value="{{.Data.Form.Tags}}" autocomplete="off" autocapitalize="none" spellcheck="false"
+      {{- if .Data.Errors.tags}} aria-invalid="true" aria-describedby="ch-tags-error"{{else}} aria-describedby="ch-tags-hint"{{end}}>
+    {{- if .Data.Errors.tags}}
+    <small id="ch-tags-error" class="field-error" role="alert">{{.Data.Errors.tags}}</small>
+    {{- else}}
+    <small id="ch-tags-hint" class="muted">{{t "ch.tags_hint"}}</small>
+    {{- end}}
+
+    <div class="grid">
+      <div>
+        <label for="ch-rate">{{t "ch.rate"}}</label>
+        <input id="ch-rate" name="rate_per_min" type="number" inputmode="numeric" min="{{index .Data.Rate 0}}" max="{{index .Data.Rate 1}}" value="{{.Data.Form.RatePerMin}}" required
+          {{- if .Data.Errors.rate_per_min}} aria-invalid="true" aria-describedby="ch-rate-error"{{else}} aria-describedby="ch-rate-hint"{{end}}>
+        {{- if .Data.Errors.rate_per_min}}
+        <small id="ch-rate-error" class="field-error" role="alert">{{.Data.Errors.rate_per_min}}</small>
+        {{- else}}
+        <small id="ch-rate-hint" class="muted">{{t "ch.rate_hint" (index .Data.Rate 0) (index .Data.Rate 1)}}</small>
+        {{- end}}
+      </div>
+      <div>
+        <label for="ch-segs">{{t "ch.segments"}}</label>
+        <input id="ch-segs" name="max_segments" type="number" inputmode="numeric" min="{{index .Data.Segments 0}}" max="{{index .Data.Segments 1}}" value="{{.Data.Form.MaxSegments}}" required
+          {{- if .Data.Errors.max_segments}} aria-invalid="true" aria-describedby="ch-segs-error"{{else}} aria-describedby="ch-segs-hint"{{end}}>
+        {{- if .Data.Errors.max_segments}}
+        <small id="ch-segs-error" class="field-error" role="alert">{{.Data.Errors.max_segments}}</small>
+        {{- else}}
+        <small id="ch-segs-hint" class="muted">{{t "ch.segments_hint" (index .Data.Segments 0) (index .Data.Segments 1)}}</small>
+        {{- end}}
+      </div>
+    </div>
+
+    <label for="ch-translit">
+      <input id="ch-translit" name="transliterate" type="checkbox" value="1"{{if .Data.Form.Transliterate}} checked{{end}} aria-describedby="ch-translit-hint">
+      {{t "ch.transliterate"}}
+    </label>
+    <small id="ch-translit-hint" class="muted">{{t "ch.transliterate_hint"}}</small>
+
+    <label for="ch-enabled">
+      <input id="ch-enabled" name="enabled" type="checkbox" value="1"{{if .Data.Form.Enabled}} checked{{end}}>
+      {{t "ch.enabled"}}
+    </label>
+
+    <button type="submit">{{t "common.save"}}</button>
+  </form>
+</section>
+
+<section aria-labelledby="ch-danger-heading">
+  <h2 id="ch-danger-heading">{{t "dev.danger"}}</h2>
+  <p><a href="/channels/{{.Data.Row.ID}}/delete" role="button" class="secondary outline">{{t "ch.delete.link"}}</a></p>
+</section>
+{{- end}}
+
+{{- /* The result of "check now"; POST /channels/{id}/check renders only this block. */ -}}
+{{define "channel_check" -}}
+<article id="check-result">
+  <p>
+    <span class="badge state-{{.Data.State}}">{{t .Data.StateKey}}</span>
+    {{- if .Data.Reason}} <small class="muted">{{.Data.Reason}}</small>{{end}}
+  </p>
+  <dl class="props">
+    <dt>{{t "dash.operator"}}</dt><dd>{{if .Data.Operator}}{{.Data.Operator}}{{else}}-{{end}}</dd>
+    <dt>{{t "dash.signal"}}</dt><dd>{{if .Data.Signal}}{{.Data.Signal}}{{else}}-{{end}}</dd>
+    <dt>{{t "dev.test.checked_at"}}</dt><dd>{{.Data.At}} UTC</dd>
+  </dl>
+</article>
+{{- end}}

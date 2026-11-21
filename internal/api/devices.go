@@ -5,177 +5,35 @@ package api
 
 import (
 	"context"
-	"crypto/x509"
-	"encoding/pem"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
-	"net/netip"
-	"net/url"
-	"regexp"
-	"strings"
 
+	"github.com/m4drak/tikker/internal/admin"
 	"github.com/m4drak/tikker/internal/auth"
 	"github.com/m4drak/tikker/internal/domain"
 	"github.com/m4drak/tikker/internal/secrets"
-	"github.com/m4drak/tikker/internal/store"
 )
 
-// Limits of schemas DeviceCreate and DeviceUpdate.
 const (
-	maxDeviceName     = 64
-	maxBaseURL        = 255
-	maxUsername       = 64
-	maxPassword       = 256
-	maxCAPEM          = 16384
-	minScrubbedSecret = 3
 	conflictDeviceDup = "A device with this name already exists."
 	conflictDeviceMsg = "A channel of the device has messages in status \"queued\" or \"sending\"."
 )
 
-var fingerprintPattern = regexp.MustCompile(`^([0-9A-Fa-f]{2}:?){31}[0-9A-Fa-f]{2}$`)
-
-// hostAllowlist is the set of hosts a device may use with plain http://.
-type hostAllowlist struct {
-	prefixes []netip.Prefix
-	names    map[string]bool
-}
-
-// parseHostAllowlist reads IP addresses, CIDR prefixes and host names.
-func parseHostAllowlist(entries []string) (hostAllowlist, error) {
-	l := hostAllowlist{names: map[string]bool{}}
-	for _, e := range entries {
-		e = strings.TrimSpace(e)
-		switch {
-		case e == "":
-			continue
-		case strings.Contains(e, "/"):
-			p, err := netip.ParsePrefix(e)
-			if err != nil {
-				return l, fmt.Errorf("invalid prefix %q: %w", e, err)
-			}
-			l.prefixes = append(l.prefixes, p.Masked())
-		default:
-			if ip, err := netip.ParseAddr(e); err == nil {
-				l.prefixes = append(l.prefixes, netip.PrefixFrom(ip.Unmap(), ip.Unmap().BitLen()))
-				continue
-			}
-			l.names[strings.ToLower(e)] = true
+// adminProblem maps the errors of the admin service: validation failures to
+// the 422 problem, the sentinels to 404/409. It returns nil for other errors.
+func adminProblem(err error, what, conflictDetail string) *apiError {
+	var ve *admin.ValidationError
+	if errors.As(err, &ve) {
+		var v validation
+		for _, f := range ve.Errors {
+			v.add(f.Field, f.Code, "%s", f.Detail)
 		}
+		var ae *apiError
+		_ = errors.As(v.err(), &ae)
+		return ae
 	}
-	return l, nil
-}
-
-// allows reports whether host (as in url.URL.Hostname) is on the list.
-func (l hostAllowlist) allows(host string) bool {
-	if l.names[strings.ToLower(host)] {
-		return true
-	}
-	if i := strings.IndexByte(host, '%'); i >= 0 {
-		host = host[:i]
-	}
-	ip, err := netip.ParseAddr(host)
-	if err != nil {
-		return false
-	}
-	ip = ip.Unmap()
-	for _, p := range l.prefixes {
-		if p.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-// checkName validates a device name.
-func checkName(v *validation, name string) {
-	if n := runeLen(name); n < 1 || n > maxDeviceName {
-		v.add("/name", codeOutOfRange, "Must have 1 to %d characters.", maxDeviceName)
-	}
-}
-
-// checkBaseURL validates base_url: http(s) with a host, http only for allowed
-// hosts (SPEC §3.3).
-func (a *API) checkBaseURL(v *validation, raw string) {
-	u, err := url.Parse(raw)
-	switch {
-	case len(raw) > maxBaseURL:
-		v.add("/base_url", codeOutOfRange, "At most %d characters.", maxBaseURL)
-	case err != nil || u.Host == "" || u.Hostname() == "":
-		v.add("/base_url", codeInvalidFormat, "Must be an absolute http:// or https:// URL.")
-	case u.User != nil || u.RawQuery != "" || u.Fragment != "":
-		v.add("/base_url", codeInvalidFormat, "Must not contain credentials, a query or a fragment.")
-	case strings.EqualFold(u.Scheme, "https"):
-	case strings.EqualFold(u.Scheme, "http"):
-		if !a.allowHTTP.allows(u.Hostname()) {
-			v.add("/base_url", codeInsecureTransport, "Plain http:// is only allowed for the configured local addresses; use https://.")
-		}
-	default:
-		v.add("/base_url", codeInvalidFormat, "Must be an absolute http:// or https:// URL.")
-	}
-}
-
-func checkUsername(v *validation, s string) {
-	if n := runeLen(s); n < 1 || n > maxUsername {
-		v.add("/username", codeOutOfRange, "Must have 1 to %d characters.", maxUsername)
-	}
-}
-
-func checkPassword(v *validation, p secrets.Password) {
-	if n := runeLen(p.Reveal()); n < 1 || n > maxPassword {
-		v.add("/password", codeOutOfRange, "Must have 1 to %d characters.", maxPassword)
-	}
-}
-
-// checkCAPEM validates a PEM bundle of at least one certificate.
-func checkCAPEM(v *validation, s string) {
-	if len(s) > maxCAPEM {
-		v.add("/ca_pem", codeOutOfRange, "At most %d characters.", maxCAPEM)
-		return
-	}
-	rest, certs := []byte(s), 0
-	for {
-		var blk *pem.Block
-		blk, rest = pem.Decode(rest)
-		if blk == nil {
-			break
-		}
-		if blk.Type != "CERTIFICATE" {
-			continue
-		}
-		if _, err := x509.ParseCertificate(blk.Bytes); err != nil {
-			v.add("/ca_pem", codeInvalidFormat, "Contains a certificate that cannot be parsed.")
-			return
-		}
-		certs++
-	}
-	if certs == 0 {
-		v.add("/ca_pem", codeInvalidFormat, "Must contain at least one PEM encoded certificate.")
-	}
-}
-
-// normalizeFingerprint returns the "AB:CD:..." form, or "" and false.
-func normalizeFingerprint(s string) (string, bool) {
-	if !fingerprintPattern.MatchString(s) {
-		return "", false
-	}
-	return formatFingerprint(s), true
-}
-
-// checkTLSConsistency requires the material the TLS mode needs (on the merged
-// values, so PATCH is checked like POST).
-func checkTLSConsistency(v *validation, mode domain.TLSMode, caPEM, fingerprint string) {
-	switch mode {
-	case domain.TLSCustomCA:
-		if caPEM == "" {
-			v.add("/ca_pem", codeRequired, "Required when tls_mode is \"ca\".")
-		}
-	case domain.TLSFingerprint:
-		if fingerprint == "" {
-			v.add("/fingerprint", codeRequired, "Required when tls_mode is \"fingerprint\".")
-		}
-	}
+	return mapStoreError(err, what, conflictDetail)
 }
 
 // deviceCreate is schema DeviceCreate.
@@ -245,79 +103,13 @@ func (a *API) createDevice(w http.ResponseWriter, r *http.Request, p auth.Princi
 	if err := decodeStrict(raw, &req); err != nil {
 		return err
 	}
-	var v validation
-	d := domain.Device{
-		Connector: domain.ConnectorRouterOSREST, TLSMode: domain.TLSVerify, Enabled: req.Enabled == nil || *req.Enabled,
-	}
-	if req.Name == nil {
-		v.add("/name", codeRequired, "A name is required.")
-	} else {
-		d.Name = *req.Name
-		checkName(&v, d.Name)
-	}
-	if req.BaseURL == nil {
-		v.add("/base_url", codeRequired, "A base URL is required.")
-	} else {
-		d.BaseURL = *req.BaseURL
-		a.checkBaseURL(&v, d.BaseURL)
-	}
-	if req.Username == nil {
-		v.add("/username", codeRequired, "A username is required.")
-	} else {
-		d.Username = *req.Username
-		checkUsername(&v, d.Username)
-	}
-	if req.Password == nil {
-		v.add("/password", codeRequired, "A password is required.")
-	} else {
-		checkPassword(&v, *req.Password)
-	}
-	if req.TLSMode != nil {
-		m, err := domain.ParseTLSMode(*req.TLSMode)
-		if err != nil {
-			v.add("/tls_mode", codeInvalidFormat, "Must be one of verify, ca, fingerprint, insecure.")
-		}
-		d.TLSMode = m
-	}
-	if req.CAPEM != nil {
-		d.CAPEM = *req.CAPEM
-		if d.CAPEM != "" {
-			checkCAPEM(&v, d.CAPEM)
-		}
-	}
-	if req.Fingerprint != nil && *req.Fingerprint != "" {
-		fp, ok := normalizeFingerprint(*req.Fingerprint)
-		if !ok {
-			v.add("/fingerprint", codeInvalidFormat, "Must be a SHA-256 fingerprint: 32 hex bytes, optionally separated by colons.")
-		}
-		d.Fingerprint = fp
-	}
-	if d.TLSMode.Valid() {
-		checkTLSConsistency(&v, d.TLSMode, d.CAPEM, d.Fingerprint)
-	}
-	if err := v.err(); err != nil {
-		return err
-	}
-
-	ctx := r.Context()
-	d.ID, d.CreatedAt = a.ids.NewID(), a.clk.Now()
-	if d.PasswordEnc, err = a.creds.Encrypt(d.ID, *req.Password); err != nil {
-		return fmt.Errorf("encrypt device password: %w", err)
-	}
-	err = a.st.WithTx(ctx, func(tx store.Repos) error {
-		if err := tx.Devices().Create(ctx, d); err != nil {
-			return err
-		}
-		return a.audit(ctx, tx, actorOf(p), domain.AuditDeviceCreate, "device:"+string(d.ID),
-			map[string]string{"name": d.Name, "base_url": d.BaseURL})
-	})
-	if errors.Is(err, domain.ErrConflict) {
-		return conflict(conflictDeviceDup)
+	d, err := a.admin.CreateDevice(r.Context(), actorOf(p), admin.DeviceCreate(req))
+	if e := adminProblem(err, "Device", conflictDeviceDup); e != nil {
+		return e
 	}
 	if err != nil {
 		return fmt.Errorf("create device: %w", err)
 	}
-	a.reload(ctx)
 	w.Header().Set("Location", Prefix+"/devices/"+string(d.ID))
 	writeJSON(w, http.StatusCreated, toDeviceDTO(d))
 	return nil
@@ -344,145 +136,70 @@ func (a *API) updateDevice(w http.ResponseWriter, r *http.Request, p auth.Princi
 		v.add("", codeRequired, "At least one property is required.")
 		return v.err()
 	}
-	name, hasName, err := patchValue[string](patch, "name", &v)
-	if err != nil {
+	var ch admin.DeviceChanges
+	if name, ok, err := patchValue[string](patch, "name", &v); err != nil {
 		return err
+	} else if ok {
+		ch.Name = &name
 	}
-	baseURL, hasURL, err := patchValue[string](patch, "base_url", &v)
-	if err != nil {
+	if u, ok, err := patchValue[string](patch, "base_url", &v); err != nil {
 		return err
+	} else if ok {
+		ch.BaseURL = &u
 	}
-	username, hasUser, err := patchValue[string](patch, "username", &v)
-	if err != nil {
+	if u, ok, err := patchValue[string](patch, "username", &v); err != nil {
 		return err
+	} else if ok {
+		ch.Username = &u
 	}
-	password, hasPass, err := patchValue[secrets.Password](patch, "password", &v)
-	if err != nil {
+	if pw, ok, err := patchValue[secrets.Password](patch, "password", &v); err != nil {
 		return err
+	} else if ok {
+		ch.Password = &pw
 	}
-	tlsMode, hasMode, err := patchValue[string](patch, "tls_mode", &v)
-	if err != nil {
+	if m, ok, err := patchValue[string](patch, "tls_mode", &v); err != nil {
 		return err
+	} else if ok {
+		ch.TLSMode = &m
 	}
-	enabled, hasEnabled, err := patchValue[bool](patch, "enabled", &v)
-	if err != nil {
+	if en, ok, err := patchValue[bool](patch, "enabled", &v); err != nil {
 		return err
+	} else if ok {
+		ch.Enabled = &en
 	}
 	// ca_pem and fingerprint accept null: it removes the value.
-	var caPEM, fingerprint string
-	hasCA, hasFP := patch.has("ca_pem"), patch.has("fingerprint")
-	if hasCA && !patch.isNull("ca_pem") {
-		if err := patch.get("ca_pem", &caPEM); err != nil {
-			return err
+	if patch.has("ca_pem") {
+		var s string
+		if !patch.isNull("ca_pem") {
+			if err := patch.get("ca_pem", &s); err != nil {
+				return err
+			}
 		}
+		ch.CAPEM = &s
 	}
-	if hasFP && !patch.isNull("fingerprint") {
-		if err := patch.get("fingerprint", &fingerprint); err != nil {
-			return err
+	if patch.has("fingerprint") {
+		var s string
+		if !patch.isNull("fingerprint") {
+			if err := patch.get("fingerprint", &s); err != nil {
+				return err
+			}
 		}
+		ch.Fingerprint = &s
 	}
-	if hasName {
-		checkName(&v, name)
-	}
-	if hasURL {
-		a.checkBaseURL(&v, baseURL)
-	}
-	if hasUser {
-		checkUsername(&v, username)
-	}
-	if hasPass {
-		checkPassword(&v, password)
-	}
-	var mode domain.TLSMode
-	if hasMode {
-		m, err := domain.ParseTLSMode(tlsMode)
-		if err != nil {
-			v.add("/tls_mode", codeInvalidFormat, "Must be one of verify, ca, fingerprint, insecure.")
+	if !v.ok() { // report the problems of the values together with the nulls
+		for _, f := range a.admin.ValidateDeviceChanges(ch) {
+			v.add(f.Field, f.Code, "%s", f.Detail)
 		}
-		mode = m
-	}
-	if hasCA && caPEM != "" {
-		checkCAPEM(&v, caPEM)
-	}
-	if hasFP && fingerprint != "" {
-		fp, ok := normalizeFingerprint(fingerprint)
-		if !ok {
-			v.add("/fingerprint", codeInvalidFormat, "Must be a SHA-256 fingerprint: 32 hex bytes, optionally separated by colons.")
-		}
-		fingerprint = fp
-	}
-	if !v.ok() {
 		return v.err()
 	}
-
-	ctx := r.Context()
-	var updated domain.Device
-	err = a.st.WithTx(ctx, func(tx store.Repos) error {
-		d, err := tx.Devices().Get(ctx, id)
-		if err != nil {
-			return err
-		}
-		meta := map[string]string{}
-		if hasName {
-			d.Name = name
-			meta["name"] = name
-		}
-		if hasURL {
-			d.BaseURL = baseURL
-			meta["base_url"] = baseURL
-		}
-		if hasUser {
-			d.Username = username
-			meta["username"] = "changed"
-		}
-		if hasMode {
-			d.TLSMode = mode
-			meta["tls_mode"] = string(mode)
-		}
-		if hasCA {
-			d.CAPEM = caPEM
-			meta["ca_pem"] = "changed"
-		}
-		if hasFP {
-			d.Fingerprint = fingerprint
-			meta["fingerprint"] = "changed"
-		}
-		if hasEnabled {
-			d.Enabled = enabled
-			meta["enabled"] = fmt.Sprint(enabled)
-		}
-		// The merged result must be consistent (contract: 422).
-		var cv validation
-		checkTLSConsistency(&cv, d.TLSMode, d.CAPEM, d.Fingerprint)
-		if err := cv.err(); err != nil {
-			return err
-		}
-		d.PasswordEnc = nil // nil keeps the stored password
-		if hasPass {
-			if d.PasswordEnc, err = a.creds.Encrypt(d.ID, password); err != nil {
-				return fmt.Errorf("encrypt device password: %w", err)
-			}
-			meta["password"] = "changed"
-		}
-		if err := tx.Devices().Update(ctx, d); err != nil {
-			return err
-		}
-		updated = d
-		return a.audit(ctx, tx, actorOf(p), domain.AuditDeviceUpdate, "device:"+string(id), meta)
-	})
-	var ae *apiError
-	switch {
-	case errors.As(err, &ae):
-		return ae
-	case errors.Is(err, domain.ErrNotFound):
-		return notFound("Device")
-	case errors.Is(err, domain.ErrConflict):
-		return conflict(conflictDeviceDup)
-	case err != nil:
+	d, err := a.admin.UpdateDevice(r.Context(), actorOf(p), id, ch)
+	if e := adminProblem(err, "Device", conflictDeviceDup); e != nil {
+		return e
+	}
+	if err != nil {
 		return fmt.Errorf("update device: %w", err)
 	}
-	a.reload(ctx)
-	writeJSON(w, http.StatusOK, toDeviceDTO(updated))
+	writeJSON(w, http.StatusOK, toDeviceDTO(d))
 	return nil
 }
 
@@ -492,22 +209,13 @@ func (a *API) deleteDevice(w http.ResponseWriter, r *http.Request, p auth.Princi
 	if err != nil {
 		return err
 	}
-	ctx := r.Context()
-	err = a.st.WithTx(ctx, func(tx store.Repos) error {
-		if err := tx.Devices().Delete(ctx, id); err != nil {
-			return err
-		}
-		return a.audit(ctx, tx, actorOf(p), domain.AuditDeviceDelete, "device:"+string(id), nil)
-	})
-	switch {
-	case errors.Is(err, domain.ErrNotFound):
-		return notFound("Device")
-	case errors.Is(err, domain.ErrConflict):
-		return conflict(conflictDeviceMsg)
-	case err != nil:
+	err = a.admin.DeleteDevice(r.Context(), actorOf(p), id)
+	if e := adminProblem(err, "Device", conflictDeviceMsg); e != nil {
+		return e
+	}
+	if err != nil {
 		return fmt.Errorf("delete device: %w", err)
 	}
-	a.reload(ctx)
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
@@ -547,14 +255,6 @@ type testResultDTO struct {
 	Error           *testErrorDTO `json:"error"`
 }
 
-// probeCodes are the error codes DeviceTestResult may carry.
-var probeCodes = map[domain.ErrorCode]bool{
-	domain.CodeUnreachable: true, domain.CodeTimeout: true, domain.CodeTLSError: true, domain.CodeAuthFailed: true,
-	domain.CodeInsufficientPolicy: true, domain.CodeUnsupportedVersion: true, domain.CodeUnexpectedResponse: true,
-}
-
-const maxProbeDetail = 300
-
 // testDevice implements POST /devices/{id}/test. A failed test is a 200 with
 // ok=false; the device and its channels are not changed.
 func (a *API) testDevice(w http.ResponseWriter, r *http.Request, _ auth.Principal) error {
@@ -562,97 +262,38 @@ func (a *API) testDevice(w http.ResponseWriter, r *http.Request, _ auth.Principa
 	if err != nil {
 		return err
 	}
-	ctx := r.Context()
-	d, err := a.deviceByID(ctx, id)
+	tr, err := a.admin.TestDevice(r.Context(), id)
+	if e := adminProblem(err, "Device", ""); e != nil {
+		return e
+	}
 	if err != nil {
-		return err
+		return fmt.Errorf("test device: %w", err)
 	}
-	chans, err := a.st.Channels().List(ctx, store.ChannelFilter{DeviceID: d.ID})
-	if err != nil {
-		return fmt.Errorf("list channels of device: %w", err)
+	res := testResultDTO{
+		OK: tr.OK, CheckedAt: formatTime(tr.CheckedAt), LTEPorts: []testPortDTO{},
+		RouterOSVersion: nullableString(tr.RouterOSVersion), BoardName: nullableString(tr.BoardName),
 	}
-
-	res := testResultDTO{CheckedAt: formatTime(a.clk.Now()), LTEPorts: []testPortDTO{}}
-	fail := func(code domain.ErrorCode, detail string) error {
-		res.Error = &testErrorDTO{Code: string(code), Detail: truncateRunes(detail, maxProbeDetail)}
-		writeJSON(w, http.StatusOK, res)
-		return nil
+	if tr.Latency != nil {
+		l := tr.Latency.Milliseconds()
+		res.LatencyMS = &l
 	}
-
-	cfg, err := a.creds.ConnectorConfig(d)
-	if err != nil {
-		a.log.Warn("device password cannot be decrypted", slog.String("device_id", string(d.ID)), slog.Any("error", err))
-		return fail(domain.CodeUnexpectedResponse, "The stored password cannot be decrypted; was the secret key changed?")
+	if tr.TLS != nil {
+		res.TLS = &testTLSDTO{Mode: tr.TLS.Mode, Verified: tr.TLS.Verified, PeerFingerprint: nullableString(tr.TLS.PeerFingerprint)}
 	}
-	cfg.Timeout = a.opts.ProbeTimeout
-	conn, err := a.conns.New(ctx, cfg)
-	if err != nil {
-		return fail(domain.CodeUnexpectedResponse, scrub("Connector cannot be created: "+err.Error(), cfg.Password))
-	}
-	defer func() { _ = conn.Close() }()
-
-	pctx, cancel := context.WithTimeout(ctx, a.opts.ProbeTimeout)
-	defer cancel()
-	start := a.clk.Now()
-	probe, perr := conn.Probe(pctx)
-	latency := a.clk.Now().Sub(start).Milliseconds()
-
-	res.OK = perr == nil
-	res.RouterOSVersion = nullableString(probe.RouterOSVersion)
-	res.BoardName = nullableString(probe.BoardName)
-	if probe.TLS != nil {
-		res.TLS = &testTLSDTO{
-			Mode: string(probe.TLS.Mode), Verified: probe.TLS.Verified,
-			PeerFingerprint: nullableString(formatFingerprint(probe.TLS.PeerFingerprint)),
-		}
-	}
-	for _, pi := range probe.Ports {
+	for _, pi := range tr.Ports {
 		pd := testPortDTO{
-			Port: pi.Port, Running: pi.Health.Running, Operator: nullableString(pi.Health.Operator),
-			Registration: nullableString(pi.Health.Registration), Signal: toSignalDTO(pi.Health.Signal),
+			Port: pi.Port, Running: pi.Running, Operator: nullableString(pi.Operator),
+			Registration: nullableString(pi.Registration), Signal: toSignalDTO(pi.Signal),
 		}
-		for _, c := range chans {
-			if c.Port == pi.Port {
-				cid := string(c.ID)
-				pd.ChannelID = &cid
-				break
-			}
+		if pi.ChannelID != "" {
+			cid := string(pi.ChannelID)
+			pd.ChannelID = &cid
 		}
 		res.LTEPorts = append(res.LTEPorts, pd)
 	}
-	if perr == nil {
-		l := latency
-		res.LatencyMS = &l
-		writeJSON(w, http.StatusOK, res)
-		return nil
+	if tr.Error != nil {
+		res.Error = &testErrorDTO{Code: string(tr.Error.Code), Detail: tr.Error.Detail}
 	}
-	code := probeErrorCode(pctx, perr)
-	if code != domain.CodeUnreachable && code != domain.CodeTimeout {
-		l := latency
-		res.LatencyMS = &l
-	}
-	return fail(code, scrub(perr.Error(), cfg.Password))
-}
-
-// probeErrorCode classifies a failed probe for DeviceTestResult.error.code.
-func probeErrorCode(ctx context.Context, err error) domain.ErrorCode {
-	if c := domain.CodeOf(err); probeCodes[c] {
-		return c
-	}
-	switch {
-	case domain.KindOf(err) == domain.KindAuth:
-		return domain.CodeAuthFailed
-	case ctx.Err() != nil:
-		return domain.CodeTimeout
-	}
-	return domain.CodeUnexpectedResponse
-}
-
-// scrub removes secret from s; connectors do not put passwords into errors,
-// this is the last line of defence.
-func scrub(s, secret string) string {
-	if len(secret) >= minScrubbedSecret {
-		s = strings.ReplaceAll(s, secret, "***")
-	}
-	return s
+	writeJSON(w, http.StatusOK, res)
+	return nil
 }

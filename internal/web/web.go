@@ -10,10 +10,16 @@
 //	render.go       templates, View, Render/RenderBlock, error pages
 //	nav.go          navigation items and their minimum roles
 //	pages_auth.go   login, logout, first-run wizard, language switch
-//	pages_soon.go   registerPages: placeholders (T32) and the real pages
+//	pages.go        registerPages: one register function per page file
 //	pages_dashboard.go  dashboard and its htmx fragment (T31)
 //	pages_send.go   send form, live segment preview (T31)
 //	pages_messages.go   message list, details, cancel (T31)
+//	pages_admin.go  helpers of the admin pages: field errors, confirmation page
+//	pages_devices.go    devices: list, form, connection test, pin fingerprint (T32)
+//	pages_channels.go   channels: edit, toggle, check now, delete (T32)
+//	pages_tokens.go     API tokens, one-time display of the secret (T32)
+//	pages_users.go      users, roles, own profile and password (T32)
+//	pages_audit.go      audit log with filters (T32)
 //	format.go       helpers shared by the pages (status labels, signal)
 //	security.go     security headers (CSP, X-Frame-Options, ...)
 //	static.go       /static/ (embedded assets, ETag, immutable cache)
@@ -28,7 +34,7 @@
 //     (whole page) or [Server.RenderBlock] (a named template, for htmx
 //     fragments). Read the CSRF token from the View, never build it by hand.
 //  2. Write templates/pages/<name>.html. It defines the templates "title" and
-//     "content" (see templates/pages/soon.html); inside, `.` is the [View],
+//     "content" (see templates/pages/confirm.html); inside, `.` is the [View],
 //     `.Data` is what the handler passed. Use {{t "key"}} for every text and
 //     {{.CSRF}} in a hidden "csrf_token" field of every POST form. Extra
 //     named templates defined in the file (for htmx fragments) are available
@@ -36,16 +42,23 @@
 //  3. Add the Polish and English texts to i18n/pl.json and i18n/en.json (the
 //     tests fail when a language lacks a key or a template uses an unknown
 //     key).
-//  4. Register the route in registerPages (pages_soon.go), replacing the
-//     placeholder for the same pattern (T31 did this for /, /send and
-//     /messages; T32 replaces the rest):
-//     s.Handle("GET /messages", domain.RoleViewer, handler).
+//  4. Register the route from a register function called by registerPages
+//     (pages.go): s.Handle("GET /messages", domain.RoleViewer, handler).
+//     Registering a pattern again replaces the earlier handler.
 //     The route is wrapped in [auth.Service.RequireSession] (anonymous users
 //     are redirected to the login page, or get HX-Redirect for htmx) and a
 //     role check that answers 403 with a localised page. State-changing
 //     routes (POST, PUT, PATCH, DELETE) are covered by [auth.Service.CSRF]
 //     automatically; htmx requests get the X-CSRF-Token header from app.js.
-//  5. Navigation entries live in nav.go.
+//  5. Navigation entries live in nav.go; the own profile (/profile, any
+//     role) is linked from the user name in the header.
+//
+// Pages that change devices and channels use [admin.Service], the one the
+// REST API uses; users and tokens go through [auth.Service]. Forms are plain
+// POSTs answered by a redirect (success) or the page again with the typed
+// values and a message per field (the password fields are always empty).
+// htmx only swaps fragments (RenderBlock): the device test result, the
+// pre-filled settings form of "pin this fingerprint", the channel check.
 //
 // Content-Security-Policy forbids inline scripts, inline styles and
 // javascript: URLs: put scripts in static/ and styles in static/app.css, and
@@ -61,7 +74,9 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/m4drak/tikker/internal/admin"
 	"github.com/m4drak/tikker/internal/auth"
+	"github.com/m4drak/tikker/internal/clock"
 	"github.com/m4drak/tikker/internal/domain"
 	"github.com/m4drak/tikker/internal/health"
 	"github.com/m4drak/tikker/internal/queue"
@@ -95,6 +110,11 @@ type Options struct {
 	// Sending sends and cancels messages and previews texts; the API uses
 	// the same service (required).
 	Sending *sending.Service
+	// Admin administers devices and channels; the API uses the same service
+	// (required).
+	Admin *admin.Service
+	// Clock is the time source of the admin pages (default: system clock).
+	Clock clock.Clock
 	// Queue and Health feed the dashboard (required).
 	Queue  QueueStats
 	Health HealthSnapshot
@@ -113,6 +133,8 @@ type Server struct {
 	auth      *auth.Service
 	st        store.Store
 	send      *sending.Service
+	admin     *admin.Service
+	clk       clock.Clock
 	queue     QueueStats
 	health    HealthSnapshot
 	log       *slog.Logger
@@ -140,7 +162,7 @@ func New(opts Options) (*Server, error) {
 		name string
 		nil  bool
 	}{
-		{"Auth", opts.Auth == nil}, {"Store", opts.Store == nil}, {"Sending", opts.Sending == nil},
+		{"Auth", opts.Auth == nil}, {"Store", opts.Store == nil}, {"Sending", opts.Sending == nil}, {"Admin", opts.Admin == nil},
 		{"Queue", opts.Queue == nil}, {"Health", opts.Health == nil},
 	} {
 		if m.nil {
@@ -151,6 +173,8 @@ func New(opts Options) (*Server, error) {
 		auth:      opts.Auth,
 		st:        opts.Store,
 		send:      opts.Sending,
+		admin:     opts.Admin,
+		clk:       opts.Clock,
 		queue:     opts.Queue,
 		health:    opts.Health,
 		log:       opts.Logger,
@@ -160,6 +184,9 @@ func New(opts Options) (*Server, error) {
 	}
 	if s.log == nil {
 		s.log = slog.Default()
+	}
+	if s.clk == nil {
+		s.clk = clock.System()
 	}
 	if s.sourceURL == "" {
 		s.sourceURL = DefaultSourceURL

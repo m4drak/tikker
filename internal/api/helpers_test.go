@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/m4drak/tikker/internal/admin"
 	"github.com/m4drak/tikker/internal/auth"
 	"github.com/m4drak/tikker/internal/clock"
 	"github.com/m4drak/tikker/internal/connector"
@@ -490,3 +491,21 @@ func selfSignedPEM(t *testing.T) string {
 
 // fakePolicies builds router policies; rest=false makes every call a 401.
 func fakePolicies(rest bool) fake.Policies { return fake.Policies{RESTAPI: rest, API: true} }
+
+// rebuildAdmin recreates the admin service from the (possibly replaced)
+// collaborators of the API under test.
+func (e *testEnv) rebuildAdmin(reloader admin.ChannelReloader) {
+	e.t.Helper()
+	if reloader == nil {
+		reloader = e.reloader
+	}
+	var err error
+	e.api.admin, err = admin.New(admin.Deps{
+		Store: e.st, Credentials: e.api.creds, Connectors: e.api.conns, Reloader: reloader, Health: e.api.hv,
+		Clock: e.clk, Logger: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Options: admin.Options{AllowedHTTPHosts: e.api.opts.AllowedHTTPHosts, ProbeTimeout: e.api.opts.ProbeTimeout},
+	})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+}
