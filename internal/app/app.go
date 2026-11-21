@@ -40,6 +40,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/m4drak/tikker/internal/admin"
 	"github.com/m4drak/tikker/internal/api"
 	"github.com/m4drak/tikker/internal/auth"
 	"github.com/m4drak/tikker/internal/clock"
@@ -354,8 +355,16 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	if err != nil {
 		return nil, fmt.Errorf("sending: %w", err)
 	}
+	adm, err := admin.New(admin.Deps{
+		Store: a.store, Credentials: creds, Connectors: reg, Reloader: a.sync, Health: a.health, Checker: a.health,
+		Clock: a.clk, Logger: a.log,
+		Options: admin.Options{AllowedHTTPHosts: a.cfg.AllowedHTTPHosts},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("admin: %w", err)
+	}
 	apiH, err := api.New(api.Deps{
-		Store: a.store, Auth: a.auth, Dispatcher: a.disp, Reloader: a.sync, Capabilities: a.sync, Sending: snd,
+		Store: a.store, Auth: a.auth, Dispatcher: a.disp, Reloader: a.sync, Capabilities: a.sync, Sending: snd, Admin: adm,
 		Health: a.health, Credentials: creds, Connectors: reg,
 		Clock: a.clk, Logger: a.log,
 		Options: api.Options{
@@ -383,7 +392,7 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	}
 	panel, err := web.New(web.Options{
 		Auth: a.auth, Logger: a.log, BaseURL: a.cfg.BaseURL,
-		Store: a.store, Sending: snd, Queue: a.disp, Health: a.health,
+		Store: a.store, Sending: snd, Admin: adm, Clock: a.clk, Queue: a.disp, Health: a.health,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("web panel: %w", err)

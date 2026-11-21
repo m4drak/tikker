@@ -1,0 +1,90 @@
+{{- /*
+SPDX-FileCopyrightText: 2026 The tikker Authors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/ -}}
+{{define "title"}}{{t "nav.tokens"}}{{end}}
+{{define "content" -}}
+<h1>{{t "nav.tokens"}}</h1>
+{{- if eq .Data.Notice "revoked"}}
+<p class="notice ok" role="status">{{t "tok.notice.revoked"}}</p>
+{{- end}}
+
+{{- if .Data.Rows}}
+<div class="overflow-auto">
+  <table class="striped compact" id="tokens">
+    <thead>
+      <tr>
+        <th scope="col">{{t "tok.col.name"}}</th>
+        <th scope="col">{{t "tok.col.prefix"}}</th>
+        <th scope="col">{{t "tok.col.owner"}}</th>
+        <th scope="col">{{t "tok.col.scopes"}}</th>
+        <th scope="col">{{t "tok.col.expires"}}</th>
+        <th scope="col">{{t "tok.col.last_used"}}</th>
+        <th scope="col">{{t "dev.col.actions"}}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{- range .Data.Rows}}
+      <tr>
+        <td>{{.Name}}</td>
+        <td><code>{{.Prefix}}</code></td>
+        <td>{{if .Owner}}{{.Owner}}{{else}}-{{end}}</td>
+        <td>{{range .Scopes}}<span class="tag">{{t .}}</span> {{end}}</td>
+        <td class="nowrap">{{if .Expires.IsZero}}{{t "tok.never"}}{{else}}{{ts .Expires}}{{if .Expired}} <span class="badge state-down">{{t "tok.expired"}}</span>{{end}}{{end}}</td>
+        <td class="nowrap">{{if .LastUsed.IsZero}}{{t "tok.unused"}}{{else}}{{ts .LastUsed}}{{end}}</td>
+        <td><a href="/tokens/{{.ID}}/delete" role="button" class="secondary outline">{{t "tok.revoke"}}</a></td>
+      </tr>
+      {{- end}}
+    </tbody>
+  </table>
+</div>
+{{- else}}
+<p>{{t "tok.empty"}}</p>
+{{- end}}
+
+<section aria-labelledby="new-token-heading">
+  <h2 id="new-token-heading">{{t "tok.new"}}</h2>
+  <form method="post" action="/tokens">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+
+    <label for="tok-name">{{t "tok.col.name"}}</label>
+    <input id="tok-name" name="name" type="text" maxlength="64" value="{{.Data.Form.Name}}" autocomplete="off" required
+      {{- if .Data.Errors.name}} aria-invalid="true" aria-describedby="tok-name-error"{{end}}>
+    {{- if .Data.Errors.name}}
+    <small id="tok-name-error" class="field-error" role="alert">{{.Data.Errors.name}}</small>
+    {{- end}}
+
+    <label for="tok-owner">{{t "tok.col.owner"}}</label>
+    <select id="tok-owner" name="owner"{{if .Data.Errors.owner}} aria-invalid="true" aria-describedby="tok-owner-error"{{end}}>
+      {{- range .Data.Owners}}
+      <option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+      {{- end}}
+    </select>
+    {{- if .Data.Errors.owner}}
+    <small id="tok-owner-error" class="field-error" role="alert">{{.Data.Errors.owner}}</small>
+    {{- end}}
+
+    <fieldset aria-describedby="tok-scopes-hint">
+      <legend>{{t "tok.col.scopes"}}</legend>
+      {{- range .Data.Scopes}}
+      <label><input type="checkbox" name="scope" value="{{.Value}}"{{if .Checked}} checked{{end}}> {{t .LabelKey}}</label>
+      {{- end}}
+      {{- if .Data.Errors.scopes}}
+      <small class="field-error" role="alert">{{.Data.Errors.scopes}}</small>
+      {{- end}}
+      <small id="tok-scopes-hint" class="muted">{{t "tok.scopes_hint"}}</small>
+    </fieldset>
+
+    <label for="tok-expires">{{t "tok.expires"}}</label>
+    <input id="tok-expires" name="expires" type="date" value="{{.Data.Form.Expires}}"
+      {{- if .Data.Errors.expires_at}} aria-invalid="true" aria-describedby="tok-expires-error"{{else}} aria-describedby="tok-expires-hint"{{end}}>
+    {{- if .Data.Errors.expires_at}}
+    <small id="tok-expires-error" class="field-error" role="alert">{{.Data.Errors.expires_at}}</small>
+    {{- else}}
+    <small id="tok-expires-hint" class="muted">{{t "tok.expires_hint"}}</small>
+    {{- end}}
+
+    <button type="submit">{{t "tok.create"}}</button>
+  </form>
+</section>
+{{- end}}

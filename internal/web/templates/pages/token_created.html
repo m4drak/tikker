@@ -1,0 +1,17 @@
+{{- /*
+SPDX-FileCopyrightText: 2026 The tikker Authors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/ -}}
+{{define "title"}}{{t "tok.created.title"}}{{end}}
+{{define "content" -}}
+<h1>{{t "tok.created.title"}}</h1>
+<p class="notice warn" role="alert" id="token-warning">{{t "tok.created.warning"}}</p>
+<article>
+  <p>{{t "tok.created.for" .Data.Name}}</p>
+  <pre class="body-text"><code id="token-secret">{{.Data.Secret}}</code></pre>
+  <p class="muted"><small>{{t "tok.created.usage"}}</small></p>
+  <footer class="actions">
+    <a href="/tokens" role="button">{{t "tok.created.done"}}</a>
+  </footer>
+</article>
+{{- end}}

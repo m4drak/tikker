@@ -4,6 +4,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -15,12 +16,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/m4drak/tikker/internal/admin"
 	"github.com/m4drak/tikker/internal/auth"
 	"github.com/m4drak/tikker/internal/clock"
 	"github.com/m4drak/tikker/internal/connector"
+	"github.com/m4drak/tikker/internal/connector/fake"
+	"github.com/m4drak/tikker/internal/connector/routeros"
 	"github.com/m4drak/tikker/internal/domain"
 	"github.com/m4drak/tikker/internal/health"
 	"github.com/m4drak/tikker/internal/queue"
+	"github.com/m4drak/tikker/internal/secrets"
 	"github.com/m4drak/tikker/internal/sending"
 	"github.com/m4drak/tikker/internal/store/sqlite"
 )
@@ -43,6 +48,35 @@ type env struct {
 	queue *fakeQueue
 	hs    *fakeHealth
 	wake  *fakeNotifier
+
+	admin   *admin.Service
+	router  *fake.Server // the fake RouterOS behind the devices of the tests
+	url     string       // its base URL
+	reloads *countReloader
+	checker *fakeChecker
+}
+
+const (
+	routerUser = "tikker"
+	routerPass = "r0uter-Secret-Pa55"
+)
+
+type countReloader struct{ n int }
+
+func (c *countReloader) Reload(context.Context) error { c.n++; return nil }
+
+// fakeChecker answers CheckNow with a canned status.
+type fakeChecker struct {
+	status health.ChannelStatus
+	err    error
+	calls  int
+}
+
+func (f *fakeChecker) CheckNow(_ context.Context, id domain.ID) (health.ChannelStatus, error) {
+	f.calls++
+	st := f.status
+	st.ChannelID = id
+	return st, f.err
 }
 
 // fakeCaps gives every channel the capabilities of a RouterOS modem (GSM-7
@@ -99,7 +133,27 @@ func newEnvSending(t *testing.T, so sending.Options, users map[string]domain.Rol
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts := Options{Logger: log, Store: st, Sending: snd, Queue: e.queue, Health: e.hs}
+	e.router = fake.New(fake.Options{User: routerUser, Password: routerPass, Ports: []string{"lte1", "lte2"}, Now: clk.Now})
+	e.url = e.router.Start()
+	t.Cleanup(e.router.Close)
+	reg := connector.NewRegistry()
+	if err := routeros.Register(reg, routeros.Options{Logger: log, Clock: clk}); err != nil {
+		t.Fatal(err)
+	}
+	ring, err := secrets.NewKeyring(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.reloads, e.checker = &countReloader{}, &fakeChecker{}
+	e.admin, err = admin.New(admin.Deps{
+		Store: st, Credentials: secrets.NewDeviceCredentials(ring), Connectors: reg, Reloader: e.reloads,
+		Checker: e.checker, Clock: clk, Logger: log,
+		Options: admin.Options{AllowedHTTPHosts: []string{"127.0.0.1"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{Logger: log, Store: st, Sending: snd, Admin: e.admin, Clock: clk, Queue: e.queue, Health: e.hs}
 	for _, m := range mods {
 		m(&opts, &acfg)
 	}

@@ -1,0 +1,50 @@
+{{- /*
+SPDX-FileCopyrightText: 2026 The tikker Authors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/ -}}
+{{define "title"}}{{t "usr.add"}}{{end}}
+{{define "content" -}}
+<h1>{{t "usr.add"}}</h1>
+<form method="post" action="/users">
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+
+  <label for="u-name">{{t "setup.username"}}</label>
+  <input id="u-name" name="username" type="text" maxlength="64" value="{{.Data.Username}}" autocomplete="off" autocapitalize="none" spellcheck="false" required
+    {{- if .Data.Errors.username}} aria-invalid="true" aria-describedby="u-name-error"{{else}} aria-describedby="u-name-hint"{{end}}>
+  {{- if .Data.Errors.username}}
+  <small id="u-name-error" class="field-error" role="alert">{{.Data.Errors.username}}</small>
+  {{- else}}
+  <small id="u-name-hint" class="muted">{{t "setup.username_hint"}}</small>
+  {{- end}}
+
+  <label for="u-role">{{t "usr.col.role"}}</label>
+  <select id="u-role" name="role"{{if .Data.Errors.role}} aria-invalid="true" aria-describedby="u-role-error"{{else}} aria-describedby="u-role-hint"{{end}}>
+    {{- range .Data.Roles}}
+    <option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+    {{- end}}
+  </select>
+  {{- if .Data.Errors.role}}
+  <small id="u-role-error" class="field-error" role="alert">{{.Data.Errors.role}}</small>
+  {{- else}}
+  <small id="u-role-hint" class="muted">{{t "usr.role_hint"}}</small>
+  {{- end}}
+
+  <label for="u-pass">{{t "setup.password"}}</label>
+  <input id="u-pass" name="password" type="password" value="" autocomplete="new-password" required
+    {{- if .Data.Errors.password}} aria-invalid="true" aria-describedby="u-pass-error"{{else}} aria-describedby="u-pass-hint"{{end}}>
+  {{- if .Data.Errors.password}}
+  <small id="u-pass-error" class="field-error" role="alert">{{.Data.Errors.password}}</small>
+  {{- else}}
+  <small id="u-pass-hint" class="muted">{{t "setup.password_hint"}}</small>
+  {{- end}}
+
+  <label for="u-confirm">{{t "setup.confirm"}}</label>
+  <input id="u-confirm" name="confirm" type="password" value="" autocomplete="new-password" required
+    {{- if .Data.Errors.confirm}} aria-invalid="true" aria-describedby="u-confirm-error"{{end}}>
+  {{- if .Data.Errors.confirm}}
+  <small id="u-confirm-error" class="field-error" role="alert">{{.Data.Errors.confirm}}</small>
+  {{- end}}
+
+  <button type="submit">{{t "usr.create"}}</button>
+</form>
+{{- end}}

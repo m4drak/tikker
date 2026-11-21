@@ -384,34 +384,3 @@ func TestDeviceDeleteWithActiveMessages(t *testing.T) {
 		t.Fatal(r)
 	}
 }
-
-func TestHostAllowlist(t *testing.T) {
-	if _, err := parseHostAllowlist([]string{"10.0.0.0/33"}); err == nil {
-		t.Error("invalid prefix accepted")
-	}
-	l, err := parseHostAllowlist([]string{"", "172.17.0.1", "192.168.0.0/16", "Gateway.Local", "::1", "fd00::/8"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for host, want := range map[string]bool{
-		"172.17.0.1": true, "172.17.0.2": false, "192.168.5.5": true, "192.169.0.1": false, "gateway.local": true,
-		"other.local": false, "::1": true, "fd12::1": true, "fe80::1": false, "::ffff:172.17.0.1": true, "fe80::1%eth0": false,
-		"": false,
-	} {
-		if got := l.allows(host); got != want {
-			t.Errorf("allows(%q) = %v, want %v", host, got, want)
-		}
-	}
-}
-
-func TestFormatFingerprint(t *testing.T) {
-	if got := formatFingerprint(fpLower); got != fpA {
-		t.Errorf("got %s", got)
-	}
-	if formatFingerprint("") != "" || formatFingerprint(fpA) != fpA {
-		t.Error("format is not idempotent")
-	}
-	if _, ok := normalizeFingerprint("nope"); ok {
-		t.Error("accepted garbage")
-	}
-}

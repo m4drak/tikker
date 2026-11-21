@@ -1,0 +1,71 @@
+{{- /*
+SPDX-FileCopyrightText: 2026 The tikker Authors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/ -}}
+{{define "title"}}{{t "nav.audit"}}{{end}}
+{{define "content" -}}
+<h1>{{t "nav.audit"}}</h1>
+<form method="get" action="/audit" class="filters" aria-label="{{t "audit.filters"}}">
+  <div class="grid">
+    <label for="a-actor">{{t "audit.col.actor"}}
+      <select id="a-actor" name="actor">
+        {{- range .Data.Actors}}
+        <option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{if .LabelKey}}{{t .LabelKey}}{{else}}{{.Label}}{{end}}</option>
+        {{- end}}
+      </select>
+    </label>
+    <label for="a-action">{{t "audit.col.action"}}
+      <select id="a-action" name="action">
+        {{- range .Data.Actions}}
+        <option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{if .LabelKey}}{{t .LabelKey}}{{else}}{{.Label}}{{end}}</option>
+        {{- end}}
+      </select>
+    </label>
+    <label for="a-since">{{t "messages.since"}}
+      <input id="a-since" name="since" type="date" value="{{.Data.Filter.Since}}">
+    </label>
+    <label for="a-until">{{t "messages.until"}}
+      <input id="a-until" name="until" type="date" value="{{.Data.Filter.Until}}">
+    </label>
+  </div>
+  <div class="actions">
+    <button type="submit">{{t "messages.apply"}}</button>
+    {{- if .Data.Filtered}}
+    <a href="/audit" role="button" class="secondary outline">{{t "messages.reset"}}</a>
+    {{- end}}
+  </div>
+</form>
+
+{{- if .Data.Rows}}
+<div class="overflow-auto">
+  <table class="striped compact" id="audit">
+    <thead>
+      <tr>
+        <th scope="col">{{t "messages.col.time"}}</th>
+        <th scope="col">{{t "audit.col.actor"}}</th>
+        <th scope="col">{{t "audit.col.action"}}</th>
+        <th scope="col">{{t "audit.col.target"}}</th>
+        <th scope="col">{{t "audit.col.details"}}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{- range .Data.Rows}}
+      <tr>
+        <td class="nowrap">{{ts .At}}</td>
+        <td>{{.Actor}}</td>
+        <td><code>{{.Action}}</code></td>
+        <td>{{if .Target}}{{.Target}}{{else}}-{{end}}</td>
+        <td class="body-cell">{{range .Meta}}<span class="tag">{{.}}</span> {{else}}-{{end}}</td>
+      </tr>
+      {{- end}}
+    </tbody>
+  </table>
+</div>
+<nav class="pager" aria-label="{{t "messages.pager"}}">
+  {{- if .Data.Paged}}<a href="{{.Data.FirstLink}}">{{t "messages.first"}}</a>{{end}}
+  {{- if .Data.NextLink}}<a href="{{.Data.NextLink}}" rel="next">{{t "messages.next"}}</a>{{end}}
+</nav>
+{{- else}}
+<p>{{t "audit.empty"}}</p>
+{{- end}}
+{{- end}}

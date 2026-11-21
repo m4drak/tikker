@@ -280,7 +280,7 @@ func (failReloader) Reload(context.Context) error { return errors.New("reload fa
 
 func TestReloadFailureDoesNotFailRequest(t *testing.T) {
 	e := newEnv(t)
-	e.api.reld = failReloader{}
+	e.rebuildAdmin(failReloader{})
 	dev := e.req(http.MethodPost, devicesPath, e.adminTok, map[string]any{
 		"name": "d", "base_url": e.url, "username": "u", "password": "p",
 	})
@@ -319,32 +319,5 @@ func TestLimiterSweep(t *testing.T) {
 	l.take("fresh")
 	if n := len(l.buckets); n > 2 {
 		t.Errorf("%d buckets kept after the sweep", n)
-	}
-}
-
-func TestProbeErrorCode(t *testing.T) {
-	ctx := context.Background()
-	if c := probeErrorCode(ctx, domain.AuthError("x", errors.New("a"))); c != domain.CodeAuthFailed {
-		t.Errorf("auth -> %s", c)
-	}
-	if c := probeErrorCode(ctx, domain.WithCode(domain.Transient("x", errors.New("a")), domain.CodeTLSError)); c != domain.CodeTLSError {
-		t.Errorf("code kept -> %s", c)
-	}
-	if c := probeErrorCode(ctx, domain.WithCode(domain.Transient("x", errors.New("a")), "send_failed")); c != domain.CodeUnexpectedResponse {
-		t.Errorf("unknown code -> %s", c)
-	}
-	done, cancel := context.WithCancel(ctx)
-	cancel()
-	if c := probeErrorCode(done, errors.New("x")); c != domain.CodeTimeout {
-		t.Errorf("expired ctx -> %s", c)
-	}
-	if got := scrub("password hunter2 here", "hunter2"); strings.Contains(got, "hunter2") {
-		t.Errorf("scrub = %q", got)
-	}
-	if got := scrub("ab", "ab"); got != "ab" {
-		t.Errorf("short secrets are left alone: %q", got)
-	}
-	if truncateRunes("abcdef", 3) != "abc..." {
-		t.Error("string helpers")
 	}
 }

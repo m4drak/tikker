@@ -56,6 +56,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/m4drak/tikker/internal/admin"
 	"github.com/m4drak/tikker/internal/auth"
 	"github.com/m4drak/tikker/internal/clock"
 	"github.com/m4drak/tikker/internal/connector"
@@ -147,6 +148,11 @@ type Deps struct {
 	// the one it shares with the web panel.
 	Sending *sending.Service
 
+	// Admin administers devices and channels; when nil the API builds its
+	// own from the other dependencies and Options. The application passes
+	// the one it shares with the web panel.
+	Admin *admin.Service
+
 	Clock  clock.Clock        // default: system clock
 	IDs    domain.IDGenerator // default: ULIDs from Clock
 	Logger *slog.Logger       // default: slog.Default()
@@ -186,7 +192,7 @@ type API struct {
 	st    store.Store
 	auth  Auth
 	send  *sending.Service
-	reld  ChannelReloader
+	admin *admin.Service
 	hv    HealthView
 	creds Credentials
 	conns ConnectorFactory
@@ -195,10 +201,9 @@ type API struct {
 	log   *slog.Logger
 	opts  Options
 
-	limiter   *limiter
-	inflight  *inflight
-	mux       *http.ServeMux
-	allowHTTP hostAllowlist
+	limiter  *limiter
+	inflight *inflight
+	mux      *http.ServeMux
 }
 
 // New validates deps and returns the handler of /api/v1.
@@ -228,7 +233,7 @@ func newAPI(deps Deps) (*API, error) {
 		return nil, fmt.Errorf("api: missing dependencies: %s", strings.Join(missing, ", "))
 	}
 	a := &API{
-		st: deps.Store, auth: deps.Auth, reld: deps.Reloader,
+		st: deps.Store, auth: deps.Auth, admin: deps.Admin,
 		hv: deps.Health, creds: deps.Credentials, conns: deps.Connectors,
 		clk: deps.Clock, ids: deps.IDs, log: deps.Logger, opts: deps.Options,
 		inflight: newInflight(),
@@ -258,11 +263,17 @@ func newAPI(deps Deps) (*API, error) {
 	if _, err := sms.ParseStrategy(string(a.opts.LongMessageStrategy)); err != nil {
 		return nil, fmt.Errorf("api: %w", err)
 	}
-	httpAllow, err := parseHostAllowlist(a.opts.AllowedHTTPHosts)
-	if err != nil {
-		return nil, fmt.Errorf("api: AllowedHTTPHosts: %w", err)
+	var err error
+	if a.admin == nil {
+		a.admin, err = admin.New(admin.Deps{
+			Store: a.st, Credentials: a.creds, Connectors: a.conns, Reloader: deps.Reloader, Health: deps.Health,
+			Clock: a.clk, IDs: a.ids, Logger: a.log,
+			Options: admin.Options{AllowedHTTPHosts: a.opts.AllowedHTTPHosts, ProbeTimeout: a.opts.ProbeTimeout},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("api: %w", err)
+		}
 	}
-	a.allowHTTP = httpAllow
 	if a.send = deps.Sending; a.send == nil {
 		a.send, err = sending.New(sending.Deps{
 			Store: a.st, Capabilities: deps.Capabilities, Notifier: deps.Dispatcher, Clock: a.clk, IDs: a.ids,
@@ -418,26 +429,3 @@ func (a *API) notFoundOrMethod(w http.ResponseWriter, r *http.Request) {
 
 // actorOf is the actor recorded for audit entries and message authorship.
 func actorOf(p auth.Principal) domain.Actor { return p.Actor() }
-
-// audit appends an audit entry inside the transaction tx.
-func (a *API) audit(ctx context.Context, tx store.Repos, actor domain.Actor, action domain.AuditAction, target string, meta map[string]string) error {
-	return tx.Audit().Append(ctx, domain.AuditLog{
-		ID: a.ids.NewID(), Actor: actor, Action: action, Target: target, Meta: meta, At: a.clk.Now(),
-	})
-}
-
-// Audit actions of the API beyond the constants of the domain package.
-const (
-	auditChannelCreate domain.AuditAction = "channel.create"
-	auditChannelDelete domain.AuditAction = "channel.delete"
-)
-
-// reload asks the reloader to rebuild its state after a committed change. The
-// request has succeeded at that point, so a failure is only logged.
-func (a *API) reload(ctx context.Context) {
-	// The request context may end right after the response; the reload
-	// belongs to the committed change and must not be cut short.
-	if err := a.reld.Reload(context.WithoutCancel(ctx)); err != nil {
-		a.log.Error("reloading channels after a change failed", slog.Any("error", err))
-	}
-}

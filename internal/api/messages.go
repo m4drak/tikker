@@ -40,13 +40,6 @@ type batchRequest struct {
 	Messages []sendRequest `json:"messages"`
 }
 
-// validateTags checks Tags (schema Tags and Tag).
-func validateTags(v *validation, field string, tags []string) {
-	for _, e := range sending.ValidateTags(field, tags) {
-		v.add(e.Field, e.Code, "%s", e.Detail)
-	}
-}
-
 // planOne validates one request, selects channels, plans the text and returns
 // the messages (one, or several parts) to enqueue (package sending). pointer
 // is the JSON pointer of the request inside the body ("" for POST /messages,

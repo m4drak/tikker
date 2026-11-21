@@ -1,0 +1,43 @@
+{{- /*
+SPDX-FileCopyrightText: 2026 The tikker Authors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/ -}}
+{{define "title"}}{{t "profile.title"}}{{end}}
+{{define "content" -}}
+<h1>{{t "profile.title"}}</h1>
+<p class="muted">{{.User.Username}} &middot; {{.RoleLabel}}</p>
+{{- if eq .Data.Notice "password_changed"}}
+<p class="notice ok" role="status">{{t "profile.notice.changed"}}</p>
+{{- end}}
+<section aria-labelledby="pw-heading">
+  <h2 id="pw-heading">{{t "profile.password"}}</h2>
+  <form method="post" action="/profile/password">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+
+    <label for="p-current">{{t "profile.current"}}</label>
+    <input id="p-current" name="current" type="password" value="" autocomplete="current-password" required
+      {{- if .Data.Errors.current}} aria-invalid="true" aria-describedby="p-current-error"{{end}}>
+    {{- if .Data.Errors.current}}
+    <small id="p-current-error" class="field-error" role="alert">{{.Data.Errors.current}}</small>
+    {{- end}}
+
+    <label for="p-new">{{t "usr.new_password"}}</label>
+    <input id="p-new" name="password" type="password" value="" autocomplete="new-password" required
+      {{- if .Data.Errors.password}} aria-invalid="true" aria-describedby="p-new-error"{{else}} aria-describedby="p-new-hint"{{end}}>
+    {{- if .Data.Errors.password}}
+    <small id="p-new-error" class="field-error" role="alert">{{.Data.Errors.password}}</small>
+    {{- else}}
+    <small id="p-new-hint" class="muted">{{t "setup.password_hint"}}</small>
+    {{- end}}
+
+    <label for="p-confirm">{{t "setup.confirm"}}</label>
+    <input id="p-confirm" name="confirm" type="password" value="" autocomplete="new-password" required
+      {{- if .Data.Errors.confirm}} aria-invalid="true" aria-describedby="p-confirm-error"{{end}}>
+    {{- if .Data.Errors.confirm}}
+    <small id="p-confirm-error" class="field-error" role="alert">{{.Data.Errors.confirm}}</small>
+    {{- end}}
+
+    <button type="submit">{{t "profile.change"}}</button>
+  </form>
+</section>
+{{- end}}

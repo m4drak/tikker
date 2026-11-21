@@ -1,0 +1,21 @@
+{{- /*
+SPDX-FileCopyrightText: 2026 The tikker Authors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/ -}}
+{{define "title"}}{{.Data.Heading}}{{end}}
+{{define "content" -}}
+<h1>{{.Data.Heading}}</h1>
+{{- if .Data.Error}}
+<p class="notice" role="alert" id="confirm-error">{{.Data.Error}}</p>
+{{- end}}
+<article>
+  <p>{{.Data.Text}}</p>
+  <footer class="actions">
+    <form method="post" action="{{.Data.Action}}">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <button type="submit" class="danger">{{.Data.Button}}</button>
+    </form>
+    <a href="{{.Data.Back}}" role="button" class="secondary outline">{{t "common.cancel"}}</a>
+  </footer>
+</article>
+{{- end}}

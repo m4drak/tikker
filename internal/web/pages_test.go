@@ -173,11 +173,12 @@ func mustNotContain(t *testing.T, what, body string, nots ...string) {
 
 func TestNewRequiresDependencies(t *testing.T) {
 	e := newEnv(t, allRoles)
-	base := Options{Auth: e.svc, Store: e.st, Sending: e.srv.send, Queue: e.queue, Health: e.hs}
+	base := Options{Auth: e.svc, Store: e.st, Sending: e.srv.send, Admin: e.admin, Queue: e.queue, Health: e.hs}
 	for name, mod := range map[string]func(*Options){
 		"Auth":    func(o *Options) { o.Auth = nil },
 		"Store":   func(o *Options) { o.Store = nil },
 		"Sending": func(o *Options) { o.Sending = nil },
+		"Admin":   func(o *Options) { o.Admin = nil },
 		"Queue":   func(o *Options) { o.Queue = nil },
 		"Health":  func(o *Options) { o.Health = nil },
 	} {
