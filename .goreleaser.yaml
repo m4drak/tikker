@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: 2026 The tikker Authors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Release pipeline (T43), run by .github/workflows/release.yml on `v*` tags.
+# Local check: `make release-check` (snapshot, nothing is published or signed).
+#
+# GoReleaser: binaries, archives, checksums, SBOM (SPDX), source archive (GPL §6),
+# changelog. Container images are NOT built here: the workflow builds them with
+# docker/build-push-action from deploy/docker/Dockerfile (the same file CI builds),
+# so there is one image recipe and it compiles from source inside the image.
+version: 2
+
+project_name: tikker
+
+before:
+  hooks:
+    # THIRD_PARTY_NOTICES is generated, not committed (SPEC §11). Needs `go` in PATH.
+    - scripts/notices.sh THIRD_PARTY_NOTICES
+
+builds:
+  - id: tikker
+    main: ./cmd/tikker
+    binary: tikker
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    tags:
+      - timetzdata
+    # Same variables as the Makefile and the Dockerfile.
+    ldflags:
+      - -s -w
+      - -X github.com/m4drak/tikker/internal/version.Version={{ .Tag }}
+      - -X github.com/m4drak/tikker/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/m4drak/tikker/internal/version.Date={{ .Date }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    # The server targets Linux only (RouterOS containers and servers); no darwin/windows builds.
+    goos: [linux]
+    goarch: [amd64, arm64, arm]
+    goarm: ["7"]
+
+archives:
+  - id: tikker
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ if eq .Arch "arm" }}armv{{ .Arm }}{{ else }}{{ .Arch }}{{ end }}
+    files:
+      - LICENSE
+      - README.md
+      - THIRD_PARTY_NOTICES
+
+# Corresponding source code for GPL-3.0 §6: the tagged tree as a tarball next to the binaries.
+source:
+  enabled: true
+  name_template: "{{ .ProjectName }}_{{ .Version }}_source"
+  format: tar.gz
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+# SPDX JSON SBOM for every archive and the source archive. Requires `syft` in PATH.
+sboms:
+  - id: archives
+    artifacts: archive
+    documents:
+      - "${artifact}.spdx.json"
+    cmd: syft
+    args: ["$artifact", "--output", "spdx-json=$document"]
+  - id: source
+    artifacts: source
+    documents:
+      - "${artifact}.spdx.json"
+    cmd: syft
+    args: ["$artifact", "--output", "spdx-json=$document"]
+
+# Keyless cosign signature (Sigstore bundle) of the checksums file. The checksums cover
+# every archive, source archive and SBOM, so one signature authenticates the whole release.
+signs:
+  - id: checksums
+    cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    artifacts: checksum
+    output: true
+    args:
+      - sign-blob
+      - --yes
+      - --bundle=${signature}
+      - ${artifact}
+
+changelog:
+  sort: asc
+  use: git
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Security
+      regexp: '^.*?sec(urity)?(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: Performance
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 3
+    - title: Other changes
+      order: 999
+  filters:
+    exclude:
+      - '^(docs|test|ci|chore|style|build)(\([[:word:]]+\))??!?:'
+      - "^Merge "
+
+release:
+  github:
+    owner: m4drak
+    name: tikker
+  # v0.1.0-rc1 and other pre-release tags are marked as pre-release (and get no `latest` image tag).
+  prerelease: auto
+  header: |
+    ## tikker {{ .Tag }}
+
+    Container image: `ghcr.io/m4drak/tikker:{{ .Tag }}` (linux/amd64, linux/arm64, linux/arm/v7).
+    Verification of signatures and SBOMs: [docs/releasing.md](https://github.com/m4drak/tikker/blob/{{ .Tag }}/docs/releasing.md).
+  footer: |
+    Source code (GPL-3.0 §6): the `tikker_{{ .Version }}_source.tar.gz` asset, or the tag `{{ .Tag }}`.
+    Dependency licenses: `THIRD_PARTY_NOTICES` inside each archive; SBOMs: `*.spdx.json`.

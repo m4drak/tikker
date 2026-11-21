@@ -9,6 +9,7 @@ Status: projektowanie. Zobacz:
 - [ADR 0003 – biblioteki i układ pakietów](docs/adr/0003-biblioteki.md)
 - [Wdrożenie na MikroTiku (kontener)](docs/deploy-mikrotik.md)
 - [Wdrożenie serwerowe (Docker, systemd, WireGuard)](docs/deploy-server.md)
+- [Wydawanie wersji i weryfikacja podpisów](docs/releasing.md)
 
 Licencja: GNU GPL v3.0 – patrz [LICENSE](LICENSE).
 

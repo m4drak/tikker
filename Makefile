@@ -29,7 +29,7 @@ GOVULNCHECK   ?= golang.org/x/vuln/cmd/govulncheck@v1.9.0
 LICENSES_ALLOWED := MIT,BSD-2-Clause,BSD-3-Clause,ISC,0BSD,Apache-2.0,MPL-2.0,LGPL-2.1,LGPL-3.0,GPL-3.0
 
 .DEFAULT_GOAL := build
-.PHONY: build test lint run clean licenses vuln ci openapi-lint docker docker-buildx
+.PHONY: build test lint run clean licenses notices vuln ci openapi-lint docker docker-buildx release-check
 
 build: ## Build a static binary (CGO disabled) into bin/
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/tikker
@@ -44,10 +44,13 @@ run: build ## Build and run the binary; pass arguments with ARGS="..."
 	./$(BIN) $(ARGS)
 
 clean: ## Remove build artifacts
-	rm -rf bin dist coverage.out
+	rm -rf bin dist coverage.out THIRD_PARTY_NOTICES
 
 licenses: ## Check dependency licenses against the SPEC §11 allowlist (go-licenses)
 	$(GO) run $(GO_LICENSES) check ./... --allowed_licenses=$(LICENSES_ALLOWED)
+
+notices: ## Generate THIRD_PARTY_NOTICES (generated at release time, not committed)
+	GO_LICENSES=$(GO_LICENSES) scripts/notices.sh THIRD_PARTY_NOTICES
 
 vuln: ## Scan for known vulnerabilities (govulncheck)
 	$(GO) run $(GOVULNCHECK) ./...
@@ -64,3 +67,9 @@ docker-buildx: ## Build the multi-arch image (amd64, arm64, arm/v7) into dist/ a
 	mkdir -p dist
 	docker buildx build --platform $(DOCKER_PLATFORMS) -f $(DOCKERFILE) $(DOCKER_BUILD_ARGS) \
 		-t $(IMAGE):$(VERSION) --output type=oci,dest=dist/$(IMAGE)-$(VERSION).oci.tar .
+
+GORELEASER ?= github.com/goreleaser/goreleaser/v2@v2.20.0
+
+release-check: ## Validate .goreleaser.yaml and build a local snapshot release into dist/ (no publish, no signing)
+	$(GO) run $(GORELEASER) check
+	$(GO) run $(GORELEASER) release --snapshot --clean --skip=publish,sign

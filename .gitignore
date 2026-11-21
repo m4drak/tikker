@@ -2,6 +2,8 @@
 /bin/
 /dist/
 coverage.out
+# Generated at release time (make notices)
+/THIRD_PARTY_NOTICES
 
 # Local runtime data (database, generated keys, local config)
 /data/
