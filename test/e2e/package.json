@@ -1,0 +1,14 @@
+{
+  "name": "tikker-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright end-to-end tests of the tikker web panel (real tikker + fake-routeros binaries)",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "open": "playwright show-report ../../test-results/e2e-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.1"
+  }
+}

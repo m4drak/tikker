@@ -249,6 +249,7 @@ Format każdego zadania: **cel**, **wynik**, **kryteria akceptacji**, **zależno
 - **Wynik:** `test/e2e`: Playwright (narzędzie dev, Apache-2.0) przeciw `tikker` + `fake-routeros`. Scenariusze: pierwsze uruchomienie, dodanie urządzenia, wysyłka, odbiór, token, role.
 - **Kryteria:** uruchamiane w CI, stabilne (bez `sleep`, oczekiwanie na stan).
 - **Zależności:** T31, T32. **Model:** Claude Haiku. **Alternatywa:** DeepSeek V4 Flash @ Hermes.
+- **Stan (2026-11-23):** zrobione przez Claude Code (Sonnet) na `task/t33-e2e-ui`. 11 testów w 7 scenariuszach, zielone lokalnie (`make e2e`, `npx playwright test`). Izolacja per test: fixture startuje własny tikker + fake-routeros z osobnym SQLite na wolnych portach, bez `sleep`. Job `e2e` dodany do `.github/workflows/ci.yml` + target `make e2e`. Do przeglądu krzyżowego przez inny model.
 
 ### Faza 4 – Pakowanie i wdrożenie
 
