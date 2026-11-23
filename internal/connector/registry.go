@@ -28,6 +28,9 @@ type DeviceConfig struct {
 	TLSMode     domain.TLSMode
 	CAPEM       string
 	Fingerprint string
+	// AgentToken is the plaintext bearer token of an agent device
+	// (domain.ConnectorAgent), empty otherwise; redacted like Password.
+	AgentToken string
 	// Timeout bounds a single request; zero means the connector's default.
 	Timeout time.Duration
 }
@@ -53,6 +56,9 @@ func (c DeviceConfig) redacted() DeviceConfig {
 	if c.Password != "" {
 		c.Password = redacted
 	}
+	if c.AgentToken != "" {
+		c.AgentToken = redacted
+	}
 	return c
 }
 
@@ -65,7 +71,8 @@ func (c DeviceConfig) String() string {
 // GoString implements fmt.GoStringer without revealing the password.
 func (c DeviceConfig) GoString() string { return "connector.DeviceConfig" + c.String() }
 
-// LogValue implements slog.LogValuer without revealing the password.
+// LogValue implements slog.LogValuer without revealing the password or the
+// agent token.
 func (c DeviceConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("device_id", c.DeviceID.String()),

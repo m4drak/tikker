@@ -24,6 +24,7 @@ import (
 
 	"go.uber.org/goleak"
 
+	"github.com/m4drak/tikker/internal/agent/fakeagent"
 	"github.com/m4drak/tikker/internal/auth"
 	"github.com/m4drak/tikker/internal/config"
 	"github.com/m4drak/tikker/internal/connector/fake"
@@ -129,8 +130,15 @@ func (c *client) do(method, path string, body any) (int, map[string]any) {
 // tests run on the real clock, so polling is the only way to observe them.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
+	waitForEvery(t, what, 25*time.Millisecond, cond)
+}
+
+// waitForEvery is waitFor with a custom poll interval, for conditions that
+// poll the rate-limited API.
+func waitForEvery(t *testing.T, what string, every time.Duration, cond func() bool) {
+	t.Helper()
 	deadline := time.Now().Add(waitTimeout)
-	tick := time.NewTicker(25 * time.Millisecond)
+	tick := time.NewTicker(every)
 	defer tick.Stop()
 	for !cond() {
 		if time.Now().After(deadline) {
@@ -551,5 +559,121 @@ func TestWebhooksEndToEnd(t *testing.T) {
 	tr.CloseIdleConnections()
 	if n := len(snapshot()); n != 2 {
 		t.Errorf("%d requests in total, want exactly 2", n)
+	}
+}
+
+// TestAgentEndToEnd runs the assembled server with a pull-based agent device:
+// the fake RouterOS script polls /agent/v1 over real HTTP, an outbound SMS
+// reaches it through the queue, and an SMS it pushes shows up in the API.
+func TestAgentEndToEnd(t *testing.T) {
+	// The API allows 120 requests a minute: poll it gently.
+	const pollEvery = 250 * time.Millisecond
+	const agentToken = "agent-token-0123456789abcdef0123456789"
+
+	cfg := testConfig(t)
+	logs := &syncBuffer{}
+	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a, err := New(ctx, Options{Config: cfg, Logger: log, Listener: ln, PasswordParams: fastParams})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runErr := make(chan error, 1)
+	go func() { runErr <- a.Run(ctx) }()
+
+	_, token, err := CreateToken(context.Background(), cfg, log, TokenRequest{
+		Username: auth.BootstrapUsername, Name: "e2e",
+		Scopes: domain.Scopes{domain.ScopeAdmin, domain.ScopeSMSSend, domain.ScopeSMSRead},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := &http.Transport{}
+	defer tr.CloseIdleConnections()
+	hc := &http.Client{Transport: tr, Timeout: 40 * time.Second}
+	base := "http://" + a.Addr().String()
+	c := &client{t: t, base: base, token: token, http: hc}
+
+	code, dev := c.do(http.MethodPost, "/api/v1/devices", map[string]any{
+		"name": "agent-router", "connector": "agent", "agent_token": agentToken,
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("create agent device: %d %v", code, dev)
+	}
+	code, ch := c.do(http.MethodPost, "/api/v1/channels", map[string]any{"device_id": dev["id"], "port": "lte1"})
+	if code != http.StatusCreated {
+		t.Fatalf("create channel: %d %v", code, ch)
+	}
+	chPath := fmt.Sprintf("/api/v1/channels/%s", ch["id"])
+
+	ag := fakeagent.New(fakeagent.Options{BaseURL: base, Token: agentToken, Client: hc})
+	agCtx, agCancel := context.WithCancel(context.Background())
+	agDone := make(chan struct{})
+	go func() { defer close(agDone); ag.Run(agCtx, 100*time.Millisecond) }()
+	defer func() { agCancel(); <-agDone }()
+
+	waitForEvery(t, "channel ok", pollEvery, func() bool {
+		_, got := c.do(http.MethodGet, chPath, nil)
+		return got["state"] == "ok"
+	})
+
+	code, resp := c.do(http.MethodPost, "/api/v1/messages", map[string]any{"to": "600100200", "body": "Hello via agent"})
+	if code != http.StatusAccepted {
+		t.Fatalf("send: %d %v", code, resp)
+	}
+	parts, _ := resp["messages"].([]any)
+	if len(parts) != 1 {
+		t.Fatalf("send: want one message, got %v", resp)
+	}
+	msgPath := fmt.Sprintf("/api/v1/messages/%s", parts[0].(map[string]any)["id"])
+	waitForEvery(t, "message sent", pollEvery, func() bool {
+		_, got := c.do(http.MethodGet, msgPath, nil)
+		return got["status"] == "sent"
+	})
+	if sent := ag.Sent(); len(sent) != 1 || sent[0].Body != "Hello via agent" || !strings.HasSuffix(sent[0].To, "600100200") {
+		t.Errorf("agent executed %+v", ag.Sent())
+	}
+
+	if _, err := ag.Receive("lte1", "+48511222333", "Odpowiedź: tak", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var inbound []any
+	waitForEvery(t, "inbound message", pollEvery, func() bool {
+		_, got := c.do(http.MethodGet, "/api/v1/messages?direction=in", nil)
+		inbound, _ = got["items"].([]any)
+		return len(inbound) > 0
+	})
+	in := inbound[0].(map[string]any)
+	if in["body"] != "Odpowiedź: tak" || in["peer"] != "+48511222333" || in["status"] != "received" {
+		t.Errorf("inbound = %v", in)
+	}
+	waitForEvery(t, "agent inbox emptied", pollEvery, func() bool { return len(ag.Inbox()) == 0 })
+
+	agCancel()
+	<-agDone
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run() = %v", err)
+		}
+	case <-time.After(waitTimeout):
+		t.Fatal("Run did not return after cancellation")
+	}
+	tr.CloseIdleConnections()
+
+	out := logs.String()
+	if !strings.Contains(out, "agent checked in") {
+		t.Errorf("logs miss %q", "agent checked in")
+	}
+	for _, secret := range []string{agentToken, token, "Hello via agent", "600100200"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("logs contain %q", secret)
+		}
 	}
 }

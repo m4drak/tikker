@@ -38,6 +38,8 @@ func adminProblem(err error, what, conflictDetail string) *apiError {
 
 // deviceCreate is schema DeviceCreate.
 type deviceCreate struct {
+	Connector   *string           `json:"connector"`
+	AgentToken  *secrets.Password `json:"agent_token"`
 	Name        *string           `json:"name"`
 	BaseURL     *string           `json:"base_url"`
 	Username    *string           `json:"username"`
@@ -115,7 +117,7 @@ func (a *API) createDevice(w http.ResponseWriter, r *http.Request, p auth.Princi
 	return nil
 }
 
-var devicePatchFields = []string{"name", "base_url", "username", "password", "tls_mode", "ca_pem", "fingerprint", "enabled"}
+var devicePatchFields = []string{"name", "base_url", "username", "password", "tls_mode", "ca_pem", "fingerprint", "enabled", "agent_token"}
 
 // updateDevice implements PATCH /devices/{id} (JSON Merge Patch).
 func (a *API) updateDevice(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
@@ -156,6 +158,11 @@ func (a *API) updateDevice(w http.ResponseWriter, r *http.Request, p auth.Princi
 		return err
 	} else if ok {
 		ch.Password = &pw
+	}
+	if tok, ok, err := patchValue[secrets.Password](patch, "agent_token", &v); err != nil {
+		return err
+	} else if ok {
+		ch.AgentToken = &tok
 	}
 	if m, ok, err := patchValue[string](patch, "tls_mode", &v); err != nil {
 		return err

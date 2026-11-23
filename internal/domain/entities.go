@@ -116,17 +116,26 @@ type Device struct {
 	BaseURL     string        // e.g. https://172.17.0.1
 	Username    string
 	PasswordEnc []byte // AES-256-GCM ciphertext (internal/secrets); write-only in API/UI
-	TLSMode     TLSMode
-	CAPEM       string // for TLSCustomCA
-	Fingerprint string // hex SHA-256 of the certificate, for TLSFingerprint
-	Enabled     bool
-	CreatedAt   time.Time
+	// AgentTokenEnc is the sealed bearer token the router script presents
+	// to /agent/v1 (ConnectorAgent only; internal/secrets); nil when the
+	// device has none. Write-only in API/UI like the password.
+	AgentTokenEnc []byte
+	TLSMode       TLSMode
+	CAPEM         string // for TLSCustomCA
+	Fingerprint   string // hex SHA-256 of the certificate, for TLSFingerprint
+	Enabled       bool
+	CreatedAt     time.Time
 }
 
 // InsecureTransport reports whether traffic to the device is unencrypted or
 // unauthenticated (http:// base URL or TLSInsecure); the UI shows a warning.
 // An unparseable BaseURL counts as insecure.
 func (d Device) InsecureTransport() bool {
+	if d.Connector == ConnectorAgent {
+		// tikker never connects to an agent device: the router calls
+		// tikker's own listener, whose TLS is configured server-wide.
+		return false
+	}
 	u, err := url.Parse(d.BaseURL)
 	if err != nil || !strings.EqualFold(u.Scheme, "https") {
 		return true

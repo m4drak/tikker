@@ -109,6 +109,8 @@ func (v *validation) err() error {
 // *secrets.DeviceCredentials implements it.
 type Credentials interface {
 	Encrypt(id domain.ID, p secrets.Password) ([]byte, error)
+	EncryptAgentToken(id domain.ID, token secrets.Password) ([]byte, error)
+	DecryptAgentToken(d domain.Device) (secrets.Password, error)
 	ConnectorConfig(d domain.Device) (connector.DeviceConfig, error)
 }
 

@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/m4drak/tikker/internal/admin"
+	"github.com/m4drak/tikker/internal/agent"
 	"github.com/m4drak/tikker/internal/api"
 	"github.com/m4drak/tikker/internal/auth"
 	"github.com/m4drak/tikker/internal/clock"
@@ -119,6 +120,7 @@ type App struct {
 	webhookSender *webhook.Sender
 	webhookPub    *webhook.Publisher
 	webhooks      *webhook.Service
+	agentHub      *agent.Hub
 	metricsSrv    *metrics.Server
 	ln            net.Listener
 	srv           *http.Server
@@ -206,6 +208,13 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 		copts.Clock = clk
 	}
 	if err := routeros.Register(reg, copts); err != nil {
+		return nil, fmt.Errorf("connector registry: %w", err)
+	}
+	// The pull-based agent connector (backlog #1): a RouterOS script polls
+	// this server over HTTPS (works behind CGNAT). The hub owns the in-memory
+	// mailboxes shared by its connectors and the /agent/v1 handler.
+	a.agentHub = agent.NewHub(agent.Options{Logger: log, Clock: clk})
+	if err := a.agentHub.Register(reg); err != nil {
 		return nil, fmt.Errorf("connector registry: %w", err)
 	}
 
@@ -320,6 +329,9 @@ func (a *App) initPipeline(creds *secrets.DeviceCredentials, reg *connector.Regi
 			return disp.SetChannelState(id, s, reason)
 		}),
 		Interval: cfg.HealthInterval,
+		// A pending state change (e.g. an agent that has not checked in
+		// yet) is rechecked no slower than a healthy channel.
+		RetryInterval: min(cfg.HealthInterval, health.DefaultRetryInterval),
 	})
 	if err != nil {
 		return fmt.Errorf("health checker: %w", err)
@@ -450,6 +462,8 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	}
 	a.metricsSrv = m
 	mux.Handle("/metrics", m.Handler())
+	// The agent API lets a RouterOS script poll and report (backlog #1).
+	mux.Handle(agent.Prefix+"/", a.agentHub.Handler())
 	mux.Handle("/", panel.Handler()) // the web panel owns everything else
 	return mux, nil
 }

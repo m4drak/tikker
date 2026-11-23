@@ -146,6 +146,7 @@ type Server struct {
 	pages       map[string]map[string]*template.Template // language -> page -> template set
 	assets      *assets
 	https       bool
+	baseURL     string // public URL (TIKKER_BASE_URL), may be empty
 	sourceURL   string
 	build       string
 	setupSecret string
@@ -184,6 +185,7 @@ func New(opts Options) (*Server, error) {
 		health:      opts.Health,
 		log:         opts.Logger,
 		https:       strings.HasPrefix(strings.ToLower(opts.BaseURL), "https://"),
+		baseURL:     opts.BaseURL,
 		sourceURL:   opts.SourceURL,
 		build:       buildString(),
 		setupSecret: opts.SetupSecret,

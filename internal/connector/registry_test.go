@@ -89,6 +89,7 @@ func TestDeviceConfigRedaction(t *testing.T) {
 	if cfg.Password != "s3cr3t-pass" || cfg.BaseURL != d.BaseURL || cfg.Fingerprint != "ab" {
 		t.Fatalf("DeviceConfigFromDevice = %+v", cfg)
 	}
+	cfg.AgentToken = "agent-t0ken-value"
 
 	var logBuf bytes.Buffer
 	slog.New(slog.NewTextHandler(&logBuf, nil)).Info("dev", "cfg", cfg)
@@ -103,6 +104,9 @@ func TestDeviceConfigRedaction(t *testing.T) {
 	for verb, out := range outputs {
 		if strings.Contains(out, "s3cr3t") {
 			t.Errorf("%s leaks password: %s", verb, out)
+		}
+		if strings.Contains(out, "t0ken") {
+			t.Errorf("%s leaks agent token: %s", verb, out)
 		}
 		if !strings.Contains(out, "10.0.0.1") {
 			t.Errorf("%s lost non-secret fields: %s", verb, out)
