@@ -65,6 +65,7 @@ import (
 	"github.com/m4drak/tikker/internal/sending"
 	"github.com/m4drak/tikker/internal/sms"
 	"github.com/m4drak/tikker/internal/store"
+	"github.com/m4drak/tikker/internal/webhook"
 )
 
 // Prefix is the path prefix of the API; the handler returned by [New]
@@ -153,6 +154,10 @@ type Deps struct {
 	// the one it shares with the web panel.
 	Admin *admin.Service
 
+	// Webhooks administers webhooks. Optional: without it the /webhooks
+	// routes are not served.
+	Webhooks *webhook.Service
+
 	Clock  clock.Clock        // default: system clock
 	IDs    domain.IDGenerator // default: ULIDs from Clock
 	Logger *slog.Logger       // default: slog.Default()
@@ -193,13 +198,15 @@ type API struct {
 	auth  Auth
 	send  *sending.Service
 	admin *admin.Service
-	hv    HealthView
-	creds Credentials
-	conns ConnectorFactory
-	clk   clock.Clock
-	ids   domain.IDGenerator
-	log   *slog.Logger
-	opts  Options
+
+	webhooks *webhook.Service // nil: no /webhooks routes
+	hv       HealthView
+	creds    Credentials
+	conns    ConnectorFactory
+	clk      clock.Clock
+	ids      domain.IDGenerator
+	log      *slog.Logger
+	opts     Options
 
 	limiter  *limiter
 	inflight *inflight
@@ -233,7 +240,7 @@ func newAPI(deps Deps) (*API, error) {
 		return nil, fmt.Errorf("api: missing dependencies: %s", strings.Join(missing, ", "))
 	}
 	a := &API{
-		st: deps.Store, auth: deps.Auth, admin: deps.Admin,
+		st: deps.Store, auth: deps.Auth, admin: deps.Admin, webhooks: deps.Webhooks,
 		hv: deps.Health, creds: deps.Credentials, conns: deps.Connectors,
 		clk: deps.Clock, ids: deps.IDs, log: deps.Logger, opts: deps.Options,
 		inflight: newInflight(),
@@ -329,6 +336,14 @@ func (a *API) routes() {
 	r("POST /users", admin, a.createUser)
 	r("GET /users/{id}", admin, a.getUser)
 	r("PATCH /users/{id}", admin, a.updateUser)
+
+	if a.webhooks != nil {
+		r("GET /webhooks", admin, a.listWebhooks)
+		r("POST /webhooks", admin, a.createWebhook)
+		r("GET /webhooks/{id}", admin, a.getWebhook)
+		r("PATCH /webhooks/{id}", admin, a.updateWebhook)
+		r("DELETE /webhooks/{id}", admin, a.deleteWebhook)
+	}
 
 	a.mux.HandleFunc("/", a.notFoundOrMethod)
 }

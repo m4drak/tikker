@@ -36,6 +36,7 @@ import (
 	"github.com/m4drak/tikker/internal/secrets"
 	"github.com/m4drak/tikker/internal/store"
 	"github.com/m4drak/tikker/internal/store/sqlite"
+	"github.com/m4drak/tikker/internal/webhook"
 )
 
 // t0 is the start of the fake clock.
@@ -202,8 +203,16 @@ func newEnv(t *testing.T, mod ...func(*envConfig)) *testEnv {
 	if !cfg.noHTTP {
 		opts.AllowedHTTPHosts = append(opts.AllowedHTTPHosts, "127.0.0.1")
 	}
+	hooks, err := webhook.NewService(webhook.ServiceDeps{
+		Store: st, Sealer: ring, Clock: e.clk,
+		AllowHTTP: func(host string) bool { return host == "127.0.0.1" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	e.api, err = newAPI(Deps{
-		Store: st, Auth: e.auth, Dispatcher: e.disp, Reloader: e.reloader, Capabilities: e.sync,
+		Webhooks: hooks,
+		Store:    st, Auth: e.auth, Dispatcher: e.disp, Reloader: e.reloader, Capabilities: e.sync,
 		Credentials: creds, Connectors: e.reg, Clock: e.clk, Logger: log, Options: opts,
 	})
 	if err != nil {

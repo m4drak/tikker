@@ -265,3 +265,15 @@ func (s *Service) reload(ctx context.Context) {
 		s.log.Error("reloading channels after a change failed", slog.Any("error", err))
 	}
 }
+
+// HostAllowlist parses entries (IP addresses, CIDR prefixes, host names; the
+// format of Options.AllowedHTTPHosts) and returns a predicate that reports
+// whether a host is on the list. Other packages use it to apply the same
+// plain-http policy as the device base URLs.
+func HostAllowlist(entries []string) (func(host string) bool, error) {
+	l, err := parseHostAllowlist(entries)
+	if err != nil {
+		return nil, err
+	}
+	return l.allows, nil
+}

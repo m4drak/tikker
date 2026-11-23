@@ -55,7 +55,9 @@ import (
 	"github.com/m4drak/tikker/internal/sending"
 	"github.com/m4drak/tikker/internal/sms"
 	"github.com/m4drak/tikker/internal/store/sqlite"
+	"github.com/m4drak/tikker/internal/version"
 	"github.com/m4drak/tikker/internal/web"
+	"github.com/m4drak/tikker/internal/webhook"
 )
 
 // DatabaseFile is the SQLite file name inside the data directory.
@@ -112,8 +114,12 @@ type App struct {
 	health  *health.Checker
 	sync    *api.ChannelSync
 	pollers *pollerSupervisor
-	ln      net.Listener
-	srv     *http.Server
+
+	webhookSender *webhook.Sender
+	webhookPub    *webhook.Publisher
+	webhooks      *webhook.Service
+	ln            net.Listener
+	srv           *http.Server
 
 	// runCtx is the context of the background loops; cancelled last.
 	runCtx    context.Context
@@ -200,7 +206,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 		return nil, fmt.Errorf("connector registry: %w", err)
 	}
 
-	if err := a.initPipeline(creds, reg); err != nil {
+	if err := a.initPipeline(creds, reg, ring); err != nil {
 		return nil, err
 	}
 	// From here on the dispatcher and the checker run; stopping them is
@@ -276,15 +282,36 @@ func (a *App) initAuth(ctx context.Context, opts Options) error {
 
 // initPipeline creates and starts the health checker, the dispatcher, the
 // channel sync and the inbox pollers, and loads the channels.
-func (a *App) initPipeline(creds *secrets.DeviceCredentials, reg *connector.Registry) error {
+func (a *App) initPipeline(creds *secrets.DeviceCredentials, reg *connector.Registry, ring *secrets.Keyring) error {
 	cfg := a.cfg
+	allowHTTP, err := admin.HostAllowlist(cfg.AllowedHTTPHosts)
+	if err != nil {
+		return fmt.Errorf("allowed http hosts: %w", err)
+	}
+	// Webhooks: the publisher stores events in the transactions of the
+	// dispatcher and the inbox pollers; the sender delivers them.
+	sender, err := webhook.NewSender(webhook.SenderOptions{
+		Store: a.store.Webhooks(), Secrets: ring, Clock: a.clk, Logger: a.log,
+		UserAgent: "tikker-webhook/" + version.Version, AllowPrivate: allowHTTP, PayloadRetention: cfg.Retention,
+	})
+	if err != nil {
+		return fmt.Errorf("webhook sender: %w", err)
+	}
+	a.webhookSender = sender
+	a.webhookPub = webhook.NewPublisher(a.clk, nil, sender)
+	a.webhooks, err = webhook.NewService(webhook.ServiceDeps{
+		Store: a.store, Sealer: ring, Clock: a.clk, Waker: sender, AllowHTTP: allowHTTP,
+	})
+	if err != nil {
+		return fmt.Errorf("webhook service: %w", err)
+	}
 	// The checker sets states in the dispatcher and the dispatcher reports
 	// to the checker; both adapters forward to the value set below.
 	var disp *queue.Dispatcher
 	var hc *health.Checker
 	var cs *api.ChannelSync
 
-	hc, err := health.New(health.Options{
+	hc, err = health.New(health.Options{
 		Channels: a.store.Channels(), Clock: a.clk, Logger: a.log,
 		Dispatcher: stateSetterFunc(func(id domain.ID, s domain.ChannelState, reason string) bool {
 			return disp.SetChannelState(id, s, reason)
@@ -299,6 +326,8 @@ func (a *App) initPipeline(creds *secrets.DeviceCredentials, reg *connector.Regi
 		Retry:               cfg.Retry.Policy(),
 		Reporter:            hc,
 		OnEvent:             hc.HandleQueueEvent,
+		Events:              a.webhookPub,
+		Tx:                  a.store,
 		OnConnectorReleased: func(c connector.Connector) { cs.Release(c) },
 	})
 	if err != nil {
@@ -308,7 +337,7 @@ func (a *App) initPipeline(creds *secrets.DeviceCredentials, reg *connector.Regi
 
 	a.pollers = newPollerSupervisor(a.runCtx, pollerBase{
 		store: a.store, clock: a.clk, logger: a.log,
-		interval: cfg.InboxPollInterval, reporter: hc,
+		interval: cfg.InboxPollInterval, reporter: hc, events: a.webhookPub,
 	})
 
 	cs, err = api.NewChannelSync(api.SyncOptions{
@@ -320,11 +349,16 @@ func (a *App) initPipeline(creds *secrets.DeviceCredentials, reg *connector.Regi
 	}
 	a.sync = cs
 
+	if err := sender.Start(a.runCtx); err != nil {
+		return fmt.Errorf("start webhook sender: %w", err)
+	}
 	if err := disp.Start(a.runCtx); err != nil {
+		sender.Stop()
 		return fmt.Errorf("start dispatcher: %w", err)
 	}
 	if err := hc.Start(a.runCtx); err != nil {
 		_ = disp.Shutdown(context.Background())
+		sender.Stop()
 		return fmt.Errorf("start health checker: %w", err)
 	}
 	if err := cs.Reload(a.runCtx); err != nil {
@@ -366,7 +400,7 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	}
 	apiH, err := api.New(api.Deps{
 		Store: a.store, Auth: a.auth, Dispatcher: a.disp, Reloader: a.sync, Capabilities: a.sync, Sending: snd, Admin: adm,
-		Health: a.health, Credentials: creds, Connectors: reg,
+		Health: a.health, Credentials: creds, Connectors: reg, Webhooks: a.webhooks,
 		Clock: a.clk, Logger: a.log,
 		Options: api.Options{
 			DefaultRegion:       a.cfg.DefaultRegion,
@@ -502,6 +536,13 @@ func (a *App) stopPipeline(ctx context.Context) error {
 	if err := a.disp.Shutdown(ctx); err != nil {
 		a.log.Warn("dispatcher stopped with sends interrupted; they will be retried", slog.Any("error", err))
 		errs = append(errs, fmt.Errorf("dispatcher shutdown: %w", err))
+	}
+	// After the dispatcher and the pollers: they may still publish events.
+	if err := a.webhookSender.Shutdown(ctx); err != nil {
+		a.log.Warn("webhook sender stopped with attempts interrupted; they will be retried", slog.Any("error", err))
+		errs = append(errs, fmt.Errorf("webhook shutdown: %w", err))
+	} else {
+		a.log.Info("webhook sender stopped")
 	}
 	if err := a.health.Shutdown(ctx); err != nil {
 		a.log.Warn("health checker did not flush in time", slog.Any("error", err))

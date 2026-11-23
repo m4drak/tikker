@@ -267,6 +267,7 @@ func (e *eventLog) all() []Event {
 type envConfig struct {
 	path string      // database file; empty: in memory
 	clk  *clock.Fake // default: new fake at t0
+	tx   bool        // pass the store as Options.Tx
 	opts func(*Options)
 	repo func(store.MessageRepo) store.MessageRepo // wrap the repo
 }
@@ -315,6 +316,9 @@ func newEnv(t *testing.T, cfg envConfig) *env {
 			e.released = append(e.released, c)
 			e.relMu.Unlock()
 		},
+	}
+	if cfg.tx {
+		opts.Tx = st
 	}
 	if cfg.opts != nil {
 		cfg.opts(&opts)

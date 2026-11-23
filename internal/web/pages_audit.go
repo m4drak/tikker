@@ -12,6 +12,7 @@ import (
 	"github.com/m4drak/tikker/internal/admin"
 	"github.com/m4drak/tikker/internal/domain"
 	"github.com/m4drak/tikker/internal/store"
+	"github.com/m4drak/tikker/internal/webhook"
 )
 
 const auditPerPage = 50
@@ -27,6 +28,7 @@ var auditActions = []domain.AuditAction{
 	domain.AuditDeviceCreate, domain.AuditDeviceUpdate, domain.AuditDeviceDelete,
 	admin.AuditChannelCreate, domain.AuditChannelUpdate, admin.AuditChannelDelete,
 	domain.AuditMessageSend, domain.AuditMessageCancel,
+	webhook.AuditCreate, webhook.AuditUpdate, webhook.AuditDelete,
 }
 
 type auditFilter struct {
