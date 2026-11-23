@@ -56,6 +56,10 @@
 :local mediaPath "usb1/tikker"
 # Container user. The mount created by RouterOS is owned by root, while the image runs as
 # 65532:65532 and might not be able to write to /data. "0:0" works around that.
+# For least privilege (F-04) run as the image's non-root user and give it the data mount:
+#   :local ctrUser "65532:65532"
+# and make the media dir writable by that UID (e.g. chown 65532:65532 on the host that
+# mounted the media, if RouterOS/media support it). Keep 0:0 only when you cannot chown.
 # [WERYFIKACJA: whether /container supports user= on your version and whether /data is
 # writable; if the router rejects the option, remove it from the "container add" line below.]
 :local ctrUser "0:0"
@@ -150,6 +154,14 @@
   }
   # No masquerade is added: tikker only talks to the router at vethGateway, and the image is
   # pulled by RouterOS itself, not by the container.
+  # Isolate the container from the LAN (F-04): by default forward out of the tikker bridge is
+  # dropped. The only outbound routes are the container -> router REST call (input chain, the
+  # accept rule above) and DNS at the gateway; the image is pulled by RouterOS, not by the
+  # container. The optional panel dst-nat has its own forward accept above (place-before=0), so
+  # this drop placed later does not break it. [WERYFIKACJA: default forward policy of the router]
+  :if ([:len [/ip firewall filter find comment="tikker: block container to LAN"]] = 0) do={
+    /ip firewall filter add chain=forward action=drop src-address=$vethNetwork place-before=6 comment="tikker: block container to LAN"
+  }
 
   # --- optional panel publishing (dst-nat)
   :if ($exposePanel = "yes") do={

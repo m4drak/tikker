@@ -139,4 +139,6 @@ Model główny (Claude Opus) i niezależny przegląd (OpenAI Codex). Codex potwi
 
 **F-03 naprawione** na branchu `fix/t50-f03-trusted-proxy`: compose zaufuje teraz tylko statycznemu adresowi Caddy (172.28.0.10), nie całej podsieci `172.28.0.0/24` — to wyklucza podszywanie się pod `X-Forwarded-For` przez inny kontener w sieci.
 
-Pozostają do decyzji: R4 (root w setup.rsc), R5 (pomiar OOM w T51), R6 (klucz obok bazy).
+**F-04 naprawione** na branchu `fix/t50-f04-container-isolation`: `setup.rsc` dodaje teraz regułę forward blokującą ruch z sieci kontenera do LAN oraz dokumentuje tryb nie-root (`ctrUser "65532:65532"` + chown mediów) z opcją powrotu do `0:0`, gdy nośnik nie pozwala na chown.
+
+Pozostają do decyzji: R5 (pomiar OOM w T51), R6 (klucz obok bazy).
