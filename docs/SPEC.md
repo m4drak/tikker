@@ -247,6 +247,9 @@ Zakres `admin` obejmuje `sms:read` i `sms:send`. Uprawnienia tokenu to część 
 - Role: `viewer` (podgląd), `operator` (wysyłka i anulowanie), `admin` (wszystko).
 - Język interfejsu: PL i EN (pliki tłumaczeń, wybór z `Accept-Language` lub ustawień użytkownika).
 - Pierwsze uruchomienie: jeśli brak użytkowników, kreator tworzy admina (lub zmienna `TIKKER_ADMIN_PASSWORD`).
+  Instancja osiągalna poza loopbackiem musi mieć ustawione **albo** `TIKKER_ADMIN_PASSWORD` (admin tworzony przy starcie),
+  **albo** `TIKKER_SETUP_SECRET` (kreator wymaga sekretu) — inaczej konfiguracja jest odrzucana (F-01). W kreatorze sekret
+  podaje się tylko raz, przy tworzeniu pierwszego admina.
 
 ---
 
@@ -300,6 +303,7 @@ Urządzenia i kanały są przechowywane w bazie (zarządzane z UI/API), opcjonal
 | `TIKKER_RETRY_JITTER` | `0.2` | względny rozrzut opóźnienia, w [0, 1) (§4.2) |
 | `TIKKER_TLS_CERT_FILE` / `TIKKER_TLS_KEY_FILE` | – | certyfikat i klucz wbudowanego HTTPS (§7); ustawiane razem |
 | `TIKKER_ADMIN_PASSWORD` | – | hasło admina tworzonego przy pierwszym starcie (§6), min. 12 znaków |
+| `TIKKER_SETUP_SECRET` | – | sekret kreatora `/setup` (§6), min. 12 znaków; wymagany przy pustym `TIKKER_ADMIN_PASSWORD` i nasłuchu poza loopbackiem |
 | `TIKKER_TRUSTED_PROXIES` | – | reverse proxy (IP lub CIDR, po przecinku), którym wierzymy w `X-Forwarded-For` (limity logowania, audyt) |
 | `TIKKER_TRUSTED_ORIGINS` | – | dodatkowe originy (`scheme://host[:port]`, po przecinku) dla ochrony CSRF panelu, poza `TIKKER_BASE_URL` |
 | `TIKKER_SESSION_IDLE_TIMEOUT` / `TIKKER_SESSION_ABSOLUTE_TIMEOUT` | `1h` / `12h` | limity sesji panelu (§7); bezwzględny ≥ bezczynności |

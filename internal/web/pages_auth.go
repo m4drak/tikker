@@ -4,6 +4,7 @@
 package web
 
 import (
+	"crypto/subtle"
 	"errors"
 	"net/http"
 	"strconv"
@@ -26,7 +27,10 @@ type loginData struct {
 
 type setupData struct {
 	Username string
-	Errors   map[string]string // field ("username", "password", "confirm") -> translated message
+	// NeedsSecret is true when TIKKER_SETUP_SECRET is set: the wizard then
+	// requires the secret to be provided (F-01).
+	NeedsSecret bool
+	Errors      map[string]string // field ("username", "password", "confirm", "setup_secret") -> translated message
 }
 
 // limitBody bounds the body of a panel form.
@@ -112,7 +116,7 @@ func (s *Server) setupForm(w http.ResponseWriter, r *http.Request) {
 		s.notFound(w, r)
 		return
 	}
-	s.Render(w, r, http.StatusOK, "setup", setupData{})
+	s.Render(w, r, http.StatusOK, "setup", setupData{NeedsSecret: s.setupSecret != ""})
 }
 
 // setupSubmit creates the first admin and signs them in. The service
@@ -129,7 +133,16 @@ func (s *Server) setupSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	username, password, confirm := r.PostFormValue("username"), r.PostFormValue("password"), r.PostFormValue("confirm")
 	lang := s.language(r)
-	data := setupData{Username: username, Errors: map[string]string{}}
+	data := setupData{Username: username, NeedsSecret: s.setupSecret != "", Errors: map[string]string{}}
+	// When a setup secret is configured, the wizard is gated on it (F-01).
+	// Constant-time compare: the wizard is only reachable before the first
+	// admin exists, so a wrong secret is not rate limiting; still keep the
+	// comparison timing-safe to avoid leaking the secret length.
+	if s.setupSecret != "" && subtle.ConstantTimeCompare([]byte(r.PostFormValue("setup_secret")), []byte(s.setupSecret)) != 1 {
+		data.Errors["setup_secret"] = s.i18n.T(lang, "setup.err.secret_invalid")
+		s.Render(w, r, http.StatusUnprocessableEntity, "setup", data)
+		return
+	}
 	if password != confirm {
 		data.Errors["confirm"] = s.i18n.T(lang, "setup.err.mismatch")
 		s.Render(w, r, http.StatusUnprocessableEntity, "setup", data)

@@ -42,6 +42,7 @@ const (
 	envTLSCertFile       = "TIKKER_TLS_CERT_FILE"
 	envTLSKeyFile        = "TIKKER_TLS_KEY_FILE"
 	envAdminPassword     = "TIKKER_ADMIN_PASSWORD" //nolint:gosec // G101: variable name, not a credential
+	envSetupSecret       = "TIKKER_SETUP_SECRET"   //nolint:gosec // G101: variable name, not a credential
 
 	envTrustedProxies         = "TIKKER_TRUSTED_PROXIES"
 	envTrustedOrigins         = "TIKKER_TRUSTED_ORIGINS"
@@ -234,6 +235,7 @@ func applyEnv(cfg *Config, lookup LookupFunc) error {
 	str(envTLSCertFile, &cfg.TLS.CertFile)
 	str(envTLSKeyFile, &cfg.TLS.KeyFile)
 	secret(envAdminPassword, &cfg.AdminPassword)
+	secret(envSetupSecret, &cfg.SetupSecret)
 	list(envTrustedProxies, &cfg.TrustedProxies)
 	list(envTrustedOrigins, &cfg.TrustedOrigins)
 	duration(envSessionIdleTimeout, &cfg.SessionIdleTimeout)

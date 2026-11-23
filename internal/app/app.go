@@ -391,7 +391,7 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 		return nil, fmt.Errorf("probes: %w", err)
 	}
 	panel, err := web.New(web.Options{
-		Auth: a.auth, Logger: a.log, BaseURL: a.cfg.BaseURL,
+		Auth: a.auth, Logger: a.log, BaseURL: a.cfg.BaseURL, SetupSecret: string(a.cfg.SetupSecret),
 		Store: a.store, Sending: snd, Admin: adm, Clock: a.clk, Queue: a.disp, Health: a.health,
 	})
 	if err != nil {

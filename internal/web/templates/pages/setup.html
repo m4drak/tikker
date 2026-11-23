@@ -18,6 +18,15 @@ SPDX-License-Identifier: GPL-3.0-or-later
     <small id="username-error" class="field-error" role="alert">{{.Data.Errors.username}}</small>
     {{- end}}
 
+    {{- if .Data.NeedsSecret}}
+    <label for="setup_secret">{{t "setup.secret"}}</label>
+    <input id="setup_secret" name="setup_secret" type="password" autocomplete="off" required aria-describedby="secret-hint{{if .Data.Errors.setup_secret}} secret-error{{end}}"{{if .Data.Errors.setup_secret}} aria-invalid="true"{{end}}>
+    <small id="secret-hint">{{t "setup.secret_hint"}}</small>
+    {{- if .Data.Errors.setup_secret}}
+    <small id="secret-error" class="field-error" role="alert">{{.Data.Errors.setup_secret}}</small>
+    {{- end}}
+    {{- end}}
+
     <label for="password">{{t "setup.password"}}</label>
     <input id="password" name="password" type="password" autocomplete="new-password" required aria-describedby="password-hint{{if .Data.Errors.password}} password-error{{end}}"{{if .Data.Errors.password}} aria-invalid="true"{{end}}>
     <small id="password-hint">{{t "setup.password_hint"}}</small>

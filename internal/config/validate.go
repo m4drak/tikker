@@ -64,6 +64,7 @@ var (
 	sTLSCertFile         = setting{"tls.cert_file", envTLSCertFile}
 	sTLSKeyFile          = setting{"tls.key_file", envTLSKeyFile}
 	sAdminPassword       = setting{"admin_password", envAdminPassword}
+	sSetupSecret         = setting{"setup_secret", envSetupSecret}
 	sTrustedProxies      = setting{"trusted_proxies", envTrustedProxies}
 	sTrustedOrigins      = setting{"trusted_origins", envTrustedOrigins}
 	sSessionIdle         = setting{"session_idle_timeout", envSessionIdleTimeout}
@@ -134,6 +135,18 @@ func Validate(c Config) error {
 		add(sAdminPassword.errorf("must be at least %d characters", minAdminPasswordLen))
 	}
 
+	// F-01 / SPEC §6: an instance reachable off-loopback must be protected
+	// by either a bootstrap admin password (admin is created at startup) or
+	// a setup secret (the first-run wizard is gated on it). Default listen
+	// ":8080" binds all interfaces, so this closes unauthorized takeover of
+	// a network-exposed, uninitialized instance.
+	if rc := utf8.RuneCountInString(string(c.SetupSecret)); rc > 0 && rc < minAdminPasswordLen {
+		add(sSetupSecret.errorf("must be at least %d characters", minAdminPasswordLen))
+	}
+	if string(c.AdminPassword) == "" && string(c.SetupSecret) == "" && listenExposed(c.Listen) {
+		add(sSetupSecret.errorf("required when TIKKER_ADMIN_PASSWORD is empty and the panel is reachable off-loopback; set TIKKER_SETUP_SECRET to gate the first-run wizard (or set the admin password)"))
+	}
+
 	if _, err := ParsePrefixes(c.TrustedProxies); err != nil {
 		add(sTrustedProxies.errorf("%v", err))
 	}
@@ -180,6 +193,28 @@ func validateListen(addr string) error {
 		return sListen.errorf("port must be between 1 and 65535, got %q", port)
 	}
 	return nil
+}
+
+// listenExposed reports whether the listen address is reachable outside the
+// loopback interface. ":8080", "0.0.0.0:8080" and "::8080" bind all
+// interfaces; "127.0.0.1:8080" and "localhost:8080" stay local.
+func listenExposed(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return true // an invalid address is treated as exposed (warn loudly)
+	}
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		return true
+	case "127.0.0.1", "::1", "[::1]", "localhost":
+		return false
+	}
+	// An explicit IP that is not a loopback address.
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		return !ip.IsLoopback()
+	}
+	// A host name we cannot classify is treated as exposed.
+	return true
 }
 
 func validateBaseURL(raw string) error {

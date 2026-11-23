@@ -130,3 +130,7 @@ Kryterium PLAN §T50 („brak otwartych problemów wysokich”) **NIE jest speł
 ## Przegląd krzyżowy
 
 Model główny (Claude Opus) i niezależny przegląd (OpenAI Codex). Codex potwierdził F-01, F-02, F-03, F-04, F-06, F-08, F-09, F-11 i wniosek o niedoszacowanym F-01 → podniesiony do high. F-05 wymaga pomiarów w T51 (wyliczenie 38 MiB błędne — wymaga realnego pomiaru peak).
+
+## Stan kryterium (aktualizacja po naprawie)
+
+**F-01 naprawione** na branchu `fix/t50-f01-setup-secret`: dodano `TIKKER_SETUP_SECRET` — kreator `/setup` wymaga go, gdy nie ma `TIKKER_ADMIN_PASSWORD`, a konfiguracja z pustym sekretem przy nasłuchu poza loopbackiem jest odrzucana. Pozostają do decyzji: R2 (hasło routera przy zmianie hosta), R3 (trusted proxies), R4 (root w setup.rsc), R5 (pomiar OOM w T51), R6 (klucz obok bazy).
