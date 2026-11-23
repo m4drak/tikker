@@ -482,19 +482,37 @@ func (r *messageRepo) RecoverExpiredLeases(ctx context.Context, now time.Time, m
 
 // ExpireQueued implements [store.MessageRepo].
 func (r *messageRepo) ExpireQueued(ctx context.Context, now time.Time) (int, error) {
-	var n int64
+	ms, err := r.ExpireQueuedMessages(ctx, now)
+	return len(ms), err
+}
+
+// ExpireQueuedMessages implements [store.MessageRepo].
+func (r *messageRepo) ExpireQueuedMessages(ctx context.Context, now time.Time) ([]domain.Message, error) {
+	var out []domain.Message
 	err := r.h.write(ctx, func(q execer) error {
-		res, err := q.ExecContext(ctx,
+		out = nil
+		rows, err := q.QueryContext(ctx,
 			`UPDATE messages SET status = 'failed', last_error = ?
-			  WHERE status = 'queued' AND expires_at <> 0 AND expires_at <= ?`,
+			  WHERE status = 'queued' AND expires_at <> 0 AND expires_at <= ?
+			  RETURNING `+messageCols,
 			domain.LastErrorExpired, toMS(now))
 		if err != nil {
 			return fmt.Errorf("sqlite: expire: %w", err)
 		}
-		n, err = rowsAffected(res)
-		return err
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			m, err := scanMessage(rows)
+			if err != nil {
+				return fmt.Errorf("sqlite: expire: %w", err)
+			}
+			out = append(out, m)
+		}
+		return rows.Err()
 	})
-	return int(n), err
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------

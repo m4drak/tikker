@@ -143,6 +143,18 @@ type Config struct {
 	// not implemented here). It must not block. A crash between commit and
 	// call loses the notification, never the message.
 	OnMessage func(domain.Message)
+	// Events, if set, is told about every newly stored message inside the
+	// transaction that stores it (webhooks), so the notification cannot be
+	// lost: both commit or neither does.
+	Events MessagePublisher
+}
+
+// MessagePublisher records an event for a newly stored inbound message in the
+// transaction tx; Wake is called after the commit. *webhook.Publisher
+// implements it.
+type MessagePublisher interface {
+	PublishIncoming(ctx context.Context, tx store.Repos, m domain.Message) error
+	Wake()
 }
 
 // CycleResult describes one poll cycle.
@@ -170,6 +182,7 @@ type Poller struct {
 
 	reporter  ChannelStateReporter
 	onMessage func(domain.Message)
+	events    MessagePublisher
 
 	mu        sync.Mutex // serialises cycles
 	failures  int
@@ -229,6 +242,7 @@ func New(cfg Config) (*Poller, error) {
 		partRetention:   cfg.PartRetention,
 		reporter:        cfg.Reporter,
 		onMessage:       cfg.OnMessage,
+		events:          cfg.Events,
 	}, nil
 }
 

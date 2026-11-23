@@ -25,6 +25,7 @@ type pollerBase struct {
 	logger   *slog.Logger
 	interval time.Duration
 	reporter inbox.ChannelStateReporter
+	events   inbox.MessagePublisher // optional
 }
 
 // pollerSupervisor runs one inbox poller per enabled channel with a connector.
@@ -122,7 +123,7 @@ func (s *pollerSupervisor) start(sp api.ChannelSpec, prevDone <-chan struct{}) {
 	p, err := inbox.New(inbox.Config{
 		Channel: sp.Channel, Conn: sp.Connector, Store: s.base.store,
 		Clock: s.base.clock, IDs: s.base.ids, Logger: s.base.logger,
-		Interval: s.base.interval, Reporter: s.base.reporter,
+		Interval: s.base.interval, Reporter: s.base.reporter, Events: s.base.events,
 	})
 	if err != nil {
 		s.log.Error("inbox poller cannot be created", slog.String("channel_id", string(sp.Channel.ID)), slog.Any("error", err))

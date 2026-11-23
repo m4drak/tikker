@@ -150,6 +150,9 @@ func (p *Poller) process(ctx context.Context, items []connector.InboundSMS) (pro
 	if err != nil {
 		return processed{}, fmt.Errorf("inbox: store: %w", err)
 	}
+	if p.events != nil && len(out.created) > 0 {
+		p.events.Wake()
+	}
 	for _, m := range out.created {
 		p.log.Debug("inbound message stored",
 			slog.String("message", string(m.ID)), logging.PhoneAttr("peer", m.Peer),
@@ -164,11 +167,17 @@ func (p *Poller) storeBatch(ctx context.Context, tx store.Repos, now time.Time,
 	msgs, partRepo := tx.Messages(), tx.InboundParts()
 	insert := func(m domain.Message) (bool, error) {
 		created, err := msgs.InsertInbound(ctx, m)
-		if created {
-			out.created = append(out.created, m)
-			out.stored++
+		if err != nil || !created {
+			return created, err
 		}
-		return created, err
+		if p.events != nil {
+			if err := p.events.PublishIncoming(ctx, tx, m); err != nil {
+				return false, fmt.Errorf("publish event: %w", err)
+			}
+		}
+		out.created = append(out.created, m)
+		out.stored++
+		return true, nil
 	}
 
 	for _, s := range singles {

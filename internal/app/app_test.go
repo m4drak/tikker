@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	"github.com/m4drak/tikker/internal/domain"
 	"github.com/m4drak/tikker/internal/secrets"
 	"github.com/m4drak/tikker/internal/store/sqlite"
+	"github.com/m4drak/tikker/internal/webhook"
 )
 
 func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
@@ -396,5 +398,129 @@ func TestCreateTokenWithoutDatabase(t *testing.T) {
 	_, _, err := CreateToken(context.Background(), cfg, nil, TokenRequest{Username: "admin", Name: "x", Scopes: domain.Scopes{domain.ScopeAdmin}})
 	if err == nil || !strings.Contains(err.Error(), "tikker serve") {
 		t.Errorf("CreateToken() = %v", err)
+	}
+}
+
+// TestWebhooksEndToEnd: a webhook created through the API receives the
+// incoming SMS and the status of an outbound one, signed and exactly once.
+func TestWebhooksEndToEnd(t *testing.T) {
+	router := fake.New(fake.Options{User: routerUser, Password: routerPass, Ports: []string{"lte1"}})
+	routerURL := router.Start()
+	defer router.Close()
+
+	type hit struct {
+		event, delivery, sig string
+		body                 []byte
+	}
+	var mu sync.Mutex
+	var hits []hit
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		hits = append(hits, hit{r.Header.Get(webhook.HeaderEvent), r.Header.Get(webhook.HeaderDelivery), r.Header.Get(webhook.HeaderSignature), body})
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer receiver.Close()
+	snapshot := func() []hit {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]hit(nil), hits...)
+	}
+
+	cfg := testConfig(t)
+	log := slog.New(slog.NewTextHandler(&syncBuffer{}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a, err := New(ctx, Options{Config: cfg, Logger: log, Listener: ln, PasswordParams: fastParams})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runErr := make(chan error, 1)
+	go func() { runErr <- a.Run(ctx) }()
+	_, token, err := CreateToken(context.Background(), cfg, log, TokenRequest{
+		Username: auth.BootstrapUsername, Name: "e2e", Scopes: domain.Scopes{domain.ScopeAdmin, domain.ScopeSMSSend, domain.ScopeSMSRead},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := &http.Transport{}
+	defer tr.CloseIdleConnections()
+	c := &client{t: t, base: "http://" + a.Addr().String(), token: token, http: &http.Client{Transport: tr, Timeout: 10 * time.Second}}
+
+	const secret = "e2e-signing-secret-123"
+	code, hook := c.do(http.MethodPost, "/api/v1/webhooks", map[string]any{
+		"name": "e2e", "url": receiver.URL + "/hook", "secret": secret, "events": []string{"incoming_sms", "message_status"},
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("create webhook: %d %v", code, hook)
+	}
+	code, dev := c.do(http.MethodPost, "/api/v1/devices", map[string]any{
+		"name": "router", "base_url": routerURL, "username": routerUser, "password": routerPass,
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("create device: %d %v", code, dev)
+	}
+	code, ch := c.do(http.MethodPost, "/api/v1/channels", map[string]any{"device_id": dev["id"], "port": "lte1"})
+	if code != http.StatusCreated {
+		t.Fatalf("create channel: %d %v", code, ch)
+	}
+	chPath := fmt.Sprintf("/api/v1/channels/%s", ch["id"])
+	waitFor(t, "channel ok", func() bool { _, got := c.do(http.MethodGet, chPath, nil); return got["state"] == "ok" })
+	waitFor(t, "inbox poller", func() bool { return a.pollers.count() == 1 })
+
+	code, resp := c.do(http.MethodPost, "/api/v1/messages", map[string]any{"to": "600100200", "body": "Hello"})
+	if code != http.StatusAccepted {
+		t.Fatalf("send: %d %v", code, resp)
+	}
+	sentID := resp["messages"].([]any)[0].(map[string]any)["id"].(string)
+	if _, err := router.InjectSMS(fake.IncomingSMS{From: "+48511222333", Text: "Reply"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "two webhook deliveries", func() bool { return len(snapshot()) >= 2 })
+
+	seen := map[string]hit{}
+	for _, h := range snapshot() {
+		if _, dup := seen[h.delivery]; dup {
+			t.Errorf("delivery %s received twice", h.delivery)
+		}
+		seen[h.delivery] = h
+		if !webhook.Verify([]byte(secret), h.body, h.sig) {
+			t.Errorf("signature of %s does not verify", h.event)
+		}
+		var env webhook.Envelope
+		if err := json.Unmarshal(h.body, &env); err != nil {
+			t.Fatal(err)
+		}
+		switch h.event {
+		case "message_status":
+			if env.Message.ID != sentID || env.Message.Status != "sent" || env.Message.Body != nil {
+				t.Errorf("status event = %s", h.body)
+			}
+		case "incoming_sms":
+			if env.Message.Body == nil || *env.Message.Body != "Reply" || env.Message.Peer != "+48511222333" {
+				t.Errorf("incoming event = %s", h.body)
+			}
+		default:
+			t.Errorf("unexpected event %q", h.event)
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run() = %v", err)
+		}
+	case <-time.After(waitTimeout):
+		t.Fatal("Run did not return after cancellation")
+	}
+	tr.CloseIdleConnections()
+	if n := len(snapshot()); n != 2 {
+		t.Errorf("%d requests in total, want exactly 2", n)
 	}
 }

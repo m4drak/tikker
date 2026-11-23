@@ -263,7 +263,9 @@ func (w *worker) record(m domain.Message, res connector.SendResult, sendErr erro
 		if sentAt.IsZero() {
 			sentAt = now
 		}
-		if !w.storeResult(ctx, log, w.d.repo.MarkSent(ctx, lease, sentAt)) {
+		done := m
+		done.Status, done.SentAt, done.LastError = domain.StatusSent, sentAt, ""
+		if !w.storeResult(ctx, log, w.write(ctx, done, func(r store.MessageRepo) error { return r.MarkSent(ctx, lease, sentAt) })) {
 			return
 		}
 		w.d.stats.update(w.id, Counters{Sent: 1}, func(c *ChannelStats) { c.LastSentAt = sentAt })
@@ -298,7 +300,12 @@ func (w *worker) record(m domain.Message, res connector.SendResult, sendErr erro
 		delta.Retried = 1
 		log.Warn("send failed, message requeued", slog.Time("next_attempt_at", at))
 	} else {
-		if !w.storeResult(ctx, log, w.d.repo.MarkFailed(ctx, lease, lastErr, ambiguous)) {
+		done := m
+		done.Status, done.LastError = domain.StatusFailed, lastErr
+		done.PossibleDuplicate = done.PossibleDuplicate || ambiguous
+		if !w.storeResult(ctx, log, w.write(ctx, done, func(r store.MessageRepo) error {
+			return r.MarkFailed(ctx, lease, lastErr, ambiguous)
+		})) {
 			return
 		}
 		delta.Failed = 1
@@ -329,6 +336,29 @@ func (w *worker) record(m domain.Message, res connector.SendResult, sendErr erro
 	if kind != domain.KindPermanent && !interrupted {
 		w.report(sendErr)
 	}
+}
+
+// write runs op against the message repository. For a final status (done
+// carries it) and a configured StatusPublisher, op and the event are one
+// transaction; the publisher is woken after the commit.
+func (w *worker) write(ctx context.Context, done domain.Message, op func(store.MessageRepo) error) error {
+	ev := w.d.opts.Events
+	if ev == nil {
+		return op(w.d.repo)
+	}
+	err := w.d.opts.Tx.WithTx(ctx, func(tx store.Repos) error {
+		if err := op(tx.Messages()); err != nil {
+			return err
+		}
+		if err := ev.PublishStatus(ctx, tx, done); err != nil {
+			return fmt.Errorf("publish status event: %w", err)
+		}
+		return nil
+	})
+	if err == nil {
+		ev.Wake()
+	}
+	return err
 }
 
 // report passes send-health transitions to the SendReporter.

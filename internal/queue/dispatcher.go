@@ -109,6 +109,19 @@ type Event struct {
 	At        time.Time
 }
 
+// Transactor runs fn in one database transaction; store.Store implements it.
+type Transactor interface {
+	WithTx(ctx context.Context, fn func(tx store.Repos) error) error
+}
+
+// StatusPublisher records an event for an outbound message that reached a
+// final status (m carries it) in the transaction tx; Wake is called after the
+// commit. *webhook.Publisher implements it.
+type StatusPublisher interface {
+	PublishStatus(ctx context.Context, tx store.Repos, m domain.Message) error
+	Wake()
+}
+
 // SendReporter receives changes of a channel's send health, mirroring
 // inbox.ChannelStateReporter (T16). The health checker (T17) implements both.
 //
@@ -164,6 +177,15 @@ type Options struct {
 	// evenly at 60 s / rate_per_min).
 	RateBurst int
 
+	// Events, when set together with Tx, is told about the final status of a
+	// message (sent or failed) inside the transaction that records it, so a
+	// webhook event cannot be lost between the status change and the
+	// notification. A failure of Events fails the write: the lease then
+	// expires and the message is recovered as a possible duplicate (ADR 0002).
+	Events StatusPublisher
+	// Tx runs the transaction for Events (the store). Required with Events.
+	Tx Transactor
+
 	// Reporter, when set, receives send-health transitions per channel.
 	Reporter SendReporter
 	// OnEvent, when set, is called synchronously from worker goroutines.
@@ -181,6 +203,9 @@ type Options struct {
 func (o Options) withDefaults() (Options, error) {
 	if o.Messages == nil {
 		return o, errors.New("queue: Options.Messages is required")
+	}
+	if o.Events != nil && o.Tx == nil {
+		return o, errors.New("queue: Options.Events requires Options.Tx")
 	}
 	if o.Clock == nil {
 		o.Clock = clock.System()
@@ -609,15 +634,41 @@ func (d *Dispatcher) janitor() {
 	}
 }
 
-// recover runs RecoverExpiredLeases and logs every possible duplicate.
+// recover runs RecoverExpiredLeases and logs every possible duplicate. With a
+// StatusPublisher the recovery and the events of the messages that became
+// failed are one transaction: no event is lost or invented.
 func (d *Dispatcher) recover(ctx context.Context) error {
 	now := d.clk.Now()
-	recs, err := d.repo.RecoverExpiredLeases(ctx, now, d.opts.Retry.MaxAttempts)
+	var recs []store.RecoveredLease
+	var err error
+	if d.opts.Events == nil {
+		recs, err = d.repo.RecoverExpiredLeases(ctx, now, d.opts.Retry.MaxAttempts)
+	} else {
+		err = d.opts.Tx.WithTx(ctx, func(tx store.Repos) error {
+			var err error
+			if recs, err = tx.Messages().RecoverExpiredLeases(ctx, now, d.opts.Retry.MaxAttempts); err != nil {
+				return err
+			}
+			for _, r := range recs {
+				if r.NewStatus != domain.StatusFailed {
+					continue
+				}
+				m, err := tx.Messages().Get(ctx, r.MessageID)
+				if err != nil {
+					return err
+				}
+				if err := d.opts.Events.PublishStatus(ctx, tx, m); err != nil {
+					return fmt.Errorf("publish status event: %w", err)
+				}
+			}
+			return nil
+		})
+	}
 	if err != nil {
 		d.stats.update("", Counters{StoreErrors: 1}, nil)
 		return fmt.Errorf("recover expired leases: %w", err)
 	}
-	requeued := false
+	requeued, failed := false, false
 	for _, r := range recs {
 		d.log.Warn("possible duplicate: lease expired without a recorded result",
 			slog.String("message_id", r.MessageID.String()),
@@ -625,6 +676,10 @@ func (d *Dispatcher) recover(ctx context.Context) error {
 			slog.Int("attempt", r.Attempts),
 			slog.String("new_status", r.NewStatus.String()))
 		requeued = requeued || r.NewStatus == domain.StatusQueued
+		failed = failed || r.NewStatus == domain.StatusFailed
+	}
+	if failed && d.opts.Events != nil {
+		d.opts.Events.Wake()
 	}
 	d.stats.janitor(func(s *statsBook) {
 		s.recovered += int64(len(recs))
@@ -637,10 +692,32 @@ func (d *Dispatcher) recover(ctx context.Context) error {
 	return nil
 }
 
-// expire runs ExpireQueued.
+// expire runs ExpireQueued; with a StatusPublisher the expired messages and
+// their events are one transaction.
 func (d *Dispatcher) expire(ctx context.Context) {
 	now := d.clk.Now()
-	n, err := d.repo.ExpireQueued(ctx, now)
+	var n int
+	var err error
+	if d.opts.Events == nil {
+		n, err = d.repo.ExpireQueued(ctx, now)
+	} else {
+		err = d.opts.Tx.WithTx(ctx, func(tx store.Repos) error {
+			ms, err := tx.Messages().ExpireQueuedMessages(ctx, now)
+			if err != nil {
+				return err
+			}
+			for _, m := range ms {
+				if err := d.opts.Events.PublishStatus(ctx, tx, m); err != nil {
+					return fmt.Errorf("publish status event: %w", err)
+				}
+			}
+			n = len(ms)
+			return nil
+		})
+		if err == nil && n > 0 {
+			d.opts.Events.Wake()
+		}
+	}
 	if err != nil {
 		if ctx.Err() == nil {
 			d.stats.update("", Counters{StoreErrors: 1}, nil)

@@ -40,6 +40,7 @@ type Repos interface {
 	Tokens() TokenRepo
 	Sessions() SessionRepo
 	Audit() AuditRepo
+	Webhooks() WebhookRepo
 }
 
 // Store is the root of the persistence layer.
@@ -156,6 +157,11 @@ type MessageRepo interface {
 	// StatusFailed with LastError domain.LastErrorExpired and returns how
 	// many it changed.
 	ExpireQueued(ctx context.Context, now time.Time) (int, error)
+
+	// ExpireQueuedMessages is ExpireQueued returning the messages it
+	// changed (with their new status), so the caller can record an event for
+	// each of them in the same transaction.
+	ExpireQueuedMessages(ctx context.Context, now time.Time) ([]domain.Message, error)
 
 	// Get returns one message or domain.ErrNotFound.
 	Get(ctx context.Context, id domain.ID) (domain.Message, error)
@@ -444,4 +450,62 @@ type AuditFilter struct {
 	Action domain.AuditAction
 	Since  time.Time
 	Until  time.Time
+}
+
+// WebhookRepo stores webhook subscriptions and their delivery queue. Delivery
+// semantics mirror MessageRepo (ADR 0002): at-least-once, an attempt holds a
+// lease, the attempt counter is the fencing token.
+type WebhookRepo interface {
+	// Create stores w. Errors: domain.ErrConflict (duplicate name).
+	Create(ctx context.Context, w domain.Webhook) error
+	// Get returns one webhook. Errors: domain.ErrNotFound.
+	Get(ctx context.Context, id domain.ID) (domain.Webhook, error)
+	// List returns all webhooks ordered by ID.
+	List(ctx context.Context) ([]domain.Webhook, error)
+	// Update replaces name, URL, events and the enabled flag; SecretEnc
+	// replaces the stored secret only when non-nil. Errors: ErrNotFound,
+	// ErrConflict.
+	Update(ctx context.Context, w domain.Webhook) error
+	// Delete removes the webhook and its deliveries. Errors: ErrNotFound.
+	Delete(ctx context.Context, id domain.ID) error
+
+	// Subscribed returns the enabled webhooks that listen to ev. It is a
+	// read; use it inside the transaction that stores the event.
+	Subscribed(ctx context.Context, ev domain.WebhookEvent) ([]domain.Webhook, error)
+	// AddDeliveries stores pending deliveries (status, attempts and lease
+	// fields are ignored). Call it in the transaction of the event.
+	AddDeliveries(ctx context.Context, ds []domain.WebhookDelivery) error
+
+	// AcquireDelivery atomically picks the oldest due pending delivery of an
+	// enabled webhook, increments its attempt counter and leases it until
+	// leaseUntil. Two concurrent calls never return the same attempt. ok is
+	// false (and nothing is written) when nothing is due.
+	AcquireDelivery(ctx context.Context, now, leaseUntil time.Time) (DeliveryJob, bool, error)
+	// NextDeliveryDue returns when the earliest pending delivery of an
+	// enabled webhook becomes available (retry time or lease expiry).
+	NextDeliveryDue(ctx context.Context) (at time.Time, ok bool, err error)
+	// MarkDelivered, MarkDeliveryFailed and RescheduleDelivery complete an
+	// attempt. They return domain.ErrLeaseLost when the attempt is no longer
+	// the current one (lease recovered by a newer attempt, or the delivery
+	// was deleted).
+	MarkDelivered(ctx context.Context, l domain.DeliveryLease, at time.Time, httpCode int) error
+	MarkDeliveryFailed(ctx context.Context, l domain.DeliveryLease, at time.Time, lastErr string, httpCode int) error
+	RescheduleDelivery(ctx context.Context, l domain.DeliveryLease, at, nextAttempt time.Time, lastErr string, httpCode int) error
+	// GetDelivery returns one delivery. Errors: ErrNotFound.
+	GetDelivery(ctx context.Context, id domain.ID) (domain.WebhookDelivery, error)
+	// ListDeliveries returns the deliveries of a webhook, newest first.
+	ListDeliveries(ctx context.Context, webhookID domain.ID, limit int) ([]domain.WebhookDelivery, error)
+	// ExpireDeliveries fails the pending deliveries created before cutoff and
+	// drops their payload (a payload must not outlive the SMS retention), and
+	// returns their number.
+	ExpireDeliveries(ctx context.Context, cutoff, now time.Time) (int, error)
+	// PurgeDeliveries deletes delivered and failed deliveries last updated
+	// before cutoff and returns their number.
+	PurgeDeliveries(ctx context.Context, cutoff time.Time) (int, error)
+}
+
+// DeliveryJob is a leased delivery together with its target.
+type DeliveryJob struct {
+	Delivery domain.WebhookDelivery // Attempts already incremented
+	Webhook  domain.Webhook
 }
