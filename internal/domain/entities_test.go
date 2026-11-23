@@ -240,4 +240,9 @@ func TestDeviceInsecureTransport(t *testing.T) {
 			t.Errorf("InsecureTransport(%q, %s) = %v, want %v", tt.url, tt.mode, got, tt.want)
 		}
 	}
+	// tikker never connects to an agent device, so its (empty) base URL
+	// does not make it insecure.
+	if (Device{Connector: ConnectorAgent}).InsecureTransport() {
+		t.Error("agent device reported as insecure transport")
+	}
 }

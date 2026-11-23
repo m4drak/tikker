@@ -121,6 +121,7 @@ func toChannelDTO(c domain.Channel, deviceEnabled bool, queueDepth int) channelD
 type deviceDTO struct {
 	ID                string  `json:"id"`
 	Name              string  `json:"name"`
+	Connector         string  `json:"connector"`
 	BaseURL           string  `json:"base_url"`
 	Username          string  `json:"username"`
 	TLSMode           string  `json:"tls_mode"`
@@ -133,7 +134,7 @@ type deviceDTO struct {
 
 func toDeviceDTO(d domain.Device) deviceDTO {
 	return deviceDTO{
-		ID: string(d.ID), Name: d.Name, BaseURL: d.BaseURL, Username: d.Username, TLSMode: string(d.TLSMode),
+		ID: string(d.ID), Name: d.Name, Connector: string(d.Connector), BaseURL: d.BaseURL, Username: d.Username, TLSMode: string(d.TLSMode),
 		CAPEM: nullableString(d.CAPEM), Fingerprint: nullableString(formatFingerprint(d.Fingerprint)),
 		Enabled: d.Enabled, InsecureTransport: d.InsecureTransport(), CreatedAt: formatTime(d.CreatedAt),
 	}

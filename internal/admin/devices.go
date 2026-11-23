@@ -5,6 +5,7 @@ package admin
 
 import (
 	"context"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -26,6 +27,10 @@ const (
 	MaxUsername   = 64
 	MaxPassword   = 256
 	MaxCAPEM      = 16384
+	// MinAgentToken and MaxAgentToken bound the agent bearer token; it is
+	// printable ASCII without spaces (it travels in an HTTP header).
+	MinAgentToken = 32
+	MaxAgentToken = 256
 )
 
 var fingerprintPattern = regexp.MustCompile(`^([0-9A-Fa-f]{2}:?){31}[0-9A-Fa-f]{2}$`)
@@ -120,6 +125,53 @@ func checkCAPEM(v *validation, s string) {
 	}
 }
 
+func checkAgentToken(v *validation, p secrets.Password) {
+	t := p.Reveal()
+	if n := len(t); n < MinAgentToken || n > MaxAgentToken {
+		v.add("/agent_token", CodeOutOfRange, "Must have %d to %d characters.", MinAgentToken, MaxAgentToken)
+		return
+	}
+	for i := 0; i < len(t); i++ {
+		if t[i] < 0x21 || t[i] > 0x7E {
+			v.add("/agent_token", CodeInvalidFormat, "Must be printable ASCII without spaces.")
+			return
+		}
+	}
+}
+
+// agentUnused rejects connection settings an agent device has no use for
+// (tikker never connects to it). Empty values are accepted: forms submit
+// every field.
+func agentUnused(v *validation, fields map[string]*string) {
+	for _, f := range []string{"base_url", "username", "ca_pem", "fingerprint"} {
+		if p := fields[f]; p != nil && *p != "" {
+			v.add("/"+f, CodeInvalidFormat, "Not used by the agent connector; leave it empty.")
+		}
+	}
+}
+
+// tokenInUse reports whether another agent device already uses token.
+// Tokens are stored sealed, so every agent device's token is opened.
+func (s *Service) tokenInUse(ctx context.Context, tx store.Repos, self domain.ID, token secrets.Password) (bool, error) {
+	devs, err := tx.Devices().List(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, d := range devs {
+		if d.ID == self || d.Connector != domain.ConnectorAgent || d.AgentTokenEnc == nil {
+			continue
+		}
+		t, err := s.creds.DecryptAgentToken(d)
+		if err != nil {
+			return false, err
+		}
+		if subtle.ConstantTimeCompare([]byte(t.Reveal()), []byte(token.Reveal())) == 1 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func checkTLSConsistency(v *validation, mode domain.TLSMode, caPEM, fingerprint string) {
 	switch mode {
 	case domain.TLSCustomCA:
@@ -134,7 +186,13 @@ func checkTLSConsistency(v *validation, mode domain.TLSMode, caPEM, fingerprint 
 }
 
 // DeviceCreate is the input of [Service.CreateDevice]; nil means "not given".
+//
+// Connector selects the connector kind (default routeros-rest). An "agent"
+// device needs AgentToken and none of the connection settings (base URL,
+// username, password, TLS); a routeros-rest device must not have a token.
 type DeviceCreate struct {
+	Connector   *string
+	AgentToken  *secrets.Password
 	Name        *string
 	BaseURL     *string
 	Username    *string
@@ -153,28 +211,112 @@ func (s *Service) CreateDevice(ctx context.Context, actor domain.Actor, req Devi
 	d := domain.Device{
 		Connector: domain.ConnectorRouterOSREST, TLSMode: domain.TLSVerify, Enabled: req.Enabled == nil || *req.Enabled,
 	}
+	if req.Connector != nil {
+		k, err := domain.ParseConnectorKind(*req.Connector)
+		if err != nil {
+			v.add("/connector", CodeInvalidFormat, "Must be one of routeros-rest, agent.")
+		}
+		d.Connector = k
+	}
 	if req.Name == nil {
 		v.add("/name", CodeRequired, "A name is required.")
 	} else {
 		d.Name = *req.Name
 		checkName(&v, d.Name)
 	}
+	if d.Connector == domain.ConnectorAgent {
+		s.checkAgentCreate(&v, req)
+	} else {
+		s.checkRouterOSCreate(&v, &d, req)
+	}
+	if err := v.err(); err != nil {
+		return domain.Device{}, err
+	}
+
+	var err error
+	d.ID, d.CreatedAt = s.ids.NewID(), s.clk.Now()
+	pw := secrets.Password("") // agent devices have no router password
+	if req.Password != nil {
+		pw = *req.Password
+	}
+	if d.PasswordEnc, err = s.creds.Encrypt(d.ID, pw); err != nil {
+		return domain.Device{}, fmt.Errorf("encrypt device password: %w", err)
+	}
+	if d.Connector == domain.ConnectorAgent {
+		if d.AgentTokenEnc, err = s.creds.EncryptAgentToken(d.ID, *req.AgentToken); err != nil {
+			return domain.Device{}, fmt.Errorf("encrypt agent token: %w", err)
+		}
+	}
+	err = s.st.WithTx(ctx, func(tx store.Repos) error {
+		if d.Connector == domain.ConnectorAgent {
+			if err := s.checkTokenFree(ctx, tx, d.ID, *req.AgentToken); err != nil {
+				return err
+			}
+		}
+		if err := tx.Devices().Create(ctx, d); err != nil {
+			return err
+		}
+		return s.audit(ctx, tx, actor, domain.AuditDeviceCreate, "device:"+string(d.ID),
+			map[string]string{"name": d.Name, "base_url": d.BaseURL, "connector": string(d.Connector)})
+	})
+	var ve *ValidationError
+	switch {
+	case errors.As(err, &ve):
+		return domain.Device{}, ve
+	case errors.Is(err, domain.ErrConflict):
+		return domain.Device{}, ErrDuplicate
+	case err != nil:
+		return domain.Device{}, fmt.Errorf("create device: %w", err)
+	}
+	s.reload(ctx)
+	return d, nil
+}
+
+func (s *Service) checkTokenFree(ctx context.Context, tx store.Repos, self domain.ID, token secrets.Password) error {
+	used, err := s.tokenInUse(ctx, tx, self, token)
+	if err != nil {
+		return fmt.Errorf("check agent token: %w", err)
+	}
+	if used {
+		var v validation
+		v.add("/agent_token", CodeInvalidFormat, "Already used by another device; every agent needs its own token.")
+		return v.err()
+	}
+	return nil
+}
+
+func (s *Service) checkAgentCreate(v *validation, req DeviceCreate) {
+	if req.AgentToken == nil {
+		v.add("/agent_token", CodeRequired, "An agent token is required.")
+	} else {
+		checkAgentToken(v, *req.AgentToken)
+	}
+	agentUnused(v, map[string]*string{"base_url": req.BaseURL, "username": req.Username, "ca_pem": req.CAPEM, "fingerprint": req.Fingerprint})
+	if req.Password != nil && *req.Password != "" {
+		v.add("/password", CodeInvalidFormat, "Not used by the agent connector; leave it empty.")
+	}
+}
+
+func (s *Service) checkRouterOSCreate(v *validation, d *domain.Device, req DeviceCreate) {
+	if req.AgentToken != nil {
+		v.add("/agent_token", CodeInvalidFormat, "Only agent devices have a token.")
+	}
 	if req.BaseURL == nil {
 		v.add("/base_url", CodeRequired, "A base URL is required.")
 	} else {
 		d.BaseURL = *req.BaseURL
-		s.checkBaseURL(&v, d.BaseURL)
+		s.checkBaseURL(v, d.BaseURL)
 	}
 	if req.Username == nil {
 		v.add("/username", CodeRequired, "A username is required.")
 	} else {
 		d.Username = *req.Username
-		checkUsername(&v, d.Username)
+		checkUsername(v, d.Username)
 	}
 	if req.Password == nil {
 		v.add("/password", CodeRequired, "A password is required.")
 	} else {
-		checkPassword(&v, *req.Password)
+		checkPassword(v, *req.Password)
 	}
 	if req.TLSMode != nil {
 		m, err := domain.ParseTLSMode(*req.TLSMode)
@@ -186,7 +328,7 @@ func (s *Service) CreateDevice(ctx context.Context, actor domain.Actor, req Devi
 	if req.CAPEM != nil {
 		d.CAPEM = *req.CAPEM
 		if d.CAPEM != "" {
-			checkCAPEM(&v, d.CAPEM)
+			checkCAPEM(v, d.CAPEM)
 		}
 	}
 	if req.Fingerprint != nil && *req.Fingerprint != "" {
@@ -197,37 +339,16 @@ func (s *Service) CreateDevice(ctx context.Context, actor domain.Actor, req Devi
 		d.Fingerprint = fp
 	}
 	if d.TLSMode.Valid() {
-		checkTLSConsistency(&v, d.TLSMode, d.CAPEM, d.Fingerprint)
+		checkTLSConsistency(v, d.TLSMode, d.CAPEM, d.Fingerprint)
 	}
-	if err := v.err(); err != nil {
-		return domain.Device{}, err
-	}
-
-	var err error
-	d.ID, d.CreatedAt = s.ids.NewID(), s.clk.Now()
-	if d.PasswordEnc, err = s.creds.Encrypt(d.ID, *req.Password); err != nil {
-		return domain.Device{}, fmt.Errorf("encrypt device password: %w", err)
-	}
-	err = s.st.WithTx(ctx, func(tx store.Repos) error {
-		if err := tx.Devices().Create(ctx, d); err != nil {
-			return err
-		}
-		return s.audit(ctx, tx, actor, domain.AuditDeviceCreate, "device:"+string(d.ID),
-			map[string]string{"name": d.Name, "base_url": d.BaseURL})
-	})
-	if errors.Is(err, domain.ErrConflict) {
-		return domain.Device{}, ErrDuplicate
-	}
-	if err != nil {
-		return domain.Device{}, fmt.Errorf("create device: %w", err)
-	}
-	s.reload(ctx)
-	return d, nil
 }
 
 // DeviceChanges is the input of [Service.UpdateDevice]; nil fields are left
 // unchanged. A non-nil CAPEM or Fingerprint replaces the value ("" removes it).
+// AgentToken replaces the token of an agent device. The connector kind
+// cannot be changed.
 type DeviceChanges struct {
+	AgentToken  *secrets.Password
 	Name        *string
 	BaseURL     *string
 	Username    *string
@@ -273,6 +394,24 @@ func (s *Service) checkDeviceChanges(v *validation, ch DeviceChanges) {
 			v.add("/fingerprint", CodeInvalidFormat, "Must be a SHA-256 fingerprint: 32 hex bytes, optionally separated by colons.")
 		}
 	}
+	if ch.AgentToken != nil {
+		checkAgentToken(v, *ch.AgentToken)
+	}
+}
+
+// checkKindChanges rejects changes that do not apply to the device's
+// connector kind.
+func checkKindChanges(v *validation, kind domain.ConnectorKind, ch DeviceChanges) {
+	if kind != domain.ConnectorAgent {
+		if ch.AgentToken != nil {
+			v.add("/agent_token", CodeInvalidFormat, "Only agent devices have a token.")
+		}
+		return
+	}
+	agentUnused(v, map[string]*string{"base_url": ch.BaseURL, "username": ch.Username, "ca_pem": ch.CAPEM, "fingerprint": ch.Fingerprint})
+	if ch.Password != nil && *ch.Password != "" {
+		v.add("/password", CodeInvalidFormat, "Not used by the agent connector; leave it empty.")
+	}
 }
 
 // UpdateDevice applies ch, audits it (without secrets) and reloads the
@@ -299,6 +438,16 @@ func (s *Service) UpdateDevice(ctx context.Context, actor domain.Actor, id domai
 		d, err := tx.Devices().Get(ctx, id)
 		if err != nil {
 			return err
+		}
+		var kv validation
+		checkKindChanges(&kv, d.Connector, ch)
+		if err := kv.err(); err != nil {
+			return err
+		}
+		if d.Connector == domain.ConnectorAgent {
+			// Agent devices have no connection settings (forms send them
+			// empty); only name, enabled and the token change.
+			ch.BaseURL, ch.Username, ch.Password, ch.TLSMode, ch.CAPEM, ch.Fingerprint = nil, nil, nil, nil, nil, nil
 		}
 		// F-02: changing the target host, or switching a previously verified
 		// connection to "insecure", must re-confirm the router password.
@@ -354,7 +503,16 @@ func (s *Service) UpdateDevice(ctx context.Context, actor domain.Actor, id domai
 		if err := cv.err(); err != nil {
 			return err
 		}
-		d.PasswordEnc = nil // nil keeps the stored password
+		d.PasswordEnc, d.AgentTokenEnc = nil, nil // nil keeps the stored secret
+		if ch.AgentToken != nil {
+			if err := s.checkTokenFree(ctx, tx, d.ID, *ch.AgentToken); err != nil {
+				return err
+			}
+			if d.AgentTokenEnc, err = s.creds.EncryptAgentToken(d.ID, *ch.AgentToken); err != nil {
+				return fmt.Errorf("encrypt agent token: %w", err)
+			}
+			meta["agent_token"] = "changed"
+		}
 		if ch.Password != nil {
 			if d.PasswordEnc, err = s.creds.Encrypt(d.ID, *ch.Password); err != nil {
 				return fmt.Errorf("encrypt device password: %w", err)

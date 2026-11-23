@@ -12,7 +12,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 {{- else if eq .Data.Notice "disabled"}}
 <p class="notice ok" role="status">{{t "dev.notice.disabled"}}</p>
 {{- end}}
-<p><a href="/devices/new" role="button">{{t "dev.add"}}</a></p>
+<p><a href="/devices/new" role="button">{{t "dev.add"}}</a> <a href="/devices/new?connector=agent" role="button" class="secondary">{{t "dev.add_agent"}}</a></p>
 {{- if .Data.Rows}}
 <div class="overflow-auto">
   <table class="striped compact" id="devices">
@@ -32,9 +32,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
           <a href="/devices/{{.D.ID}}"><strong>{{.D.Name}}</strong></a>
           {{- if not .D.Enabled}} <span class="badge state-disabled">{{t "state.disabled"}}</span>{{end}}
         </td>
-        <td>{{.D.BaseURL}}</td>
+        <td>{{if eq (print .D.Connector) "agent"}}<span class="badge">{{t "dev.agent.badge"}}</span>{{else}}{{.D.BaseURL}}{{end}}</td>
         <td>
-          {{t .TLSKey}}
+          {{- if eq (print .D.Connector) "agent"}}-{{else}}{{t .TLSKey}}{{end}}
           {{- if .Insecure}} <span class="badge state-degraded" title="{{t "dev.insecure_short"}}">{{t "dev.insecure_badge"}}</span>{{end}}
         </td>
         <td>

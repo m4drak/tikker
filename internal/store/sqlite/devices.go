@@ -22,7 +22,7 @@ type deviceRepo struct{ h *handle }
 var _ store.DeviceRepo = (*deviceRepo)(nil)
 
 const deviceCols = `id, name, connector, base_url, username, password_enc, tls_mode, ca_pem,
-	fingerprint, enabled, created_at`
+	fingerprint, enabled, created_at, agent_token_enc`
 
 func scanDevice(sc scanner) (domain.Device, error) {
 	var d domain.Device
@@ -30,7 +30,7 @@ func scanDevice(sc scanner) (domain.Device, error) {
 	var enabled int
 	var created int64
 	err := sc.Scan(&id, &d.Name, &connector, &d.BaseURL, &d.Username, &d.PasswordEnc, &tls,
-		&d.CAPEM, &d.Fingerprint, &enabled, &created)
+		&d.CAPEM, &d.Fingerprint, &enabled, &created, &d.AgentTokenEnc)
 	if err != nil {
 		return domain.Device{}, err
 	}
@@ -53,9 +53,9 @@ func (r *deviceRepo) Create(ctx context.Context, d domain.Device) error {
 	}
 	return r.h.write(ctx, func(q execer) error {
 		_, err := q.ExecContext(ctx,
-			`INSERT INTO devices (`+deviceCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO devices (`+deviceCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			string(d.ID), d.Name, string(d.Connector), d.BaseURL, d.Username, pw, string(d.TLSMode),
-			d.CAPEM, d.Fingerprint, boolInt(d.Enabled), toMS(d.CreatedAt))
+			d.CAPEM, d.Fingerprint, boolInt(d.Enabled), toMS(d.CreatedAt), blobArg(d.AgentTokenEnc))
 		if err != nil {
 			return fmt.Errorf("sqlite: create device: %w", mapErr(err))
 		}
@@ -102,14 +102,15 @@ func (r *deviceRepo) Update(ctx context.Context, d domain.Device) error {
 	if d.PasswordEnc != nil {
 		pw = d.PasswordEnc
 	}
+	tok := blobArg(d.AgentTokenEnc) // NULL keeps the stored agent token
 	return r.h.write(ctx, func(q execer) error {
 		res, err := q.ExecContext(ctx,
 			`UPDATE devices SET name = ?, connector = ?, base_url = ?, username = ?,
 			        password_enc = COALESCE(?, password_enc), tls_mode = ?, ca_pem = ?,
-			        fingerprint = ?, enabled = ?
+			        fingerprint = ?, enabled = ?, agent_token_enc = COALESCE(?, agent_token_enc)
 			  WHERE id = ?`,
 			d.Name, string(d.Connector), d.BaseURL, d.Username, pw, string(d.TLSMode), d.CAPEM,
-			d.Fingerprint, boolInt(d.Enabled), string(d.ID))
+			d.Fingerprint, boolInt(d.Enabled), tok, string(d.ID))
 		if err != nil {
 			return fmt.Errorf("sqlite: update device: %w", mapErr(err))
 		}
@@ -122,6 +123,14 @@ func (r *deviceRepo) Update(ctx context.Context, d domain.Device) error {
 		}
 		return nil
 	})
+}
+
+// blobArg maps a nil slice to SQL NULL.
+func blobArg(b []byte) any {
+	if b == nil {
+		return nil
+	}
+	return b
 }
 
 // Delete implements [store.DeviceRepo].

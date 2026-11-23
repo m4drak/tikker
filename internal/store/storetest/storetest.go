@@ -193,6 +193,26 @@ func testDevices(t *testing.T, f Factory) {
 	if string(got.PasswordEnc) != "new" {
 		t.Fatalf("password = %q", got.PasswordEnc)
 	}
+	// The agent token follows the same rule: nil keeps, non-nil replaces.
+	if got.AgentTokenEnc != nil {
+		t.Fatalf("agent token of a routeros device = %q", got.AgentTokenEnc)
+	}
+	upd.AgentTokenEnc = []byte("tok")
+	e.ok(e.s.Devices().Update(e.ctx, upd))
+	upd.AgentTokenEnc = nil
+	e.ok(e.s.Devices().Update(e.ctx, upd))
+	got, _ = e.s.Devices().Get(e.ctx, d.ID)
+	if string(got.AgentTokenEnc) != "tok" {
+		t.Fatalf("agent token = %q", got.AgentTokenEnc)
+	}
+	agentDev := domain.Device{ID: e.id(), Name: "agent", Connector: domain.ConnectorAgent, PasswordEnc: []byte{},
+		AgentTokenEnc: []byte("sealed"), TLSMode: domain.TLSVerify, Enabled: true, CreatedAt: T0}
+	e.ok(e.s.Devices().Create(e.ctx, agentDev))
+	got, _ = e.s.Devices().Get(e.ctx, agentDev.ID)
+	if got.Connector != domain.ConnectorAgent || string(got.AgentTokenEnc) != "sealed" {
+		t.Fatalf("agent device = %+v", got)
+	}
+	e.ok(e.s.Devices().Delete(e.ctx, agentDev.ID))
 	upd.Name = "bravo"
 	e.is(e.s.Devices().Update(e.ctx, upd), domain.ErrConflict)
 	missing := upd

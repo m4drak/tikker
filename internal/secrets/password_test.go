@@ -127,6 +127,57 @@ func TestDeviceCredentials(t *testing.T) {
 	}
 }
 
+func TestDeviceCredentialsAgentToken(t *testing.T) {
+	c := NewDeviceCredentials(newRing(t, 1))
+	id1, id2 := domain.ID("01J00000000000000000000001"), domain.ID("01J00000000000000000000002")
+	const token = "agent-token-0123456789abcdef0123456789"
+
+	pw, err := c.Encrypt(id1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := c.EncryptAgentToken(id1, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := domain.Device{ID: id1, Connector: domain.ConnectorAgent, PasswordEnc: pw, AgentTokenEnc: tok}
+
+	tests := []struct {
+		name    string
+		dev     domain.Device
+		want    string
+		wantErr bool
+	}{
+		{"round trip", d, token, false},
+		{"no token", domain.Device{ID: id1, PasswordEnc: pw}, "", false},
+		{"other device", domain.Device{ID: id2, PasswordEnc: pw, AgentTokenEnc: tok}, "", true},
+		// A sealed password must not open as a token (different purpose).
+		{"password as token", domain.Device{ID: id1, PasswordEnc: pw, AgentTokenEnc: pw}, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := c.DecryptAgentToken(tt.dev)
+			if (err != nil) != tt.wantErr || got.Reveal() != tt.want {
+				t.Fatalf("DecryptAgentToken = %q, %v", got.Reveal(), err)
+			}
+			if err := c.Verify([]domain.Device{tt.dev}); (err != nil) != tt.wantErr {
+				t.Fatalf("Verify = %v", err)
+			}
+		})
+	}
+
+	cfg, err := c.ConnectorConfig(d)
+	if err != nil || cfg.AgentToken != token {
+		t.Fatalf("ConnectorConfig = %v, %v", cfg, err)
+	}
+	if s := fmt.Sprintf("%v %+v %#v", cfg, cfg, cfg); strings.Contains(s, token) {
+		t.Fatalf("config leaks agent token: %s", s)
+	}
+	if _, err := c.EncryptAgentToken("", "x"); err == nil {
+		t.Fatal("empty id accepted")
+	}
+}
+
 func TestPasswordGoString(t *testing.T) {
 	if got := Password(plain).GoString(); strings.Contains(got, plain) || !strings.Contains(got, redacted) {
 		t.Fatalf("GoString = %s", got)

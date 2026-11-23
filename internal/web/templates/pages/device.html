@@ -110,6 +110,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 {{- $d := .Data.Form}}
 <form method="post" id="device-form" action="{{if $d.ID}}/devices/{{$d.ID}}{{else}}/devices{{end}}">
   <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  {{- if $d.Agent}}
+  <input type="hidden" name="connector" value="agent">
+  {{- end}}
 
   <label for="dev-name">{{t "dev.name"}}</label>
   <input id="dev-name" name="name" type="text" maxlength="64" value="{{$d.Form.Name}}" autocomplete="off" required
@@ -118,6 +121,18 @@ SPDX-License-Identifier: GPL-3.0-or-later
   <small id="dev-name-error" class="field-error" role="alert">{{$d.Errors.name}}</small>
   {{- end}}
 
+  {{- if $d.Agent}}
+  <p class="muted" id="agent-info"><small>{{t "dev.agent.info"}} <code id="agent-url">{{$d.AgentURL}}</code></small></p>
+  <label for="dev-token">{{t "dev.agent.token"}}</label>
+  <input id="dev-token" name="agent_token" type="password" minlength="32" maxlength="256" value="" autocomplete="new-password" autocapitalize="none" spellcheck="false"
+    {{- if not $d.ID}} required{{end}}
+    {{- if $d.Errors.agent_token}} aria-invalid="true" aria-describedby="dev-token-error"{{else}} aria-describedby="dev-token-hint"{{end}}>
+  {{- if $d.Errors.agent_token}}
+  <small id="dev-token-error" class="field-error" role="alert">{{$d.Errors.agent_token}}</small>
+  {{- else}}
+  <small id="dev-token-hint" class="muted">{{if $d.ID}}{{t "dev.agent.token_keep"}}{{else}}{{t "dev.agent.token_hint"}}{{end}}</small>
+  {{- end}}
+  {{- else}}
   <label for="dev-url">{{t "dev.url"}}</label>
   <input id="dev-url" name="base_url" type="url" maxlength="255" value="{{$d.Form.BaseURL}}" autocomplete="off" autocapitalize="none" spellcheck="false" required
     {{- if $d.Errors.base_url}} aria-invalid="true" aria-describedby="dev-url-error"{{else}} aria-describedby="dev-url-hint"{{end}}>
@@ -176,6 +191,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
   <small id="dev-ca-error" class="field-error" role="alert">{{$d.Errors.ca_pem}}</small>
   {{- else}}
   <small id="dev-ca-hint" class="muted">{{t "dev.ca_hint"}}</small>
+  {{- end}}
+
   {{- end}}
 
   <label for="dev-enabled">

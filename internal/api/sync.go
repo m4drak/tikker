@@ -128,6 +128,7 @@ func deviceKey(d domain.Device) string {
 	h := sha256.New()
 	for _, s := range []string{
 		string(d.Connector), d.BaseURL, d.Username, string(d.TLSMode), d.CAPEM, d.Fingerprint, string(d.PasswordEnc),
+		string(d.AgentTokenEnc),
 	} {
 		fmt.Fprintf(h, "%d:%s|", len(s), s)
 	}

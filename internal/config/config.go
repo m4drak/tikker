@@ -81,6 +81,23 @@ type Config struct {
 	// ShutdownTimeout bounds the graceful shutdown: in-flight HTTP
 	// requests and sends may finish within it (SPEC §2.2).
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
+	// Agent tunes the "agent" connector (routers that poll tikker,
+	// docs/agent.md).
+	Agent AgentConfig `yaml:"agent"`
+}
+
+// AgentConfig tunes the agent connector (PLAN §5 #1).
+type AgentConfig struct {
+	// SendTimeout bounds one send: the agent must poll, send and report
+	// within it. It also sizes the dispatcher lease.
+	SendTimeout time.Duration `yaml:"send_timeout"`
+	// StaleAfter: an agent whose last check-in is older is down.
+	StaleAfter time.Duration `yaml:"stale_after"`
+	// MaxSegments is the longest message (in SMS segments) one send may
+	// carry; 1 disables concatenation.
+	MaxSegments int `yaml:"max_segments"`
+	// UCS2 enables UCS-2 (non-GSM characters without transliteration).
+	UCS2 bool `yaml:"ucs2"`
 }
 
 // RetryConfig is the outbound retry schedule (SPEC §4.2).
@@ -136,6 +153,12 @@ func Default() Config {
 		SessionAbsoluteTimeout: 12 * time.Hour,
 		APIRateLimit:           120,
 		ShutdownTimeout:        30 * time.Second,
+		Agent: AgentConfig{
+			SendTimeout: 30 * time.Second,
+			StaleAfter:  90 * time.Second,
+			MaxSegments: 10,
+			UCS2:        true,
+		},
 		Retry: RetryConfig{
 			MaxAttempts: rp.MaxAttempts,
 			Base:        rp.Initial,
@@ -203,6 +226,10 @@ func (c Config) entries() []entry {
 		{"api_rate_limit", strconv.Itoa(c.APIRateLimit)},
 		{"password_hash_concurrency", strconv.Itoa(c.HashConcurrency)},
 		{"shutdown_timeout", strconv.Quote(c.ShutdownTimeout.String())},
+		{"agent.send_timeout", strconv.Quote(c.Agent.SendTimeout.String())},
+		{"agent.stale_after", strconv.Quote(c.Agent.StaleAfter.String())},
+		{"agent.max_segments", strconv.Itoa(c.Agent.MaxSegments)},
+		{"agent.ucs2", strconv.FormatBool(c.Agent.UCS2)},
 	}
 }
 

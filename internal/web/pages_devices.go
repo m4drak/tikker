@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/m4drak/tikker/internal/admin"
+	"github.com/m4drak/tikker/internal/agent"
 	"github.com/m4drak/tikker/internal/auth"
 	"github.com/m4drak/tikker/internal/domain"
 	"github.com/m4drak/tikker/internal/secrets"
@@ -65,6 +66,7 @@ func tlsModeKey(m domain.TLSMode) string {
 // deviceForm is what the user typed. The password is never part of it: the
 // field is always rendered empty.
 type deviceForm struct {
+	Connector   string // domain.ConnectorKind; "" means routeros-rest
 	Name        string
 	BaseURL     string
 	Username    string
@@ -81,6 +83,9 @@ type deviceFormData struct {
 	Errors   map[string]string // form field -> translated message
 	Modes    []optionItem
 	Insecure bool // the typed settings are unencrypted or unauthenticated
+	Agent    bool // the device uses the agent connector (no connection settings)
+	// AgentURL is where the router script connects (base URL + /agent/v1/).
+	AgentURL string
 }
 
 type deviceRow struct {
@@ -122,7 +127,7 @@ type deviceData struct {
 }
 
 func formOf(d domain.Device) deviceForm {
-	return deviceForm{Name: d.Name, BaseURL: d.BaseURL, Username: d.Username, TLSMode: string(d.TLSMode),
+	return deviceForm{Connector: string(d.Connector), Name: d.Name, BaseURL: d.BaseURL, Username: d.Username, TLSMode: string(d.TLSMode),
 		CAPEM: d.CAPEM, Fingerprint: d.Fingerprint, Enabled: d.Enabled}
 }
 
@@ -131,13 +136,18 @@ func (s *Server) formData(id domain.ID, f deviceForm, errs map[string]string) de
 	for _, m := range tlsModes {
 		d.Modes = append(d.Modes, optionItem{Value: string(m.Mode), LabelKey: m.Key, Selected: f.TLSMode == string(m.Mode)})
 	}
-	d.Insecure = domain.Device{BaseURL: f.BaseURL, TLSMode: domain.TLSMode(f.TLSMode)}.InsecureTransport() && f.BaseURL != ""
+	d.Agent = f.Connector == string(domain.ConnectorAgent)
+	d.Insecure = !d.Agent && domain.Device{BaseURL: f.BaseURL, TLSMode: domain.TLSMode(f.TLSMode)}.InsecureTransport() && f.BaseURL != ""
+	if d.Agent {
+		d.AgentURL = strings.TrimRight(s.baseURL, "/") + agent.Prefix + "/"
+	}
 	return d
 }
 
 func readDeviceForm(r *http.Request) deviceForm {
 	return deviceForm{
-		Name: strings.TrimSpace(r.PostFormValue("name")), BaseURL: strings.TrimSpace(r.PostFormValue("base_url")),
+		Connector: r.PostFormValue("connector"),
+		Name:      strings.TrimSpace(r.PostFormValue("name")), BaseURL: strings.TrimSpace(r.PostFormValue("base_url")),
 		Username: r.PostFormValue("username"), TLSMode: r.PostFormValue("tls_mode"),
 		CAPEM: strings.TrimSpace(r.PostFormValue("ca_pem")), Fingerprint: strings.TrimSpace(r.PostFormValue("fingerprint")),
 		Enabled: r.PostFormValue("enabled") != "",
@@ -191,6 +201,9 @@ func (s *Server) devices(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deviceNew(w http.ResponseWriter, r *http.Request) {
 	f := deviceForm{TLSMode: string(domain.TLSVerify), Enabled: true}
+	if r.URL.Query().Get("connector") == string(domain.ConnectorAgent) {
+		f.Connector = string(domain.ConnectorAgent)
+	}
 	s.Render(w, r, http.StatusOK, "device", deviceData{Form: s.formData("", f, nil)})
 }
 
@@ -205,10 +218,19 @@ func (s *Server) deviceCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	f := readDeviceForm(r)
 	pw := secrets.Password(r.PostFormValue("password"))
-	d, err := s.admin.CreateDevice(r.Context(), p.Actor(), admin.DeviceCreate{
+	req := admin.DeviceCreate{
 		Name: &f.Name, BaseURL: &f.BaseURL, Username: &f.Username, Password: &pw, TLSMode: &f.TLSMode,
 		CAPEM: &f.CAPEM, Fingerprint: &f.Fingerprint, Enabled: &f.Enabled,
-	})
+	}
+	if f.Connector != "" {
+		req.Connector = &f.Connector
+	}
+	if f.Connector == string(domain.ConnectorAgent) {
+		tok := secrets.Password(r.PostFormValue("agent_token"))
+		req.AgentToken = &tok
+		req.Password = nil
+	}
+	d, err := s.admin.CreateDevice(r.Context(), p.Actor(), req)
 	lang := s.language(r)
 	switch {
 	case err == nil:
@@ -307,6 +329,15 @@ func (s *Server) deviceUpdate(w http.ResponseWriter, r *http.Request) {
 	if pw := r.PostFormValue("password"); pw != "" {
 		sp := secrets.Password(pw)
 		ch.Password = &sp
+	}
+	f.Connector = string(d.Connector) // the kind cannot change
+	if d.Connector == domain.ConnectorAgent {
+		// The agent form has no connection settings.
+		ch = admin.DeviceChanges{Name: &f.Name, Enabled: &f.Enabled}
+		if tok := r.PostFormValue("agent_token"); tok != "" {
+			st := secrets.Password(tok)
+			ch.AgentToken = &st
+		}
 	}
 	_, err := s.admin.UpdateDevice(r.Context(), p.Actor(), d.ID, ch)
 	lang := s.language(r)

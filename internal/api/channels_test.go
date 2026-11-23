@@ -243,6 +243,14 @@ func (failingCreds) Encrypt(domain.ID, secrets.Password) ([]byte, error) {
 	return nil, errors.New("no")
 }
 
+func (failingCreds) EncryptAgentToken(domain.ID, secrets.Password) ([]byte, error) {
+	return nil, errors.New("no")
+}
+
+func (failingCreds) DecryptAgentToken(domain.Device) (secrets.Password, error) {
+	return "", errors.New("no")
+}
+
 // TestChannelTransliterateDefault: an omitted transliterate follows the
 // connector's capabilities (SPEC §4.6); an explicit value always wins.
 func TestChannelTransliterateDefault(t *testing.T) {

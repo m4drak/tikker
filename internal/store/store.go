@@ -306,7 +306,8 @@ type DeviceRepo interface {
 	// List returns all devices ordered by name.
 	List(ctx context.Context) ([]domain.Device, error)
 	// Update replaces all mutable fields of d (everything but ID and
-	// CreatedAt). A nil PasswordEnc keeps the stored password.
+	// CreatedAt). A nil PasswordEnc keeps the stored password, a nil
+	// AgentTokenEnc the stored agent token.
 	Update(ctx context.Context, d domain.Device) error
 	// Delete removes the device and its channels. It fails with
 	// domain.ErrConflict, deleting nothing, while any outbound message is

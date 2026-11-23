@@ -52,6 +52,10 @@ const (
 	envAPIRateLimit           = "TIKKER_API_RATE_LIMIT"
 	envHashConcurrency        = "TIKKER_PASSWORD_HASH_CONCURRENCY"
 	envShutdownTimeout        = "TIKKER_SHUTDOWN_TIMEOUT"
+	envAgentSendTimeout       = "TIKKER_AGENT_SEND_TIMEOUT"
+	envAgentStaleAfter        = "TIKKER_AGENT_STALE_AFTER"
+	envAgentMaxSegments       = "TIKKER_AGENT_MAX_SEGMENTS"
+	envAgentUCS2              = "TIKKER_AGENT_UCS2"
 )
 
 // DefaultConfigFile is the YAML file name looked up in the data directory
@@ -245,6 +249,10 @@ func applyEnv(cfg *Config, lookup LookupFunc) error {
 	integer(envAPIRateLimit, &cfg.APIRateLimit)
 	integer(envHashConcurrency, &cfg.HashConcurrency)
 	duration(envShutdownTimeout, &cfg.ShutdownTimeout)
+	duration(envAgentSendTimeout, &cfg.Agent.SendTimeout)
+	duration(envAgentStaleAfter, &cfg.Agent.StaleAfter)
+	integer(envAgentMaxSegments, &cfg.Agent.MaxSegments)
+	boolean(envAgentUCS2, &cfg.Agent.UCS2)
 
 	return errors.Join(errs...)
 }

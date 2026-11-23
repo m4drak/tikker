@@ -73,6 +73,9 @@ var (
 	sAPIRateLimit        = setting{"api_rate_limit", envAPIRateLimit}
 	sHashConcurrency     = setting{"password_hash_concurrency", envHashConcurrency}
 	sShutdownTimeout     = setting{"shutdown_timeout", envShutdownTimeout}
+	sAgentSendTimeout    = setting{"agent.send_timeout", envAgentSendTimeout}
+	sAgentStaleAfter     = setting{"agent.stale_after", envAgentStaleAfter}
+	sAgentMaxSegments    = setting{"agent.max_segments", envAgentMaxSegments}
 )
 
 var regionPattern = regexp.MustCompile(`^[A-Z]{2}$`)
@@ -131,6 +134,7 @@ func Validate(c Config) error {
 
 	add(validateRetry(c.Retry))
 	add(validateTLS(c.TLS))
+	add(validateAgent(c.Agent))
 
 	if n := utf8.RuneCountInString(string(c.AdminPassword)); n > 0 && n < minAdminPasswordLen {
 		add(sAdminPassword.errorf("must be at least %d characters", minAdminPasswordLen))
@@ -349,4 +353,27 @@ func validateHTTPHost(h string) error {
 		return sAllowedHTTPHosts.errorf("%q is not an IP address, CIDR prefix or host name", h)
 	}
 	return nil
+}
+
+// Agent connector bounds: a send must leave the agent time to poll; the
+// stale limit must exceed a poll cycle.
+const (
+	minAgentSendTimeout = 5 * time.Second
+	maxAgentSendTimeout = 10 * time.Minute
+	minAgentStaleAfter  = 10 * time.Second
+	maxAgentSegments    = 255
+)
+
+func validateAgent(a AgentConfig) error {
+	var errs []error
+	if a.SendTimeout < minAgentSendTimeout || a.SendTimeout > maxAgentSendTimeout {
+		errs = append(errs, sAgentSendTimeout.errorf("must be between %s and %s, got %s", minAgentSendTimeout, maxAgentSendTimeout, a.SendTimeout))
+	}
+	if a.StaleAfter < minAgentStaleAfter {
+		errs = append(errs, sAgentStaleAfter.errorf("must be at least %s, got %s", minAgentStaleAfter, a.StaleAfter))
+	}
+	if a.MaxSegments < 1 || a.MaxSegments > maxAgentSegments {
+		errs = append(errs, sAgentMaxSegments.errorf("must be between 1 and %d, got %d", maxAgentSegments, a.MaxSegments))
+	}
+	return errors.Join(errs...)
 }
