@@ -137,4 +137,6 @@ Model główny (Claude Opus) i niezależny przegląd (OpenAI Codex). Codex potwi
 
 **F-02 naprawione** na branchu `fix/t50-f02-router-pass`: zmiana hosta urządzenia (`base_url`) lub przełączenie z trybu weryfikowanego na `insecure` wymaga ponownego podania hasła routera (porównanie ze stanem zapisanym — re-submit tej samej wartości nie trigeruje). Zapobiega wysłaniu zapisanego hasła do obcego hosta lub po cleartexcie.
 
-Pozostają do decyzji: R3 (trusted proxies), R4 (root w setup.rsc), R5 (pomiar OOM w T51), R6 (klucz obok bazy).
+**F-03 naprawione** na branchu `fix/t50-f03-trusted-proxy`: compose zaufuje teraz tylko statycznemu adresowi Caddy (172.28.0.10), nie całej podsieci `172.28.0.0/24` — to wyklucza podszywanie się pod `X-Forwarded-For` przez inny kontener w sieci.
+
+Pozostają do decyzji: R4 (root w setup.rsc), R5 (pomiar OOM w T51), R6 (klucz obok bazy).
