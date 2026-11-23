@@ -71,6 +71,7 @@ var (
 	sSessionAbsolute     = setting{"session_absolute_timeout", envSessionAbsoluteTimeout}
 	sAllowedHTTPHosts    = setting{"allowed_http_hosts", envAllowedHTTPHosts}
 	sAPIRateLimit        = setting{"api_rate_limit", envAPIRateLimit}
+	sHashConcurrency     = setting{"password_hash_concurrency", envHashConcurrency}
 	sShutdownTimeout     = setting{"shutdown_timeout", envShutdownTimeout}
 )
 
@@ -163,6 +164,9 @@ func Validate(c Config) error {
 	}
 	if c.APIRateLimit < 0 {
 		add(sAPIRateLimit.errorf("must be 0 (no limit) or positive, got %d", c.APIRateLimit))
+	}
+	if c.HashConcurrency < 0 {
+		add(sHashConcurrency.errorf("must be 0 (default) or positive, got %d", c.HashConcurrency))
 	}
 	add(validateMinDuration(sShutdownTimeout, c.ShutdownTimeout, time.Second))
 

@@ -141,4 +141,6 @@ Model główny (Claude Opus) i niezależny przegląd (OpenAI Codex). Codex potwi
 
 **F-04 naprawione** na branchu `fix/t50-f04-container-isolation`: `setup.rsc` dodaje teraz regułę forward blokującą ruch z sieci kontenera do LAN oraz dokumentuje tryb nie-root (`ctrUser "65532:65532"` + chown mediów) z opcją powrotu do `0:0`, gdy nośnik nie pozwala na chown.
 
-Pozostają do decyzji: R5 (pomiar OOM w T51). **Zaakceptowane z dokumentacją:** R6 (klucz obok bazy — backup `/data` = sekret, udokumentowane w `deploy-mikrotik.md` §8 i `deploy-server.md` §7), R7 (brak izolacji odczytu — świadoma decyzja MVP, opisana w dokumentacji), R8 (polityka `write` konta routera — ograniczenie RouterOS, opisane w deploy docs).
+**F-05 naprawione** na branchu `fix/t50-f05-argon2-concurrency`: dodano `TIKKER_PASSWORD_HASH_CONCURRENCY` (config `password_hash_concurrency`, walidowane ≥0, domyślnie 2); `setup.rsc` ustawia `1` w trybie kontenerowym i podnosi `memory-max` do `96M`. Usuwa ryzyko OOM przy równoległych logowaniach. Ostateczny pomiar peak RAM zostaje w T51.
+
+**Zaakceptowane z dokumentacją:** R6 (klucz obok bazy — backup `/data` = sekret, udokumentowane w `deploy-mikrotik.md` §8 i `deploy-server.md` §7), R7 (brak izolacji odczytu — świadoma decyzja MVP, opisana w dokumentacji), R8 (polityka `write` konta routera — ograniczenie RouterOS, opisane w deploy docs).

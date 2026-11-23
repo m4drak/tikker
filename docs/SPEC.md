@@ -309,6 +309,7 @@ Urządzenia i kanały są przechowywane w bazie (zarządzane z UI/API), opcjonal
 | `TIKKER_SESSION_IDLE_TIMEOUT` / `TIKKER_SESSION_ABSOLUTE_TIMEOUT` | `1h` / `12h` | limity sesji panelu (§7); bezwzględny ≥ bezczynności |
 | `TIKKER_ALLOWED_HTTP_HOSTS` | – | hosty urządzeń (IP, CIDR lub nazwa, po przecinku) dostępne przez `http://` (§3.3, np. podsieć veth w trybie kontenerowym); domyślnie tylko `https://` |
 | `TIKKER_API_RATE_LIMIT` | `120` | limit żądań API na token na minutę (§4.5); `0` wyłącza |
+| `TIKKER_PASSWORD_HASH_CONCURRENCY` | `2` | ile hashowań argon2id równolegle (§7); `1` w trybie kontenerowym aby ograniczyć szczyt pamięci (F-05) |
 | `TIKKER_SHUTDOWN_TIMEOUT` | `30s` | czas na łagodne zamknięcie: dokończenie żądań HTTP i bieżących wysyłek (§2.2) |
 
 ---

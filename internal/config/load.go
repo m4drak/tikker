@@ -50,6 +50,7 @@ const (
 	envSessionAbsoluteTimeout = "TIKKER_SESSION_ABSOLUTE_TIMEOUT"
 	envAllowedHTTPHosts       = "TIKKER_ALLOWED_HTTP_HOSTS"
 	envAPIRateLimit           = "TIKKER_API_RATE_LIMIT"
+	envHashConcurrency        = "TIKKER_PASSWORD_HASH_CONCURRENCY"
 	envShutdownTimeout        = "TIKKER_SHUTDOWN_TIMEOUT"
 )
 
@@ -242,6 +243,7 @@ func applyEnv(cfg *Config, lookup LookupFunc) error {
 	duration(envSessionAbsoluteTimeout, &cfg.SessionAbsoluteTimeout)
 	list(envAllowedHTTPHosts, &cfg.AllowedHTTPHosts)
 	integer(envAPIRateLimit, &cfg.APIRateLimit)
+	integer(envHashConcurrency, &cfg.HashConcurrency)
 	duration(envShutdownTimeout, &cfg.ShutdownTimeout)
 
 	return errors.Join(errs...)

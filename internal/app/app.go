@@ -254,6 +254,7 @@ func (a *App) initAuth(ctx context.Context, opts Options) error {
 		Store: a.store, Clock: a.clk, Logger: a.log,
 		BaseURL: a.cfg.BaseURL, TrustedOrigins: a.cfg.TrustedOrigins, TrustedProxies: proxies,
 		Params:                 opts.PasswordParams,
+		HashConcurrency:        a.cfg.HashConcurrency,
 		SessionIdleTimeout:     a.cfg.SessionIdleTimeout,
 		SessionAbsoluteTimeout: a.cfg.SessionAbsoluteTimeout,
 	})
