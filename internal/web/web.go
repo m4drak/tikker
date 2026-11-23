@@ -123,6 +123,10 @@ type Options struct {
 	// BaseURL is the public URL of the instance (TIKKER_BASE_URL). An https
 	// URL marks the language cookie Secure and enables HSTS.
 	BaseURL string
+	// SetupSecret gates the first-run wizard (TIKKER_SETUP_SECRET). When set
+	// and no bootstrap admin password was used, /setup requires it. Leave
+	// empty to make the wizard only usable on trusted/loopback instances.
+	SetupSecret string
 	// SourceURL overrides [DefaultSourceURL].
 	SourceURL string
 }
@@ -130,20 +134,21 @@ type Options struct {
 // Server is the web panel. Create it with [New] and mount [Server.Handler]
 // at "/".
 type Server struct {
-	auth      *auth.Service
-	st        store.Store
-	send      *sending.Service
-	admin     *admin.Service
-	clk       clock.Clock
-	queue     QueueStats
-	health    HealthSnapshot
-	log       *slog.Logger
-	i18n      *i18n.Bundle
-	pages     map[string]map[string]*template.Template // language -> page -> template set
-	assets    *assets
-	https     bool
-	sourceURL string
-	build     string
+	auth        *auth.Service
+	st          store.Store
+	send        *sending.Service
+	admin       *admin.Service
+	clk         clock.Clock
+	queue       QueueStats
+	health      HealthSnapshot
+	log         *slog.Logger
+	i18n        *i18n.Bundle
+	pages       map[string]map[string]*template.Template // language -> page -> template set
+	assets      *assets
+	https       bool
+	sourceURL   string
+	build       string
+	setupSecret string
 
 	routes []route
 	mux    *http.ServeMux
@@ -170,17 +175,18 @@ func New(opts Options) (*Server, error) {
 		}
 	}
 	s := &Server{
-		auth:      opts.Auth,
-		st:        opts.Store,
-		send:      opts.Sending,
-		admin:     opts.Admin,
-		clk:       opts.Clock,
-		queue:     opts.Queue,
-		health:    opts.Health,
-		log:       opts.Logger,
-		https:     strings.HasPrefix(strings.ToLower(opts.BaseURL), "https://"),
-		sourceURL: opts.SourceURL,
-		build:     buildString(),
+		auth:        opts.Auth,
+		st:          opts.Store,
+		send:        opts.Sending,
+		admin:       opts.Admin,
+		clk:         opts.Clock,
+		queue:       opts.Queue,
+		health:      opts.Health,
+		log:         opts.Logger,
+		https:       strings.HasPrefix(strings.ToLower(opts.BaseURL), "https://"),
+		sourceURL:   opts.SourceURL,
+		build:       buildString(),
+		setupSecret: opts.SetupSecret,
 	}
 	if s.log == nil {
 		s.log = slog.Default()

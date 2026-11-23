@@ -249,6 +249,7 @@ Format każdego zadania: **cel**, **wynik**, **kryteria akceptacji**, **zależno
 - **Wynik:** `test/e2e`: Playwright (narzędzie dev, Apache-2.0) przeciw `tikker` + `fake-routeros`. Scenariusze: pierwsze uruchomienie, dodanie urządzenia, wysyłka, odbiór, token, role.
 - **Kryteria:** uruchamiane w CI, stabilne (bez `sleep`, oczekiwanie na stan).
 - **Zależności:** T31, T32. **Model:** Claude Haiku. **Alternatywa:** DeepSeek V4 Flash @ Hermes.
+- **Stan (2026-11-23):** zrobione przez Claude Code (Sonnet) na `task/t33-e2e-ui`. 11 testów w 7 scenariuszach, zielone lokalnie (`make e2e`, `npx playwright test`). Izolacja per test: fixture startuje własny tikker + fake-routeros z osobnym SQLite na wolnych portach, bez `sleep`. Job `e2e` dodany do `.github/workflows/ci.yml` + target `make e2e`. Do przeglądu krzyżowego przez inny model.
 
 ### Faza 4 – Pakowanie i wdrożenie
 
@@ -293,6 +294,7 @@ Format każdego zadania: **cel**, **wynik**, **kryteria akceptacji**, **zależno
   - lista poprawek jako issues.
 - **Kryteria:** brak otwartych problemów o wadze wysokiej przed `v0.1.0`.
 - **Zależności:** T21, T32. **Model:** Claude Opus. **Alternatywa:** ChatGPT (flagowy). Zalecane uruchomienie obu dla niezależności.
+- **Stan (2026-11-23):** model zagrożeń (Opus) i przegląd kodu gotowe w `docs/security/threat-model.md` + `docs/security/review-T50.md`. Przegląd krzyżowy (Codex) potwierdził większość findings i podniósł **F-01 (kreator `/setup` bez sekretu) do high** → kryterium „brak wysokich przed v0.1.0” **NIE jest spełnione**, naprawa to osobny issue (#1, P1). Pozostałe R2–R8 medium. F-05 do pomiaru w T51.
 
 #### T51 – Testy akceptacyjne na sprzęcie
 - **Wynik:** `docs/testing/hardware-checklist.md` oraz raport z przebiegu w obu trybach.

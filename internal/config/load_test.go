@@ -39,6 +39,11 @@ func writeYAML(t *testing.T, dir, content string) string {
 // so the default config.yaml lookup never finds a real file.
 func testEnv(dir string, extra map[string]string) map[string]string {
 	vars := map[string]string{envDataDir: dir}
+	// Default listen ":8080" binds all interfaces (exposed); a setup secret
+	// keeps Load() valid for tests that do not set an admin password.
+	if _, ok := extra[envSetupSecret]; !ok {
+		vars[envSetupSecret] = "test-setup-secret-1234"
+	}
 	for k, v := range extra {
 		vars[k] = v
 	}
@@ -442,6 +447,7 @@ func TestLoadNilLookupUsesProcessEnvironment(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(envDataDir, dir)
 	t.Setenv(envListen, ":9099")
+	t.Setenv(envSetupSecret, "test-setup-secret-1234")
 	cfg, err := Load(Options{})
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)

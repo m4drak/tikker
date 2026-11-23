@@ -177,3 +177,33 @@ jobs:
       # Node.js is preinstalled on ubuntu-latest runners; the CLI version is pinned.
       - name: Lint OpenAPI contract
         run: make openapi-lint
+
+  e2e:
+    # Playwright end-to-end tests of the web panel against real binaries
+    # (tikker + fake-routeros). Playwright is a dev-only tool (Apache-2.0);
+    # the Go build carries only GPL-compatible deps, so this stays out of the
+    # license-policy gate (SPEC §11).
+    name: e2e (playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: stable
+          cache: true
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: test/e2e/package-lock.json
+      - name: Install E2E dependencies
+        working-directory: test/e2e
+        run: npm ci
+      - name: Install Playwright browser
+        working-directory: test/e2e
+        run: npx playwright install --with-deps chromium
+      - name: Build binaries and run E2E tests
+        run: make e2e

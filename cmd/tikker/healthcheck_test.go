@@ -114,6 +114,7 @@ func TestRunHealthcheckOnNonLoopbackListen(t *testing.T) {
 	}
 	isolateConfigEnv(t)
 	t.Setenv("TIKKER_LISTEN", fmt.Sprintf("0.0.0.0:%s", port))
+	t.Setenv("TIKKER_SETUP_SECRET", "test-setup-secret-1234")
 
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"healthcheck"}, &stdout, &stderr); code != 0 {

@@ -32,6 +32,18 @@ func TestValidate(t *testing.T) {
 			c.TLS = TLSConfig{CertFile: existing, KeyFile: existing}
 		}},
 		{name: "valid admin password", mutate: func(c *Config) { c.AdminPassword = "twelve-chars" }},
+		{name: "no secret needed with loopback listen", mutate: func(c *Config) {
+			c.Listen = "127.0.0.1:8080"
+			c.SetupSecret = ""
+		}},
+		{name: "secret required when exposed and no admin password", mutate: func(c *Config) {
+			c.Listen = ":8080"
+			c.AdminPassword = ""
+			c.SetupSecret = ""
+		}, wantErr: []string{"setup_secret (TIKKER_SETUP_SECRET)", "required"}},
+		{name: "setup secret too short", mutate: func(c *Config) {
+			c.SetupSecret = "short"
+		}, wantErr: []string{"setup_secret (TIKKER_SETUP_SECRET)", "at least 12"}},
 
 		{name: "listen without port", mutate: func(c *Config) { c.Listen = "localhost" }, wantErr: []string{"listen (TIKKER_LISTEN)"}},
 		{name: "listen port too large", mutate: func(c *Config) { c.Listen = ":70000" }, wantErr: []string{"port must be between 1 and 65535"}},
@@ -88,6 +100,9 @@ func TestValidate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := Default()
+			// A setup secret keeps the loopback-exposed default listen
+			// valid while the other cases focus on their own setting.
+			c.SetupSecret = "test-setup-secret-1234"
 			tt.mutate(&c)
 			err := Validate(c)
 			if len(tt.wantErr) == 0 {

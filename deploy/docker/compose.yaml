@@ -32,8 +32,10 @@ services:
       TIKKER_BASE_URL: ${TIKKER_BASE_URL:-}
       TIKKER_ADMIN_PASSWORD: ${TIKKER_ADMIN_PASSWORD:-}
       TIKKER_ALLOWED_HTTP_HOSTS: ${TIKKER_ALLOWED_HTTP_HOSTS:-}
-      # Caddy's address on the compose network: X-Forwarded-For is trusted only from there.
-      TIKKER_TRUSTED_PROXIES: ${TIKKER_TRUSTED_PROXIES:-172.28.0.0/24}
+      # Only the Caddy proxy's own address is trusted for X-Forwarded-For
+      # (F-03). Not the whole subnet, so a reverse proxy is the only party
+      # that can spoof the client IP that keys the login rate limit and audit.
+      TIKKER_TRUSTED_PROXIES: ${TIKKER_TRUSTED_PROXIES:-172.28.0.10}
       TIKKER_DEFAULT_REGION: ${TIKKER_DEFAULT_REGION:-PL}
     volumes:
       - tikker-data:/data
@@ -59,6 +61,11 @@ services:
         condition: service_healthy
     environment:
       TIKKER_DOMAIN: ${TIKKER_DOMAIN:-localhost}
+    # A fixed address so tikker can trust exactly this proxy (F-03); keep it
+    # in sync with the default TIKKER_TRUSTED_PROXIES above.
+    networks:
+      default:
+        ipv4_address: 172.28.0.10
     ports:
       - "80:80"
       - "443:443"

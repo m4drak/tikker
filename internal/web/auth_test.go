@@ -333,6 +333,49 @@ func TestSetupRejectsCrossOrigin(t *testing.T) {
 	}
 }
 
+func TestSetupRequiresSecret(t *testing.T) {
+	e := newEnv(t, nil, func(o *Options, _ *auth.Config) { o.SetupSecret = "top-secret-setup-12345" })
+
+	// The wizard shows the secret field.
+	w := e.do(http.MethodGet, "/setup", nil, withHeader("Accept-Language", "en"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /setup: %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `name="setup_secret"`) {
+		t.Errorf("wizard does not render the secret field")
+	}
+
+	// Without the secret the admin is not created.
+	w = e.do(http.MethodPost, "/setup", url.Values{"username": {"boss"}, "password": {goodPassword}, "confirm": {goodPassword}})
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("POST /setup without secret: status %d, want 422", w.Code)
+	}
+	if ok, _ := e.svc.SetupRequired(t.Context()); !ok {
+		t.Error("a setup without the secret created the admin")
+	}
+
+	// With the (wrong) secret it is still refused.
+	w = e.do(http.MethodPost, "/setup", url.Values{"username": {"boss"}, "password": {goodPassword}, "confirm": {goodPassword}, "setup_secret": {"wrong-secret"}})
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("POST /setup with wrong secret: status %d, want 422", w.Code)
+	}
+	if ok, _ := e.svc.SetupRequired(t.Context()); !ok {
+		t.Error("a setup with a wrong secret created the admin")
+	}
+
+	// With the correct secret the admin is created and signed in.
+	w = e.do(http.MethodPost, "/setup", url.Values{"username": {"boss"}, "password": {goodPassword}, "confirm": {goodPassword}, "setup_secret": {"top-secret-setup-12345"}})
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("POST /setup with secret: status %d, want 303\n%s", w.Code, w.Body)
+	}
+	if c := cookieNamed(w, auth.CookieName); c == nil {
+		t.Error("the new admin is not signed in")
+	}
+	if ok, _ := e.svc.SetupRequired(t.Context()); ok {
+		t.Error("setup with the correct secret did not create the admin")
+	}
+}
+
 func TestRoleProtection(t *testing.T) {
 	e := newEnv(t, allRoles)
 	cookies := map[string]*http.Cookie{}

@@ -47,6 +47,14 @@ type Config struct {
 	Retry               RetryConfig         `yaml:"retry"`
 	TLS                 TLSConfig           `yaml:"tls"`
 	AdminPassword       Secret              `yaml:"admin_password"`
+	// SetupSecret protects the first-run wizard when no bootstrap admin
+	// password is configured (TIKKER_ADMIN_PASSWORD). When a user exists the
+	// wizard is gone, so a non-empty value only matters before the first
+	// admin is created; it must be supplied to complete /setup (F-01). An
+	// instance reachable over the network MUST set one of the two: either
+	// TIKKER_ADMIN_PASSWORD (admin is created at startup) or
+	// TIKKER_SETUP_SECRET (wizard is gated on a secret).
+	SetupSecret Secret `yaml:"setup_secret"`
 
 	// TrustedProxies are the reverse proxies (IP addresses or CIDR
 	// prefixes) whose X-Forwarded-For header is believed for the client IP.

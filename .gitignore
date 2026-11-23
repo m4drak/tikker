@@ -21,3 +21,8 @@ secret.key
 
 # Claude Code agent worktrees
 /.claude/worktrees/
+
+# E2E (Playwright) artifacts
+/test-results/
+/test/e2e/node_modules/
+/test/e2e/playwright-report/

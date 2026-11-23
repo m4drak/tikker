@@ -40,6 +40,12 @@ path = ["internal/web/i18n/*.json"]
 SPDX-FileCopyrightText = "2026 The tikker Authors"
 SPDX-License-Identifier = "GPL-3.0-or-later"
 
+# E2E package metadata (JSON cannot carry comments).
+[[annotations]]
+path = ["test/e2e/package.json", "test/e2e/package-lock.json", "test/e2e/tsconfig.json"]
+SPDX-FileCopyrightText = "2026 The tikker Authors"
+SPDX-License-Identifier = "GPL-3.0-or-later"
+
 # Vendored front-end assets embedded in the web panel (see
 # internal/web/static/VENDOR.md for versions and checksums).
 [[annotations]]

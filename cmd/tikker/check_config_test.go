@@ -27,6 +27,10 @@ func isolateConfigEnv(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
+	// The default listen ":8080" binds all interfaces; a setup secret keeps
+	// an otherwise-default config valid (F-01), as an operator must set it
+	// (or TIKKER_ADMIN_PASSWORD) for an exposed instance.
+	t.Setenv("TIKKER_SETUP_SECRET", "test-setup-secret-1234")
 	return dir
 }
 

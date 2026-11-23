@@ -29,7 +29,7 @@ GOVULNCHECK   ?= golang.org/x/vuln/cmd/govulncheck@v1.9.0
 LICENSES_ALLOWED := MIT,BSD-2-Clause,BSD-3-Clause,ISC,0BSD,Apache-2.0,MPL-2.0,LGPL-2.1,LGPL-3.0,GPL-3.0
 
 .DEFAULT_GOAL := build
-.PHONY: build test lint run clean licenses notices vuln ci openapi-lint docker docker-buildx release-check
+.PHONY: build test lint run clean licenses notices vuln ci openapi-lint e2e docker docker-buildx release-check
 
 build: ## Build a static binary (CGO disabled) into bin/
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/tikker
@@ -55,7 +55,11 @@ notices: ## Generate THIRD_PARTY_NOTICES (generated at release time, not committ
 vuln: ## Scan for known vulnerabilities (govulncheck)
 	$(GO) run $(GOVULNCHECK) ./...
 
-ci: lint test build licenses vuln openapi-lint ## Run the CI checks locally (run `reuse lint` separately)
+ci: lint test build licenses vuln openapi-lint ## Run the CI checks locally (run `reuse lint` and `e2e` separately)
+
+e2e: build ## Build both binaries and run the Playwright end-to-end tests (test/e2e)
+	CGO_ENABLED=0 $(GO) build -trimpath -o bin/fake-routeros ./cmd/fake-routeros
+	cd test/e2e && npm test -- --reporter=line
 
 openapi-lint: ## Lint the OpenAPI contract (api/openapi.yaml)
 	$(REDOCLY) lint
