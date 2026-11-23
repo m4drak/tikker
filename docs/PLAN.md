@@ -294,6 +294,7 @@ Format każdego zadania: **cel**, **wynik**, **kryteria akceptacji**, **zależno
   - lista poprawek jako issues.
 - **Kryteria:** brak otwartych problemów o wadze wysokiej przed `v0.1.0`.
 - **Zależności:** T21, T32. **Model:** Claude Opus. **Alternatywa:** ChatGPT (flagowy). Zalecane uruchomienie obu dla niezależności.
+- **Stan (2026-11-23):** model zagrożeń (Opus) i przegląd kodu gotowe w `docs/security/threat-model.md` + `docs/security/review-T50.md`. Przegląd krzyżowy (Codex) potwierdził większość findings i podniósł **F-01 (kreator `/setup` bez sekretu) do high** → kryterium „brak wysokich przed v0.1.0” **NIE jest spełnione**, naprawa to osobny issue (#1, P1). Pozostałe R2–R8 medium. F-05 do pomiaru w T51.
 
 #### T51 – Testy akceptacyjne na sprzęcie
 - **Wynik:** `docs/testing/hardware-checklist.md` oraz raport z przebiegu w obu trybach.
