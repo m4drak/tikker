@@ -63,8 +63,13 @@
 # [WERYFIKACJA: whether /container supports user= on your version and whether /data is
 # writable; if the router rejects the option, remove it from the "container add" line below.]
 :local ctrUser "0:0"
-# Memory limit of the container. [WERYFIKACJA: syntax and units of memory-max]
-:local ctrMemoryMax "64M"
+# Memory limit of the container. Must leave headroom above the resting RSS
+# (SPEC §2.2: <= 40 MB) plus the argon2id peak; a single login hash needs
+# ~19 MiB, two run at once by default. 96M gives room for one concurrent
+# login hash without OOM even under load; with TIKKER_PASSWORD_HASH_CONCURRENCY=1
+# (set below) the argon peak is ~19 MiB, so 64M would also do (F-05).
+# [WERYFIKACJA: syntax and units of memory-max]
+:local ctrMemoryMax "96M"
 
 # Admin password created on the first start (min. 12 characters). MUST be changed.
 :local adminPassword "CHANGE-ME"
@@ -194,6 +199,8 @@
     }
   }
   $setEnv "TIKKER_ADMIN_PASSWORD" $adminPassword
+  # Bound the argon2id peak in the container: one hash at a time (F-05, SPEC §7).
+  $setEnv "TIKKER_PASSWORD_HASH_CONCURRENCY" "1"
   # https:// to the gateway needs no TIKKER_ALLOWED_HTTP_HOSTS: the REST API is reached over TLS
   # with a pinned fingerprint (see the guide).
   :if ([:len $baseUrl] > 0) do={ $setEnv "TIKKER_BASE_URL" $baseUrl }

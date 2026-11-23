@@ -73,6 +73,11 @@ type Config struct {
 	// APIRateLimit is the per-token request budget per minute of the REST
 	// API (SPEC §4.5); 0 disables the limit.
 	APIRateLimit int `yaml:"api_rate_limit"`
+	// HashConcurrency bounds how many argon2id password hashes may run at
+	// once (SPEC §7). Two hashes use about 2×19 MiB on top of the resting
+	// RSS, so a container with a tight memory-max should set this to 1
+	// (F-05). 0 uses the default (2).
+	HashConcurrency int `yaml:"password_hash_concurrency"`
 	// ShutdownTimeout bounds the graceful shutdown: in-flight HTTP
 	// requests and sends may finish within it (SPEC §2.2).
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
@@ -196,6 +201,7 @@ func (c Config) entries() []entry {
 		{"session_absolute_timeout", strconv.Quote(c.SessionAbsoluteTimeout.String())},
 		{"allowed_http_hosts", quoteList(c.AllowedHTTPHosts)},
 		{"api_rate_limit", strconv.Itoa(c.APIRateLimit)},
+		{"password_hash_concurrency", strconv.Itoa(c.HashConcurrency)},
 		{"shutdown_timeout", strconv.Quote(c.ShutdownTimeout.String())},
 	}
 }

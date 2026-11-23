@@ -91,6 +91,8 @@ func TestValidate(t *testing.T) {
 		{name: "valid allowed http hosts", mutate: func(c *Config) { c.AllowedHTTPHosts = []string{"172.17.0.1", "172.17.0.0/24", "router.lan", "::1"} }},
 		{name: "allowed http host bad prefix", mutate: func(c *Config) { c.AllowedHTTPHosts = []string{"172.17.0.0/99"} }, wantErr: []string{"allowed_http_hosts (TIKKER_ALLOWED_HTTP_HOSTS)"}},
 		{name: "allowed http host with scheme", mutate: func(c *Config) { c.AllowedHTTPHosts = []string{"http://router.lan"} }, wantErr: []string{"allowed_http_hosts"}},
+		{name: "hash concurrency negative", mutate: func(c *Config) { c.HashConcurrency = -1 }, wantErr: []string{"password_hash_concurrency", "default"}},
+		{name: "hash concurrency one is valid", mutate: func(c *Config) { c.HashConcurrency = 1 }},
 		{name: "api rate limit disabled", mutate: func(c *Config) { c.APIRateLimit = 0 }},
 		{name: "negative api rate limit", mutate: func(c *Config) { c.APIRateLimit = -1 }, wantErr: []string{"api_rate_limit (TIKKER_API_RATE_LIMIT)"}},
 		{name: "shutdown timeout too short", mutate: func(c *Config) { c.ShutdownTimeout = 0 }, wantErr: []string{"shutdown_timeout (TIKKER_SHUTDOWN_TIMEOUT)"}},

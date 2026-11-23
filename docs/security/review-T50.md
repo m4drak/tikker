@@ -146,7 +146,7 @@ nie czyści `audit_log` z pełnymi IP (RODO); `phoneLike` (`routeros/errors.go:1
 
 ### Wymagane przed v0.1.0
 
-> Stan: **#1 (F-01)**, **#2 (F-02)**, **#3 (F-03)** i **#4 (F-04)** naprawione na branchach `fix/t50-f01-setup-secret`, `fix/t50-f02-router-pass`, `fix/t50-f03-trusted-proxy`, `fix/t50-f04-container-isolation`.
+> Stan: **#1–#5 (F-01..F-05)** naprawione na branchach `fix/t50-f01-setup-secret`, `fix/t50-f02-router-pass`, `fix/t50-f03-trusted-proxy`, `fix/t50-f04-container-isolation`, `fix/t50-f05-argon2-concurrency`.
 
 | # | Tytuł issue | Waga | Priorytet | Ref. |
 |---|---|---|---|---|
