@@ -133,4 +133,8 @@ Model główny (Claude Opus) i niezależny przegląd (OpenAI Codex). Codex potwi
 
 ## Stan kryterium (aktualizacja po naprawie)
 
-**F-01 naprawione** na branchu `fix/t50-f01-setup-secret`: dodano `TIKKER_SETUP_SECRET` — kreator `/setup` wymaga go, gdy nie ma `TIKKER_ADMIN_PASSWORD`, a konfiguracja z pustym sekretem przy nasłuchu poza loopbackiem jest odrzucana. Pozostają do decyzji: R2 (hasło routera przy zmianie hosta), R3 (trusted proxies), R4 (root w setup.rsc), R5 (pomiar OOM w T51), R6 (klucz obok bazy).
+**F-01 naprawione** na branchu `fix/t50-f01-setup-secret`: dodano `TIKKER_SETUP_SECRET` — kreator `/setup` wymaga go, gdy nie ma `TIKKER_ADMIN_PASSWORD`, a konfiguracja z pustym sekretem przy nasłuchu poza loopbackiem jest odrzucana. 
+
+**F-02 naprawione** na branchu `fix/t50-f02-router-pass`: zmiana hosta urządzenia (`base_url`) lub przełączenie z trybu weryfikowanego na `insecure` wymaga ponownego podania hasła routera (porównanie ze stanem zapisanym — re-submit tej samej wartości nie trigeruje). Zapobiega wysłaniu zapisanego hasła do obcego hosta lub po cleartexcie.
+
+Pozostają do decyzji: R3 (trusted proxies), R4 (root w setup.rsc), R5 (pomiar OOM w T51), R6 (klucz obok bazy).

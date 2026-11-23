@@ -300,6 +300,25 @@ func (s *Service) UpdateDevice(ctx context.Context, actor domain.Actor, id domai
 		if err != nil {
 			return err
 		}
+		// F-02: changing the target host, or switching a previously verified
+		// connection to "insecure", must re-confirm the router password.
+		// Otherwise the stored password could be sent to an attacker-chosen
+		// host or over plain TLS. This compares against the stored value, so
+		// a form (or patch) re-submitting the same base_url / TLS mode as
+		// before does not trigger it.
+		var wv validation
+		baseWires := ch.BaseURL != nil && *ch.BaseURL != d.BaseURL
+		tlsWires := ch.TLSMode != nil && mode != d.TLSMode && mode == domain.TLSInsecure
+		if baseWires || tlsWires {
+			if ch.Password == nil {
+				wv.add("/password", CodeRequired, "Re-enter the router password to confirm the changed target or insecure TLS.")
+			} else if *ch.Password == "" {
+				wv.add("/password", CodeInvalidFormat, "The router password is required.")
+			}
+		}
+		if err := wv.err(); err != nil {
+			return err
+		}
 		meta := map[string]string{}
 		if ch.Name != nil {
 			d.Name = *ch.Name

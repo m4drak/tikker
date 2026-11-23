@@ -313,6 +313,38 @@ func TestDeviceLifecycle(t *testing.T) {
 	}
 }
 
+func TestUpdateDeviceRequiresPasswordForRewire(t *testing.T) {
+	e := newEnv(t)
+	d := e.device("dev")
+
+	// F-02: changing the target host or downgrading to TLS insecure must
+	// re-confirm the router password.
+	_, err := e.svc.UpdateDevice(e.ctx, domain.SystemActor, d.ID, DeviceChanges{BaseURL: ptr("https://evil.example/rest")})
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("base_url rewire without password: %v (want ErrValidation)", err)
+	}
+	_, err = e.svc.UpdateDevice(e.ctx, domain.SystemActor, d.ID, DeviceChanges{TLSMode: ptr("insecure")})
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("tls insecure without password: %v (want ErrValidation)", err)
+	}
+
+	// With the password supplied the same changes go through.
+	if _, err := e.svc.UpdateDevice(e.ctx, domain.SystemActor, d.ID, DeviceChanges{
+		BaseURL: ptr("https://evil.example/rest"), TLSMode: ptr("insecure"), Password: ptr(secrets.Password("fresh-router-pw")),
+	}); err != nil {
+		t.Fatalf("rewire with password: %v", err)
+	}
+
+	// A fingerprint-only change (same target) does not need the password.
+	if _, err := e.svc.UpdateDevice(e.ctx, domain.SystemActor, d.ID, DeviceChanges{Fingerprint: ptr(fpUpper)}); err != nil {
+		t.Fatalf("fingerprint-only change: %v", err)
+	}
+	// Nor does merely toggling the enabled flag.
+	if _, err := e.svc.UpdateDevice(e.ctx, domain.SystemActor, d.ID, DeviceChanges{Enabled: ptr(false)}); err != nil {
+		t.Fatalf("toggle enabled: %v", err)
+	}
+}
+
 func (e *env) channel(d domain.Device, port string) domain.Channel {
 	e.t.Helper()
 	id := string(d.ID)

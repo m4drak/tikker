@@ -146,6 +146,8 @@ nie czyści `audit_log` z pełnymi IP (RODO); `phoneLike` (`routeros/errors.go:1
 
 ### Wymagane przed v0.1.0
 
+> Stan: **#1 (F-01)** i **#2 (F-02)** naprawione na branchach `fix/t50-f01-setup-secret` i `fix/t50-f02-router-pass`.
+
 | # | Tytuł issue | Waga | Priorytet | Ref. |
 |---|---|---|---|---|
 | 1 | fix(auth): jednorazowy sekret kreatora `/setup` | **high** | P1 | F-01 |
