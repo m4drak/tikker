@@ -186,6 +186,24 @@ func TestServeEndToEnd(t *testing.T) {
 	if code, body := c.do(http.MethodGet, "/readyz", nil); code != http.StatusOK || body["status"] != "ready" {
 		t.Errorf("/readyz = %d %v", code, body)
 	}
+	// Prometheus /metrics: unauthenticated, text exposition, no PII.
+	mres, err := http.Get("http://" + a.Addr().String() + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mbody, _ := io.ReadAll(mres.Body)
+	_ = mres.Body.Close()
+	if ct := mres.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain; version=0.0.4") {
+		t.Errorf("/metrics Content-Type = %q", ct)
+	}
+	if mres.StatusCode != http.StatusOK {
+		t.Fatalf("/metrics = %d", mres.StatusCode)
+	}
+	for _, want := range []string{"tikker_queue_sent_total", "tikker_queue_configured_channels", "tikker_start_time_seconds"} {
+		if !strings.Contains(string(mbody), want) {
+			t.Errorf("/metrics missing %q:\n%s", want, mbody)
+		}
+	}
 	if code, _ := (&client{t: t, base: c.base, http: c.http}).do(http.MethodGet, "/api/v1/messages", nil); code != http.StatusUnauthorized {
 		t.Errorf("anonymous API request = %d, want 401", code)
 	}
@@ -206,6 +224,17 @@ func TestServeEndToEnd(t *testing.T) {
 		return got["state"] == "ok"
 	})
 	waitFor(t, "inbox poller", func() bool { return a.pollers.count() == 1 })
+
+	// With a channel now present, /metrics exposes it with health labels.
+	cmres, err := http.Get("http://" + a.Addr().String() + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmbody, _ := io.ReadAll(cmres.Body)
+	_ = cmres.Body.Close()
+	if !strings.Contains(string(cmbody), "tikker_channel_health_severity{channel_id=") {
+		t.Errorf("/metrics missing channel health:\n%s", cmbody)
+	}
 
 	code, resp := c.do(http.MethodPost, "/api/v1/messages", map[string]any{"to": "600100200", "body": "Hello from tikker"})
 	if code != http.StatusAccepted {

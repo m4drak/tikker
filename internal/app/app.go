@@ -49,6 +49,7 @@ import (
 	"github.com/m4drak/tikker/internal/connector/routeros"
 	"github.com/m4drak/tikker/internal/domain"
 	"github.com/m4drak/tikker/internal/health"
+	"github.com/m4drak/tikker/internal/metrics"
 	"github.com/m4drak/tikker/internal/probes"
 	"github.com/m4drak/tikker/internal/queue"
 	"github.com/m4drak/tikker/internal/secrets"
@@ -118,8 +119,10 @@ type App struct {
 	webhookSender *webhook.Sender
 	webhookPub    *webhook.Publisher
 	webhooks      *webhook.Service
+	metricsSrv    *metrics.Server
 	ln            net.Listener
 	srv           *http.Server
+	startedAt     time.Time
 
 	// runCtx is the context of the background loops; cancelled last.
 	runCtx    context.Context
@@ -140,7 +143,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	if clk == nil {
 		clk = clock.System()
 	}
-	a := &App{cfg: cfg, log: log, clk: clk}
+	a := &App{cfg: cfg, log: log, clk: clk, startedAt: clk.Now()}
 	a.runCtx, a.runCancel = context.WithCancel(context.WithoutCancel(ctx))
 
 	var cleanup []func()
@@ -437,8 +440,29 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	routes := pr.Routes()
 	mux.Handle("/healthz", routes)
 	mux.Handle("/readyz", routes)
+	// Prometheus metrics (backlog §5 #3); unauthenticated, read-only.
+	m, err := metrics.New(metrics.Options{
+		Source: metricsSource{stats: a.disp.Stats, snap: a.health.Snapshot, started: func() int64 { return a.startedAt.Unix() }},
+		Logger: a.log, Namespace: "tikker",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("metrics: %w", err)
+	}
+	a.metricsSrv = m
+	mux.Handle("/metrics", m.Handler())
 	mux.Handle("/", panel.Handler()) // the web panel owns everything else
 	return mux, nil
+}
+
+// metricsSource adapts the app's background state to a metrics.Snapshot.
+type metricsSource struct {
+	stats   func() queue.Stats
+	snap    func() []health.ChannelStatus
+	started func() int64
+}
+
+func (s metricsSource) Snapshot() (metrics.Snapshot, error) {
+	return metrics.Snapshot{Queue: s.stats(), Health: s.snap(), Started: s.started()}, nil
 }
 
 // keyCheck proves that the loaded key encrypts and decrypts.

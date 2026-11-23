@@ -347,8 +347,8 @@ Rozkład: Opus 6, Sonnet 13, Haiku 9. Przeglądy krzyżowe są dodatkowe (§1.2)
 
 ## 5. Po MVP (backlog, kolejność proponowana)
 1. Konektor `agent` (skrypt RouterOS pull przez HTTPS, działa za CGNAT bez VPN) – Opus / ChatGPT (flagowy).
-2. Webhooki (przychodzące SMS, zmiany statusu; podpis HMAC, ponowienia) – Sonnet / Gemini Pro.
-3. Metryki Prometheus – Haiku / DeepSeek V4 Flash @ Hermes.
+2. Webhooki (przychodzące SMS, zmiany statusu; podpis HMAC, ponowienia) – Sonnet / Gemini Pro. **Zrobione (2026-11-23):** `POST` na `incoming_sms` i `message_status`, HMAC-SHA256 + signed delivery id, trwała kolejka SQLite z retry, API `/api/v1/webhooks`, SSRF-guard; `docs/webhooks.md`.
+3. Metryki Prometheus – Haiku / DeepSeek V4 Flash @ Hermes. **Zrobione (2026-11-23):** `GET /metrics` (text exposition, bez zewnętrznej zależności), metryki kolejki + zdrowia kanałów + startu; `docs/metrics.md`.
 4. PostgreSQL jako alternatywny store – Sonnet / ChatGPT (flagowy).
 5. Bramka e-mail↔SMS, CLI – Sonnet / Gemini Pro.
 6. Raporty doręczenia (jeśli RouterOS/modem udostępni) – Opus / ChatGPT (flagowy).
