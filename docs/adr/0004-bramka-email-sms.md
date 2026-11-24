@@ -1,6 +1,6 @@
 # ADR 0004: Bramka e-mail↔SMS – wbudowany serwer SMTP i powiadomienia e-mail
 
-- Status: proponowana (wymaga akceptacji właściciela, L3: bezpieczeństwo, nowy punkt wejścia sieciowego)
+- Status: zaakceptowana (właściciel, 2026-11-24, scalenie PR #17)
 - Data: 2026-11-24
 - Powiązane: PLAN §5 #5, SPEC §4 (wysyłka, idempotencja), §7 (bezpieczeństwo), ADR 0002, ADR 0003,
   `docs/email-gateway.md`, `docs/security/threat-model.md` §3a
