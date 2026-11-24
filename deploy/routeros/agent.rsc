@@ -116,7 +116,11 @@
     :do {
       :local m [/interface lte monitor $i once as-value]
       :foreach k,f in=$monFields do={
-        :if ([:typeof ($m->$f)] != "nothing") do={ :set ($p->$k) [:tostr ($m->$f)] }
+        # A missing key is "nil" (or "nothing" on some versions): omit it.
+        :local v ($m->$f)
+        :if ([:typeof $v] != "nothing") do={
+          :if ([:typeof $v] != "nil") do={ :set ($p->$k) [:tostr $v] }
+        }
       }
     } on-error={ :log warning ("tikker-agent: lte monitor failed on " . $name) }
     :set ($ports->[:len $ports]) $p
@@ -135,13 +139,19 @@
   # The inbox belongs to the port set in /tool sms; tikker accepts entries
   # only for ports reported at check-in. [WERYFIKACJA T00: "get port"
   # returns the interface name; inbox field names; pdu is hex]
-  :local smsPort [:tostr [/tool sms get port]]
+  # Every step is best-effort: a failure here must never stop the command
+  # poll below, or outbound SMS would stall behind one unreadable entry.
+  :local smsPort ""
+  :do { :set smsPort [:tostr [/tool sms get port]] } on-error={ :log warning "tikker-agent: /tool sms get port failed" }
   :local smsPortKnown false
   :foreach n in=$portNames do={ :if ($n = $smsPort) do={ :set smsPortKnown true } }
   :if ($smsPortKnown) do={
     :local pushed 0
-    :foreach id in=[/tool sms inbox find] do={
+    :local ids ({})
+    :do { :set ids [/tool sms inbox find] } on-error={ :log warning "tikker-agent: /tool sms inbox find failed" }
+    :foreach id in=$ids do={
       :if ($pushed < $maxPush) do={
+      :do {
         :local m ({})
         :set ($m->"port") $smsPort
         :set ($m->"remote_id") [:tostr $id]
@@ -162,6 +172,7 @@
         :if ([:typeof [$tikkerPost base=$base token=$token path="/inbox" body=[:serialize to=json value=$doc]]] != "array") do={
           :log warning "tikker-agent: inbox push failed"
         }
+      } on-error={ :log warning ("tikker-agent: skipping unreadable inbox entry " . [:tostr $id]) }
         :set pushed ($pushed + 1)
       }
     }
@@ -250,29 +261,38 @@
 
   # ------------------------------------------------------------ inbox deletions
   # Remove only entries whose phone and timestamp still match what was
-  # pushed; acknowledge every reference (a vanished or reused entry has
-  # nothing left to delete).
+  # pushed. Acknowledge only references this run handled: its own port, and
+  # either removed or already gone/reused (nothing left to delete). A failed
+  # remove or another port's reference stays pending on tikker.
   :if ([:len $deletes] > 0) do={
+    :local done ({})
     :foreach ref in=$deletes do={
+      :if ([:len $smsPort] > 0) do={
       :if ([:tostr ($ref->"port")] = $smsPort) do={
-        :foreach id in=[/tool sms inbox find] do={
-          :if ([:tostr $id] = [:tostr ($ref->"remote_id")]) do={
-            :local match true
-            :if ([:typeof ($ref->"phone")] = "str") do={
-              :if (($ref->"phone") != [:tostr [/tool sms inbox get $id phone]]) do={ :set match false }
+        :do {
+          :foreach id in=[/tool sms inbox find] do={
+            :if ([:tostr $id] = [:tostr ($ref->"remote_id")]) do={
+              :local match true
+              :if ([:typeof ($ref->"phone")] = "str") do={
+                :if (($ref->"phone") != [:tostr [/tool sms inbox get $id phone]]) do={ :set match false }
+              }
+              :if ([:typeof ($ref->"timestamp")] = "str") do={
+                :if (($ref->"timestamp") != [:tostr [/tool sms inbox get $id timestamp]]) do={ :set match false }
+              }
+              :if ($match) do={ /tool sms inbox remove $id }
             }
-            :if ([:typeof ($ref->"timestamp")] = "str") do={
-              :if (($ref->"timestamp") != [:tostr [/tool sms inbox get $id timestamp]]) do={ :set match false }
-            }
-            :if ($match) do={ /tool sms inbox remove $id }
           }
-        }
+          :set ($done->[:len $done]) $ref
+        } on-error={ :log warning ("tikker-agent: inbox delete failed for " . [:tostr ($ref->"remote_id")]) }
+      }
       }
     }
-    :local ack ({})
-    :set ($ack->"deleted") $deletes
-    :if ([:typeof [$tikkerPost base=$base token=$token path="/inbox/ack" body=[:serialize to=json value=$ack]]] != "array") do={
-      :log warning "tikker-agent: inbox ack failed"
+    :if ([:len $done] > 0) do={
+      :local ack ({})
+      :set ($ack->"deleted") $done
+      :if ([:typeof [$tikkerPost base=$base token=$token path="/inbox/ack" body=[:serialize to=json value=$ack]]] != "array") do={
+        :log warning "tikker-agent: inbox ack failed"
+      }
     }
   }
 } on-error={
