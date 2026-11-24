@@ -1,17 +1,45 @@
 # tikker
-SMS gateway using MikroTik devices.
+Bramka SMS dla routerów MikroTik z RouterOS 7 (modem LTE/5G z kartą SIM). Aplikacja w Go wystawia REST API
+i panel WWW, kolejkuje wiadomości w SQLite i łączy się z routerem przez REST API RouterOS albo przez konektor `agent`
+(router sam odpytuje tikkera, działa za CGNAT).
 
-Status: projektowanie. Zobacz:
-- [Specyfikacja](docs/SPEC.md)
-- [Plan realizacji](docs/PLAN.md)
+Status: wersja przedwydaniowa (przed v0.1.0). Panel, REST API, webhooki, metryki i konektor `agent` są zaimplementowane.
+Weryfikacja zachowania RouterOS na sprzęcie (T00) jest odłożona, więc założenia są oznaczone w kodzie i dokumentacji.
+
+## Dokumentacja
+
+- **Przewodnik użytkownika**: [po polsku](docs/user-guide.md), [in English](docs/user-guide.en.md). Pierwsze uruchomienie,
+  panel, urządzenia i kanały, wysyłka (GSM-7 i UCS-2), skrzynka, tokeny API, role, audyt, kopie zapasowe,
+  przykłady API (curl, Python, PHP) i FAQ.
+- [Webhooki](docs/webhooks.md) (powiadomienia o SMS-ach przychodzących i statusach wysyłki)
+- [Metryki Prometheus](docs/metrics.md) (`GET /metrics`)
+- [Konektor `agent`](docs/agent.md) (pull za CGNAT, bez VPN)
+- [Model zagrożeń](docs/security/threat-model.md)
+- [Specyfikacja](docs/SPEC.md) i [plan realizacji](docs/PLAN.md)
 - [ADR 0001 – architektura](docs/adr/0001-architektura.md)
 - [ADR 0002 – gwarancje dostarczenia](docs/adr/0002-gwarancje-dostarczenia.md)
 - [ADR 0003 – biblioteki i układ pakietów](docs/adr/0003-biblioteki.md)
-- [Wdrożenie na MikroTiku (kontener)](docs/deploy-mikrotik.md)
-- [Wdrożenie serwerowe (Docker, systemd, WireGuard)](docs/deploy-server.md)
 - [Wydawanie wersji i weryfikacja podpisów](docs/releasing.md)
 
-Licencja: GNU GPL v3.0 – patrz [LICENSE](LICENSE).
+## Szybki start
+
+Przed startem ustaw konto administratora: `TIKKER_ADMIN_PASSWORD` (min. 12 znaków; konto `admin` powstaje przy pustej
+bazie) albo `TIKKER_SETUP_SECRET` (kreator `/setup` wymaga tego sekretu). Instancja nasłuchująca poza loopbackiem
+bez któregoś z nich nie wystartuje. Szczegóły: [przewodnik użytkownika, sekcja 1](docs/user-guide.md#1-pierwsze-uruchomienie).
+
+### Tryb A: kontener na routerze MikroTik
+
+Tikker działa jako kontener RouterOS 7 na routerze z obsługą `container` (np. z LTE/5G i kartą SIM).
+Skrypt `deploy/routeros/setup.rsc` przygotowuje sieć, konto API i kontener. Pełna instrukcja:
+[Wdrożenie na MikroTiku (kontener)](docs/deploy-mikrotik.md).
+
+### Tryb B: serwer (Docker Compose lub systemd)
+
+Tikker działa na zwykłym serwerze Linux i łączy się z routerami przez LAN, VPN (WireGuard) lub konektor `agent`.
+Docker Compose: `deploy/docker/compose.yaml` (sekcja 2 przewodnika wdrożenia). Binarka i unit systemd: sekcja 3.
+Pełna instrukcja: [Wdrożenie serwerowe (Docker, systemd, WireGuard)](docs/deploy-server.md).
+
+
 
 MikroTik i RouterOS są znakami towarowymi MikroTik. Projekt nie jest powiązany z firmą MikroTik.
 
@@ -42,7 +70,7 @@ export TIKKER_DATA_DIR=$PWD/data TIKKER_LISTEN=127.0.0.1:8080 TIKKER_LOG_FORMAT=
 export TIKKER_ADMIN_PASSWORD=change-me-please-123 TIKKER_ALLOWED_HTTP_HOSTS=127.0.0.1
 bin/tikker serve &
 
-# 3. Token API (panelu WWW jeszcze nie ma; token jest wypisywany tylko raz)
+# 3. Token API (token jest wypisywany tylko raz; ten sam można utworzyć w panelu, zakładka Tokeny)
 TOKEN=$(bin/tikker token create --name dev)
 
 # 4. Urządzenie i kanał (id urządzenia z odpowiedzi)

@@ -308,6 +308,7 @@ Format każdego zadania: **cel**, **wynik**, **kryteria akceptacji**, **zależno
 
 #### T52 – Dokumentacja użytkownika
 - **Wynik:** README (szybki start dla obu trybów), `docs/user-guide.md` (PL + EN), przykłady API (curl, Python, PHP), FAQ (CGNAT, UCS-2, limity).
+- **Stan (2026-11-24):** zrobione. README: zaktualizowany status, odnośniki do przewodnika, webhooków, metryk, agenta i modelu zagrożeń, szybki start dla trybu kontenera i serwerowego. `docs/user-guide.md` i `docs/user-guide.en.md` (ta sama treść) obejmują pierwsze uruchomienie (`TIKKER_ADMIN_PASSWORD` lub kreator `/setup` z `TIKKER_SETUP_SECRET`), panel, urządzenia i kanały, wysyłkę (GSM-7/UCS-2, segmenty, transliterację), skrzynkę, tokeny i zakresy, role, audyt, kopie `/data` oraz FAQ. Przykłady API (curl, Python stdlib, PHP curl) zweryfikowano na działającej instancji z `fake-routeros`: wysyłka z `Idempotency-Key` (w tym powtórzenie i `422` przy innym ciele), status, lista przychodzących, limity segmentów, transliteracja i `unsupported_characters`. Wartości domyślne i kody błędów sprawdzono w kodzie. Do przeglądu krzyżowego. Nieweryfikowane na sprzęcie RouterOS: ograniczenia kanału `routeros-rest` (1 segment, tylko GSM-7) to `ASSUMPTION(T00)`.
 - **Zależności:** T21, T41, T42. **Model:** Claude Haiku. **Alternatywa:** DeepSeek V4 Flash @ Hermes.
 
 ## 4. Podsumowanie przydziału
