@@ -112,3 +112,24 @@ func (l *limiter) sweepLocked(now time.Time, capacity, rate float64) {
 		}
 	}
 }
+
+// TokenLimiter is the per-token budget of the API, shared with other entry
+// points that act with an API token (the SMTP gateway, ADR 0004), so a token
+// has one budget whichever way it is used. Pass it in [Deps].Limiter.
+type TokenLimiter struct{ l *limiter }
+
+// NewTokenLimiter returns a limiter with the semantics of [Options].RateLimit.
+func NewTokenLimiter(cfg RateLimit, clk clock.Clock) *TokenLimiter {
+	if clk == nil {
+		clk = clock.System()
+	}
+	return &TokenLimiter{l: newLimiter(cfg, clk)}
+}
+
+// Allow consumes one request of token id's budget. When the budget is
+// exhausted it returns false and the time until the next request is
+// admitted.
+func (t *TokenLimiter) Allow(id domain.ID) (bool, time.Duration) {
+	st := t.l.take(id)
+	return st.Allowed, time.Duration(st.RetryAfter) * time.Second
+}

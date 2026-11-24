@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/mail"
 	"net/netip"
 	"net/url"
 	"os"
@@ -76,6 +77,34 @@ var (
 	sAgentSendTimeout    = setting{"agent.send_timeout", envAgentSendTimeout}
 	sAgentStaleAfter     = setting{"agent.stale_after", envAgentStaleAfter}
 	sAgentMaxSegments    = setting{"agent.max_segments", envAgentMaxSegments}
+
+	sMailGwListen         = setting{"mail_gateway.listen", envMailGwListen}
+	sMailGwDomain         = setting{"mail_gateway.domain", envMailGwDomain}
+	sMailGwHostname       = setting{"mail_gateway.hostname", envMailGwHostname}
+	sMailGwTLSMode        = setting{"mail_gateway.tls_mode", envMailGwTLSMode}
+	sMailGwTLSCertFile    = setting{"mail_gateway.tls_cert_file", envMailGwTLSCertFile}
+	sMailGwTLSKeyFile     = setting{"mail_gateway.tls_key_file", envMailGwTLSKeyFile}
+	sMailGwMaxMessageSize = setting{"mail_gateway.max_message_size", envMailGwMaxMessageSize}
+	sMailGwMaxRecipients  = setting{"mail_gateway.max_recipients", envMailGwMaxRecipients}
+	sMailGwMaxConnections = setting{"mail_gateway.max_connections", envMailGwMaxConnections}
+	sMailGwMaxConnsPerIP  = setting{"mail_gateway.max_connections_per_ip", envMailGwMaxConnsPerIP}
+	sMailGwMaxSessionDur  = setting{"mail_gateway.max_session_duration", envMailGwMaxSessionDur}
+	sMailGwMaxMsgsPerSess = setting{"mail_gateway.max_messages_per_session", envMailGwMaxMsgsPerSess}
+	sMailGwCommandTimeout = setting{"mail_gateway.command_timeout", envMailGwCommandTimeout}
+	sMailGwDataTimeout    = setting{"mail_gateway.data_timeout", envMailGwDataTimeout}
+	sMailGwBody           = setting{"mail_gateway.body", envMailGwBody}
+
+	sMailNotifyHost         = setting{"mail_notify.smtp_host", envMailNotifyHost}
+	sMailNotifyPort         = setting{"mail_notify.smtp_port", envMailNotifyPort}
+	sMailNotifyTLSMode      = setting{"mail_notify.tls_mode", envMailNotifyTLSMode}
+	sMailNotifyUsername     = setting{"mail_notify.username", envMailNotifyUsername}
+	sMailNotifyPassword     = setting{"mail_notify.password", envMailNotifyPassword}
+	sMailNotifyPasswordFile = setting{"mail_notify.password_file", envMailNotifyPasswordFile}
+	sMailNotifyFrom         = setting{"mail_notify.from", envMailNotifyFrom}
+	sMailNotifyTo           = setting{"mail_notify.to", envMailNotifyTo}
+	sMailNotifyTimeout      = setting{"mail_notify.timeout", envMailNotifyTimeout}
+	sMailNotifyMaxAge       = setting{"mail_notify.max_age", envMailNotifyMaxAge}
+	sMailNotifyMaxPerHour   = setting{"mail_notify.max_per_hour", envMailNotifyMaxPerHour}
 )
 
 var regionPattern = regexp.MustCompile(`^[A-Z]{2}$`)
@@ -135,6 +164,8 @@ func Validate(c Config) error {
 	add(validateRetry(c.Retry))
 	add(validateTLS(c.TLS))
 	add(validateAgent(c.Agent))
+	add(validateMailGateway(c.MailGateway, c.TLS))
+	add(validateMailNotify(c.MailNotify))
 
 	if n := utf8.RuneCountInString(string(c.AdminPassword)); n > 0 && n < minAdminPasswordLen {
 		add(sAdminPassword.errorf("must be at least %d characters", minAdminPasswordLen))
@@ -191,17 +222,23 @@ func DecodeSecretKey(s string) ([]byte, error) {
 	return key, nil
 }
 
-func validateListen(addr string) error {
+func validateListen(addr string) error { return validateAddr(sListen, addr) }
+
+func validateAddr(s setting, addr string) error {
 	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return sListen.errorf("must be host:port, got %q", addr)
+		return s.errorf("must be host:port, got %q", addr)
 	}
 	n, err := strconv.Atoi(port)
 	if err != nil || n < 1 || n > 65535 {
-		return sListen.errorf("port must be between 1 and 65535, got %q", port)
+		return s.errorf("port must be between 1 and 65535, got %q", port)
 	}
 	return nil
 }
+
+// ListenIsLoopback reports whether a listen address binds a loopback
+// address only (127.0.0.1, ::1 or localhost).
+func ListenIsLoopback(addr string) bool { return !listenExposed(addr) }
 
 // listenExposed reports whether the listen address is reachable outside the
 // loopback interface. ":8080", "0.0.0.0:8080" and "::8080" bind all
@@ -376,4 +413,186 @@ func validateAgent(a AgentConfig) error {
 		errs = append(errs, sAgentMaxSegments.errorf("must be between 1 and %d, got %d", maxAgentSegments, a.MaxSegments))
 	}
 	return errors.Join(errs...)
+}
+
+// Mail gateway bounds (ADR 0004).
+const (
+	minMailMessageSize = 1 << 10
+	maxMailMessageSize = 10 << 20
+	maxMailRecipients  = 100
+	maxMailConnections = 1000
+	minMailTimeout     = time.Second
+	maxMailTimeout     = time.Hour
+)
+
+// validateMailGateway checks the SMTP gateway settings. They are checked
+// only when the gateway is enabled, so a disabled gateway never blocks a
+// start. TLS is mandatory unless the listener is on loopback: the SMTP
+// password is an API token.
+func validateMailGateway(m MailGatewayConfig, global TLSConfig) error {
+	if !m.Enabled {
+		return nil
+	}
+	var errs []error
+	add := func(err error) {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	add(validateAddr(sMailGwListen, m.Listen))
+	switch {
+	case m.Domain == "":
+		add(sMailGwDomain.errorf("required when the mail gateway is enabled (recipients are <number>@domain)"))
+	case !hostNamePattern.MatchString(m.Domain):
+		add(sMailGwDomain.errorf("%q is not a domain name", m.Domain))
+	}
+	if m.Hostname != "" && !hostNamePattern.MatchString(m.Hostname) {
+		add(sMailGwHostname.errorf("%q is not a host name", m.Hostname))
+	}
+	switch m.TLSMode {
+	case MailTLSStartTLS, MailTLSImplicit:
+		cert, key := m.TLSFiles(global)
+		if cert == "" || key == "" {
+			add(sMailGwTLSCertFile.errorf("tls_mode %s needs a certificate: set mail_gateway.tls_cert_file and tls_key_file (or tls.cert_file and tls.key_file)", m.TLSMode))
+		}
+		if (m.TLSCertFile == "") != (m.TLSKeyFile == "") {
+			add(sMailGwTLSKeyFile.errorf("mail_gateway.tls_cert_file and tls_key_file must be set together"))
+		}
+		for _, f := range []struct {
+			s    setting
+			path string
+		}{{sMailGwTLSCertFile, m.TLSCertFile}, {sMailGwTLSKeyFile, m.TLSKeyFile}} {
+			if f.path == "" {
+				continue
+			}
+			if _, err := os.Stat(f.path); err != nil {
+				add(f.s.errorf("file is not accessible: %v", err))
+			}
+		}
+	case MailTLSNone:
+		if listenExposed(m.Listen) {
+			add(sMailGwTLSMode.errorf("none is allowed only on a loopback listen address (127.0.0.1, ::1); the SMTP password is an API token, use starttls or tls"))
+		}
+	default:
+		add(sMailGwTLSMode.errorf("must be starttls, tls or none, got %q", m.TLSMode))
+	}
+	if m.MaxMessageSize < minMailMessageSize || m.MaxMessageSize > maxMailMessageSize {
+		add(sMailGwMaxMessageSize.errorf("must be between %d and %d bytes, got %d", minMailMessageSize, maxMailMessageSize, m.MaxMessageSize))
+	}
+	if m.MaxRecipients < 1 || m.MaxRecipients > maxMailRecipients {
+		add(sMailGwMaxRecipients.errorf("must be between 1 and %d, got %d", maxMailRecipients, m.MaxRecipients))
+	}
+	if m.MaxConnections < 1 || m.MaxConnections > maxMailConnections {
+		add(sMailGwMaxConnections.errorf("must be between 1 and %d, got %d", maxMailConnections, m.MaxConnections))
+	}
+	if m.MaxConnectionsPerIP < 1 || m.MaxConnectionsPerIP > m.MaxConnections {
+		add(sMailGwMaxConnsPerIP.errorf("must be between 1 and max_connections (%d), got %d", m.MaxConnections, m.MaxConnectionsPerIP))
+	}
+	if m.MaxMessagesPerSession < 1 || m.MaxMessagesPerSession > 10000 {
+		add(sMailGwMaxMsgsPerSess.errorf("must be between 1 and 10000, got %d", m.MaxMessagesPerSession))
+	}
+	if m.MaxSessionDuration < time.Minute || m.MaxSessionDuration > 24*time.Hour {
+		add(sMailGwMaxSessionDur.errorf("must be between 1m and 24h, got %s", m.MaxSessionDuration))
+	}
+	for _, d := range []struct {
+		s setting
+		v time.Duration
+	}{{sMailGwCommandTimeout, m.CommandTimeout}, {sMailGwDataTimeout, m.DataTimeout}} {
+		if d.v < minMailTimeout || d.v > maxMailTimeout {
+			add(d.s.errorf("must be between %s and %s, got %s", minMailTimeout, maxMailTimeout, d.v))
+		}
+	}
+	switch m.Body {
+	case MailBodyText, MailBodySubjectText:
+	default:
+		add(sMailGwBody.errorf("must be text or subject_text, got %q", m.Body))
+	}
+	return errors.Join(errs...)
+}
+
+// maxMailNotifyRecipients bounds mail_notify.to.
+const maxMailNotifyRecipients = 20
+
+// validateMailNotify checks the notification relay settings when enabled.
+// The relay must use TLS unless it is on loopback (the e-mails carry SMS
+// texts and the relay password).
+func validateMailNotify(m MailNotifyConfig) error {
+	if !m.Enabled {
+		return nil
+	}
+	var errs []error
+	add := func(err error) {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	_, ipErr := netip.ParseAddr(m.SMTPHost)
+	switch {
+	case m.SMTPHost == "":
+		add(sMailNotifyHost.errorf("required when mail notifications are enabled"))
+	case ipErr != nil && !hostNamePattern.MatchString(m.SMTPHost):
+		add(sMailNotifyHost.errorf("%q is not a host name or IP address", m.SMTPHost))
+	}
+	if m.SMTPPort < 1 || m.SMTPPort > 65535 {
+		add(sMailNotifyPort.errorf("must be between 1 and 65535, got %d", m.SMTPPort))
+	}
+	switch m.TLSMode {
+	case MailTLSStartTLS, MailTLSImplicit:
+	case MailTLSNone:
+		if !HostIsLoopback(m.SMTPHost) {
+			add(sMailNotifyTLSMode.errorf("none is allowed only for a loopback relay (127.0.0.1, ::1, localhost); use starttls or tls"))
+		}
+	default:
+		add(sMailNotifyTLSMode.errorf("must be starttls, tls or none, got %q", m.TLSMode))
+	}
+	hasPassword := m.Password != "" || m.PasswordFile != ""
+	switch {
+	case m.Password != "" && m.PasswordFile != "":
+		add(sMailNotifyPasswordFile.errorf("set either mail_notify.password or mail_notify.password_file, not both"))
+	case m.Username == "" && hasPassword:
+		add(sMailNotifyUsername.errorf("required when a password is set"))
+	case m.Username != "" && !hasPassword:
+		add(sMailNotifyPassword.errorf("required when a username is set (or use mail_notify.password_file)"))
+	}
+	if m.PasswordFile != "" {
+		if _, err := os.Stat(m.PasswordFile); err != nil {
+			add(sMailNotifyPasswordFile.errorf("file is not accessible: %v", err))
+		}
+	}
+	if m.From == "" {
+		add(sMailNotifyFrom.errorf("required when mail notifications are enabled"))
+	} else if _, err := mail.ParseAddress(m.From); err != nil {
+		add(sMailNotifyFrom.errorf("%q is not an e-mail address", m.From))
+	}
+	switch {
+	case len(m.To) == 0:
+		add(sMailNotifyTo.errorf("at least one recipient is required"))
+	case len(m.To) > maxMailNotifyRecipients:
+		add(sMailNotifyTo.errorf("at most %d recipients, got %d", maxMailNotifyRecipients, len(m.To)))
+	}
+	for _, to := range m.To {
+		if _, err := mail.ParseAddress(to); err != nil {
+			add(sMailNotifyTo.errorf("%q is not an e-mail address", to))
+		}
+	}
+	if m.Timeout < time.Second || m.Timeout > 10*time.Minute {
+		add(sMailNotifyTimeout.errorf("must be between 1s and 10m, got %s", m.Timeout))
+	}
+	if m.MaxAge < time.Hour || m.MaxAge > 30*24*time.Hour {
+		add(sMailNotifyMaxAge.errorf("must be between 1h and 720h, got %s", m.MaxAge))
+	}
+	if m.MaxPerHour < 0 || m.MaxPerHour > 10000 {
+		add(sMailNotifyMaxPerHour.errorf("must be 0 (no cap) or up to 10000, got %d", m.MaxPerHour))
+	}
+	return errors.Join(errs...)
+}
+
+// HostIsLoopback reports whether host is a loopback address or
+// "localhost".
+func HostIsLoopback(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(strings.Trim(host, "[]"))
+	return err == nil && ip.Unmap().IsLoopback()
 }

@@ -43,6 +43,7 @@ func Run(t *testing.T, f Factory) {
 		{"WebhookDeliveries", testWebhookDeliveries},
 		{"WebhookSubscriptionChanges", testWebhookSubscriptionChanges},
 		{"WebhookConcurrency", testWebhookConcurrency},
+		{"MailOutbox", testMailOutbox},
 		{"Enqueue", testEnqueue},
 		{"Idempotency", testIdempotency},
 		{"IdempotencyGroups", testIdempotencyGroups},

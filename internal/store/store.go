@@ -41,6 +41,7 @@ type Repos interface {
 	Sessions() SessionRepo
 	Audit() AuditRepo
 	Webhooks() WebhookRepo
+	MailOutbox() MailOutboxRepo
 }
 
 // Store is the root of the persistence layer.
@@ -503,6 +504,33 @@ type WebhookRepo interface {
 	// PurgeDeliveries deletes delivered and failed deliveries last updated
 	// before cutoff and returns their number.
 	PurgeDeliveries(ctx context.Context, cutoff time.Time) (int, error)
+}
+
+// MailOutboxRepo is the durable queue of e-mail notifications of inbound
+// SMS (ADR 0004), with the delivery semantics of WebhookRepo.
+type MailOutboxRepo interface {
+	// Add stores a pending notification (status, attempts and lease fields
+	// are ignored). Call it in the transaction that stores the message.
+	Add(ctx context.Context, n domain.MailNotification) error
+	// Acquire atomically picks the oldest due pending notification,
+	// increments its attempt counter and leases it until leaseUntil. ok is
+	// false (and nothing is written) when nothing is due.
+	Acquire(ctx context.Context, now, leaseUntil time.Time) (n domain.MailNotification, ok bool, err error)
+	// NextDue returns when the earliest pending notification becomes
+	// available (retry time or lease expiry).
+	NextDue(ctx context.Context) (at time.Time, ok bool, err error)
+	// MarkSent, MarkFailed and Reschedule complete an attempt; they return
+	// domain.ErrLeaseLost when the attempt is no longer the current one.
+	MarkSent(ctx context.Context, l domain.DeliveryLease, at time.Time) error
+	MarkFailed(ctx context.Context, l domain.DeliveryLease, at time.Time, lastErr string) error
+	Reschedule(ctx context.Context, l domain.DeliveryLease, at, next time.Time, lastErr string) error
+	// Get returns one notification. Errors: domain.ErrNotFound.
+	Get(ctx context.Context, id domain.ID) (domain.MailNotification, error)
+	// CountPending returns the number of pending notifications.
+	CountPending(ctx context.Context) (int, error)
+	// Purge deletes delivered and failed notifications last updated before
+	// cutoff and returns their number.
+	Purge(ctx context.Context, cutoff time.Time) (int, error)
 }
 
 // DeliveryJob is a leased delivery together with its target.

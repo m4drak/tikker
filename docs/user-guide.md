@@ -220,6 +220,11 @@ i anulowanie wiadomości, zmiany webhooków. Dziennik jest dostępny tylko w pan
 - **Metryki Prometheus**: `GET /metrics`, bez tokenu. Endpoint nie wymaga uwierzytelnienia, więc na publicznym
   adresie ogranicz go na reverse proxy do sieci monitoringu. Zob. [metrics.md](metrics.md).
 - **Konektor `agent`**: router odpytuje tikkera przez HTTPS, bez VPN i bez przekierowań portów: [agent.md](agent.md).
+- **Bramka e-mail ↔ SMS** (opcjonalna, domyślnie wyłączona): e-mail na `<numer>@<domena>` wysłany do wbudowanego
+  serwera SMTP staje się SMS-em (logowanie: użytkownik `token`, hasło = token API z zakresem `sms:send`, TLS poza
+  loopbackiem), a SMS-y przychodzące mogą być przesyłane na Twoją skrzynkę e-mail. Przykład z `curl`:
+  `curl --url smtp://127.0.0.1:2525 --mail-from a@example.net --mail-rcpt 600100200@sms.local --user "token:$TIKKER_TOKEN" --upload-file mail.txt`.
+  Konfiguracja, Postfix, Thunderbird, `swaks`: [email-gateway.md](email-gateway.md).
 - **Model zagrożeń**: [security/threat-model.md](security/threat-model.md).
 
 ## 10. Kopia zapasowa `/data`

@@ -10,7 +10,8 @@
 //	-> check that the key opens every stored device password
 //	-> auth (bootstrap admin) -> connector registry (routeros)
 //	-> health checker, dispatcher, channel sync, inbox pollers
-//	-> /readyz checks -> HTTP server -> retention and session janitor
+//	-> /readyz checks -> HTTP server -> SMTP gateway (optional, ADR 0004)
+//	-> retention and session janitor
 //
 // The dispatcher, the health checker and the channel sync refer to each other
 // (the health checker sets channel states in the dispatcher, the dispatcher
@@ -20,7 +21,8 @@
 // # Shutdown
 //
 // When the context given to [App.Run] ends: the HTTP server stops accepting
-// requests and lets running ones finish, the inbox pollers stop, the dispatcher
+// requests and lets running ones finish, the SMTP gateway (if enabled) does
+// the same with its sessions, the inbox pollers stop, the dispatcher
 // finishes in-flight sends (ADR 0002: what does not finish in time is requeued
 // as a possible duplicate), the health checker flushes its state, connectors
 // are closed and the database is closed. Every step is bounded by
@@ -37,6 +39,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,12 +53,16 @@ import (
 	"github.com/m4drak/tikker/internal/connector/routeros"
 	"github.com/m4drak/tikker/internal/domain"
 	"github.com/m4drak/tikker/internal/health"
+	"github.com/m4drak/tikker/internal/inbox"
+	"github.com/m4drak/tikker/internal/mailgw"
+	"github.com/m4drak/tikker/internal/mailnotify"
 	"github.com/m4drak/tikker/internal/metrics"
 	"github.com/m4drak/tikker/internal/probes"
 	"github.com/m4drak/tikker/internal/queue"
 	"github.com/m4drak/tikker/internal/secrets"
 	"github.com/m4drak/tikker/internal/sending"
 	"github.com/m4drak/tikker/internal/sms"
+	"github.com/m4drak/tikker/internal/store"
 	"github.com/m4drak/tikker/internal/store/sqlite"
 	"github.com/m4drak/tikker/internal/version"
 	"github.com/m4drak/tikker/internal/web"
@@ -101,6 +108,13 @@ type Options struct {
 	// Connector tunes the RouterOS connector; Logger and Clock are filled
 	// in when empty.
 	Connector routeros.Options
+	// MailListener, if set, is served by the SMTP gateway instead of
+	// listening on Config.MailGateway.Listen (tests). It is used only when
+	// the gateway is enabled.
+	MailListener net.Listener
+	// MailNotifyRetry overrides the retry schedule of the e-mail
+	// notifications (tests); zero means mailnotify.DefaultRetryPolicy.
+	MailNotifyRetry domain.RetryPolicy
 }
 
 // App is an assembled tikker server. Create it with [New] and run it with
@@ -122,6 +136,11 @@ type App struct {
 	webhooks      *webhook.Service
 	agentHub      *agent.Hub
 	metricsSrv    *metrics.Server
+	send          *sending.Service
+	tokenLimiter  *api.TokenLimiter
+	mailSrv       *mailgw.Server     // nil: e-mail gateway disabled
+	mailNotify    *mailnotify.Sender // nil: e-mail notifications disabled
+	mailLn        net.Listener
 	ln            net.Listener
 	srv           *http.Server
 	startedAt     time.Time
@@ -218,7 +237,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 		return nil, fmt.Errorf("connector registry: %w", err)
 	}
 
-	if err := a.initPipeline(creds, reg, ring); err != nil {
+	if err := a.initPipeline(creds, reg, ring, opts.MailNotifyRetry); err != nil {
 		return nil, err
 	}
 	// From here on the dispatcher and the checker run; stopping them is
@@ -228,6 +247,12 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	h, err := a.handler(creds, reg, ring)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.MailGateway.Enabled {
+		if err := a.initMailGateway(ctx, opts.MailListener); err != nil {
+			return nil, err
+		}
+		cleanup = append(cleanup, func() { _ = a.mailLn.Close() })
 	}
 
 	var tlsConfig *tls.Config
@@ -294,7 +319,7 @@ func (a *App) initAuth(ctx context.Context, opts Options) error {
 
 // initPipeline creates and starts the health checker, the dispatcher, the
 // channel sync and the inbox pollers, and loads the channels.
-func (a *App) initPipeline(creds *secrets.DeviceCredentials, reg *connector.Registry, ring *secrets.Keyring) error {
+func (a *App) initPipeline(creds *secrets.DeviceCredentials, reg *connector.Registry, ring *secrets.Keyring, mailRetry domain.RetryPolicy) error {
 	cfg := a.cfg
 	allowHTTP, err := admin.HostAllowlist(cfg.AllowedHTTPHosts)
 	if err != nil {
@@ -350,9 +375,18 @@ func (a *App) initPipeline(creds *secrets.DeviceCredentials, reg *connector.Regi
 	}
 	a.health, a.disp = hc, disp
 
+	// Inbound messages are published to the webhooks and, when enabled,
+	// to the e-mail notifications, in the transaction that stores them.
+	var events inbox.MessagePublisher = a.webhookPub
+	if cfg.MailNotify.Enabled {
+		if a.mailNotify, err = newMailNotifier(cfg, a.store, a.clk, a.log, mailRetry); err != nil {
+			return err
+		}
+		events = publishers{a.webhookPub, mailnotify.NewPublisher(a.clk, nil, a.mailNotify)}
+	}
 	a.pollers = newPollerSupervisor(a.runCtx, pollerBase{
 		store: a.store, clock: a.clk, logger: a.log,
-		interval: cfg.InboxPollInterval, reporter: hc, events: a.webhookPub,
+		interval: cfg.InboxPollInterval, reporter: hc, events: events,
 	})
 
 	cs, err = api.NewChannelSync(api.SyncOptions{
@@ -380,8 +414,59 @@ func (a *App) initPipeline(creds *secrets.DeviceCredentials, reg *connector.Regi
 		_ = a.stopPipeline(context.Background())
 		return fmt.Errorf("load channels: %w", err)
 	}
+	if a.mailNotify != nil {
+		if err := a.mailNotify.Start(a.runCtx); err != nil {
+			_ = a.stopPipeline(context.Background())
+			return fmt.Errorf("start mail notifications: %w", err)
+		}
+	}
 	a.log.Info("channels loaded", slog.Int("channels", len(disp.Stats().Channels)))
 	return nil
+}
+
+// newMailNotifier builds the e-mail notifications of inbound SMS
+// (ADR 0004). The relay password comes from the configuration or a file;
+// it is never logged.
+func newMailNotifier(cfg config.Config, st *sqlite.Store, clk clock.Clock, log *slog.Logger, retry domain.RetryPolicy) (*mailnotify.Sender, error) {
+	c := cfg.MailNotify
+	password := string(c.Password)
+	if c.PasswordFile != "" {
+		b, err := os.ReadFile(c.PasswordFile)
+		if err != nil {
+			return nil, fmt.Errorf("mail notify password file: %w", err)
+		}
+		password = strings.TrimRight(string(b), "\r\n")
+	}
+	s, err := mailnotify.NewSender(mailnotify.Options{
+		Store: st, Clock: clk, Logger: log, Timeout: c.Timeout, Retry: retry,
+		MaxAge: c.MaxAge, MaxPerHour: c.MaxPerHour, Retention: cfg.Retention,
+		Relay: mailnotify.Relay{
+			Host: c.SMTPHost, Port: c.SMTPPort, TLSMode: c.TLSMode,
+			Username: c.Username, Password: password, From: c.From, To: c.To,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("mail notifications: %w", err)
+	}
+	return s, nil
+}
+
+// publishers fans inbound messages out to several publishers.
+type publishers []inbox.MessagePublisher
+
+func (ps publishers) PublishIncoming(ctx context.Context, tx store.Repos, m domain.Message) error {
+	for _, p := range ps {
+		if err := p.PublishIncoming(ctx, tx, m); err != nil {
+			return err //nolint:wrapcheck // each publisher adds its context
+		}
+	}
+	return nil
+}
+
+func (ps publishers) Wake() {
+	for _, p := range ps {
+		p.Wake()
+	}
 }
 
 // handler builds the API, the probes and the mux.
@@ -394,6 +479,8 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	if a.cfg.APIRateLimit == 0 {
 		rate.Requests = -1 // disabled
 	}
+	// One budget per token, shared by the API and the SMTP gateway.
+	a.tokenLimiter = api.NewTokenLimiter(rate, a.clk)
 	// One sending service for the API and the web panel.
 	snd, err := sending.New(sending.Deps{
 		Store: a.store, Capabilities: a.sync, Notifier: a.disp, Clock: a.clk,
@@ -405,6 +492,7 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	if err != nil {
 		return nil, fmt.Errorf("sending: %w", err)
 	}
+	a.send = snd
 	adm, err := admin.New(admin.Deps{
 		Store: a.store, Credentials: creds, Connectors: reg, Reloader: a.sync, Health: a.health, Checker: a.health,
 		Clock: a.clk, Logger: a.log,
@@ -415,7 +503,7 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	}
 	apiH, err := api.New(api.Deps{
 		Store: a.store, Auth: a.auth, Dispatcher: a.disp, Reloader: a.sync, Capabilities: a.sync, Sending: snd, Admin: adm,
-		Health: a.health, Credentials: creds, Connectors: reg, Webhooks: a.webhooks,
+		Health: a.health, Credentials: creds, Connectors: reg, Webhooks: a.webhooks, Limiter: a.tokenLimiter,
 		Clock: a.clk, Logger: a.log,
 		Options: api.Options{
 			DefaultRegion:       a.cfg.DefaultRegion,
@@ -454,7 +542,10 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	mux.Handle("/readyz", routes)
 	// Prometheus metrics (backlog §5 #3); unauthenticated, read-only.
 	m, err := metrics.New(metrics.Options{
-		Source: metricsSource{stats: a.disp.Stats, snap: a.health.Snapshot, started: func() int64 { return a.startedAt.Unix() }},
+		Source: metricsSource{
+			stats: a.disp.Stats, snap: a.health.Snapshot, started: func() int64 { return a.startedAt.Unix() },
+			mail: a.mailNotify,
+		},
 		Logger: a.log, Namespace: "tikker",
 	})
 	if err != nil {
@@ -468,15 +559,79 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	return mux, nil
 }
 
+// initMailGateway creates the SMTP gateway (ADR 0004) and opens its
+// listener; it is served by Run. The configuration was validated: TLS is
+// set up unless the listener is on loopback.
+func (a *App) initMailGateway(ctx context.Context, ln net.Listener) error {
+	mg := a.cfg.MailGateway
+	o := mailgw.Options{
+		Domain: mg.Domain, Hostname: mg.Hostname,
+		MaxMessageBytes: mg.MaxMessageSize, MaxRecipients: mg.MaxRecipients, MaxConnections: mg.MaxConnections,
+		MaxConnectionsPerIP: mg.MaxConnectionsPerIP, MaxSessionDuration: mg.MaxSessionDuration,
+		MaxMessagesPerSession: mg.MaxMessagesPerSession,
+		CommandTimeout:        mg.CommandTimeout, DataTimeout: mg.DataTimeout,
+		SubjectInBody: mg.Body == config.MailBodySubjectText,
+		DefaultRegion: a.cfg.DefaultRegion, AllowShortNumbers: a.cfg.AllowShortNumbers,
+		Auth: a.auth, Sender: a.send, Limiter: a.tokenLimiter,
+		Clock: a.clk, Logger: a.log, BaseContext: a.runCtx,
+	}
+	switch mg.TLSMode {
+	case config.MailTLSNone:
+		o.Insecure = true
+	default:
+		certFile, keyFile := mg.TLSFiles(a.cfg.TLS)
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return fmt.Errorf("mail gateway tls certificate: %w", err)
+		}
+		o.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}
+		o.ImplicitTLS = mg.TLSMode == config.MailTLSImplicit
+	}
+	srv, err := mailgw.New(o)
+	if err != nil {
+		return fmt.Errorf("mail gateway: %w", err)
+	}
+	if ln == nil {
+		var lc net.ListenConfig
+		if ln, err = lc.Listen(ctx, "tcp", mg.Listen); err != nil {
+			return fmt.Errorf("mail gateway listen %s: %w", mg.Listen, err)
+		}
+	}
+	a.mailSrv, a.mailLn = srv, ln
+	return nil
+}
+
+// MailAddr returns the address of the SMTP gateway, or nil when it is
+// disabled.
+func (a *App) MailAddr() net.Addr {
+	if a.mailLn == nil {
+		return nil
+	}
+	return a.mailLn.Addr()
+}
+
 // metricsSource adapts the app's background state to a metrics.Snapshot.
 type metricsSource struct {
 	stats   func() queue.Stats
 	snap    func() []health.ChannelStatus
 	started func() int64
+	mail    *mailnotify.Sender // nil: notifications disabled
 }
 
 func (s metricsSource) Snapshot() (metrics.Snapshot, error) {
-	return metrics.Snapshot{Queue: s.stats(), Health: s.snap(), Started: s.started()}, nil
+	snap := metrics.Snapshot{Queue: s.stats(), Health: s.snap(), Started: s.started()}
+	if s.mail != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		// A failed count leaves the mail metrics out rather than failing
+		// the whole scrape.
+		if st, err := s.mail.Stats(ctx); err == nil {
+			snap.MailNotify = &metrics.MailNotifyStats{
+				Pending: st.Pending, Sent: st.Sent, Failed: st.Failed, Retried: st.Retried, Deferred: st.Deferred,
+			}
+		}
+	}
+	return snap, nil
 }
 
 // agentOptions maps the [agent] settings onto the agent hub. Settings the
@@ -539,6 +694,12 @@ func (a *App) Run(ctx context.Context) error {
 	}()
 	a.log.Info("tikker listening", slog.String("addr", a.ln.Addr().String()), slog.Bool("tls", useTLS))
 
+	var mailErr chan error // nil (never ready) without the gateway
+	if a.mailSrv != nil {
+		mailErr = make(chan error, 1)
+		go func() { mailErr <- a.mailSrv.Serve(a.mailLn) }()
+	}
+
 	var runErr error
 	select {
 	case <-ctx.Done():
@@ -547,6 +708,10 @@ func (a *App) Run(ctx context.Context) error {
 		runErr = fmt.Errorf("http server: %w", err)
 		a.log.Error("http server failed; shutting down", slog.Any("error", err))
 		serveErr <- nil // the server is gone; Shutdown below returns at once
+	case err := <-mailErr:
+		runErr = fmt.Errorf("smtp gateway: %w", err)
+		a.log.Error("smtp gateway failed; shutting down", slog.Any("error", err))
+		mailErr <- mailgw.ErrServerClosed
 	}
 
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), a.cfg.ShutdownTimeout)
@@ -561,6 +726,18 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		runErr = errors.Join(runErr, fmt.Errorf("http server: %w", err))
+	}
+	// The SMTP gateway enqueues like the API: stop it before the pipeline.
+	if a.mailSrv != nil {
+		if err := a.mailSrv.Shutdown(sctx); err != nil {
+			a.log.Warn("smtp sessions did not finish in time", slog.Any("error", err))
+			runErr = errors.Join(runErr, fmt.Errorf("smtp shutdown: %w", err))
+		} else {
+			a.log.Info("smtp gateway stopped")
+		}
+		if err := <-mailErr; err != nil && !errors.Is(err, mailgw.ErrServerClosed) {
+			runErr = errors.Join(runErr, fmt.Errorf("smtp gateway: %w", err))
+		}
 	}
 
 	runErr = errors.Join(runErr, a.stopPipeline(sctx))
@@ -594,6 +771,14 @@ func (a *App) stopPipeline(ctx context.Context) error {
 		errs = append(errs, fmt.Errorf("webhook shutdown: %w", err))
 	} else {
 		a.log.Info("webhook sender stopped")
+	}
+	if a.mailNotify != nil {
+		if err := a.mailNotify.Shutdown(ctx); err != nil {
+			a.log.Warn("mail notifications stopped with an attempt interrupted; it will be retried", slog.Any("error", err))
+			errs = append(errs, fmt.Errorf("mail notify shutdown: %w", err))
+		} else {
+			a.log.Info("mail notifications stopped")
+		}
 	}
 	if err := a.health.Shutdown(ctx); err != nil {
 		a.log.Warn("health checker did not flush in time", slog.Any("error", err))

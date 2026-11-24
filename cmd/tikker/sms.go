@@ -39,11 +39,11 @@ const (
 var pollInterval = time.Second
 
 // Backoff of `sms send --wait` after a transient error (429, 5xx, network):
-// it starts at retryBackoffMin and doubles up to retryBackoffMax. Variables
+// it starts at retryBackoffInitial and doubles up to retryBackoffMax. Variables
 // so that tests can shorten them.
 var (
-	retryBackoffMin = time.Second
-	retryBackoffMax = 10 * time.Second
+	retryBackoffInitial = time.Second
+	retryBackoffMax     = 10 * time.Second
 )
 
 // maxListPages bounds `--all`, so that a misbehaving server cannot make the
@@ -409,7 +409,7 @@ func waitForTerminal(parent context.Context, c *client.Client, msgs []client.Mes
 	}
 	timer := time.NewTimer(0)
 	defer timer.Stop()
-	backoff := retryBackoffMin
+	backoff := retryBackoffInitial
 	for {
 		select {
 		case <-ctx.Done():
@@ -457,7 +457,7 @@ func waitForTerminal(parent context.Context, c *client.Client, msgs []client.Mes
 			delay = max(backoff, retryAfter)
 			backoff = min(backoff*2, retryBackoffMax)
 		} else {
-			backoff = retryBackoffMin
+			backoff = retryBackoffInitial
 		}
 		timer.Reset(delay)
 	}

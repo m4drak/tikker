@@ -56,6 +56,36 @@ const (
 	envAgentStaleAfter        = "TIKKER_AGENT_STALE_AFTER"
 	envAgentMaxSegments       = "TIKKER_AGENT_MAX_SEGMENTS"
 	envAgentUCS2              = "TIKKER_AGENT_UCS2"
+
+	envMailGwEnabled        = "TIKKER_MAIL_GATEWAY_ENABLED"
+	envMailGwListen         = "TIKKER_MAIL_GATEWAY_LISTEN"
+	envMailGwDomain         = "TIKKER_MAIL_GATEWAY_DOMAIN"
+	envMailGwHostname       = "TIKKER_MAIL_GATEWAY_HOSTNAME"
+	envMailGwTLSMode        = "TIKKER_MAIL_GATEWAY_TLS_MODE"
+	envMailGwTLSCertFile    = "TIKKER_MAIL_GATEWAY_TLS_CERT_FILE"
+	envMailGwTLSKeyFile     = "TIKKER_MAIL_GATEWAY_TLS_KEY_FILE"
+	envMailGwMaxMessageSize = "TIKKER_MAIL_GATEWAY_MAX_MESSAGE_SIZE"
+	envMailGwMaxRecipients  = "TIKKER_MAIL_GATEWAY_MAX_RECIPIENTS"
+	envMailGwMaxConnections = "TIKKER_MAIL_GATEWAY_MAX_CONNECTIONS"
+	envMailGwMaxConnsPerIP  = "TIKKER_MAIL_GATEWAY_MAX_CONNECTIONS_PER_IP"
+	envMailGwMaxSessionDur  = "TIKKER_MAIL_GATEWAY_MAX_SESSION_DURATION"
+	envMailGwMaxMsgsPerSess = "TIKKER_MAIL_GATEWAY_MAX_MESSAGES_PER_SESSION"
+	envMailGwCommandTimeout = "TIKKER_MAIL_GATEWAY_COMMAND_TIMEOUT"
+	envMailGwDataTimeout    = "TIKKER_MAIL_GATEWAY_DATA_TIMEOUT"
+	envMailGwBody           = "TIKKER_MAIL_GATEWAY_BODY"
+
+	envMailNotifyEnabled      = "TIKKER_MAIL_NOTIFY_ENABLED"
+	envMailNotifyHost         = "TIKKER_MAIL_NOTIFY_SMTP_HOST"
+	envMailNotifyPort         = "TIKKER_MAIL_NOTIFY_SMTP_PORT"
+	envMailNotifyTLSMode      = "TIKKER_MAIL_NOTIFY_TLS_MODE"
+	envMailNotifyUsername     = "TIKKER_MAIL_NOTIFY_USERNAME"
+	envMailNotifyPassword     = "TIKKER_MAIL_NOTIFY_PASSWORD"      //nolint:gosec // G101: variable name, not a credential
+	envMailNotifyPasswordFile = "TIKKER_MAIL_NOTIFY_PASSWORD_FILE" //nolint:gosec // G101: variable name, not a credential
+	envMailNotifyFrom         = "TIKKER_MAIL_NOTIFY_FROM"
+	envMailNotifyTo           = "TIKKER_MAIL_NOTIFY_TO"
+	envMailNotifyTimeout      = "TIKKER_MAIL_NOTIFY_TIMEOUT"
+	envMailNotifyMaxAge       = "TIKKER_MAIL_NOTIFY_MAX_AGE"
+	envMailNotifyMaxPerHour   = "TIKKER_MAIL_NOTIFY_MAX_PER_HOUR"
 )
 
 // DefaultConfigFile is the YAML file name looked up in the data directory
@@ -254,6 +284,38 @@ func applyEnv(cfg *Config, lookup LookupFunc) error {
 	integer(envAgentMaxSegments, &cfg.Agent.MaxSegments)
 	boolean(envAgentUCS2, &cfg.Agent.UCS2)
 
+	mg := &cfg.MailGateway
+	boolean(envMailGwEnabled, &mg.Enabled)
+	str(envMailGwListen, &mg.Listen)
+	str(envMailGwDomain, &mg.Domain)
+	str(envMailGwHostname, &mg.Hostname)
+	str(envMailGwTLSMode, &mg.TLSMode)
+	str(envMailGwTLSCertFile, &mg.TLSCertFile)
+	str(envMailGwTLSKeyFile, &mg.TLSKeyFile)
+	integer(envMailGwMaxMessageSize, &mg.MaxMessageSize)
+	integer(envMailGwMaxRecipients, &mg.MaxRecipients)
+	integer(envMailGwMaxConnections, &mg.MaxConnections)
+	integer(envMailGwMaxConnsPerIP, &mg.MaxConnectionsPerIP)
+	duration(envMailGwMaxSessionDur, &mg.MaxSessionDuration)
+	integer(envMailGwMaxMsgsPerSess, &mg.MaxMessagesPerSession)
+	duration(envMailGwCommandTimeout, &mg.CommandTimeout)
+	duration(envMailGwDataTimeout, &mg.DataTimeout)
+	str(envMailGwBody, &mg.Body)
+
+	mn := &cfg.MailNotify
+	boolean(envMailNotifyEnabled, &mn.Enabled)
+	str(envMailNotifyHost, &mn.SMTPHost)
+	integer(envMailNotifyPort, &mn.SMTPPort)
+	str(envMailNotifyTLSMode, &mn.TLSMode)
+	str(envMailNotifyUsername, &mn.Username)
+	secret(envMailNotifyPassword, &mn.Password)
+	str(envMailNotifyPasswordFile, &mn.PasswordFile)
+	str(envMailNotifyFrom, &mn.From)
+	list(envMailNotifyTo, &mn.To)
+	duration(envMailNotifyTimeout, &mn.Timeout)
+	duration(envMailNotifyMaxAge, &mn.MaxAge)
+	integer(envMailNotifyMaxPerHour, &mn.MaxPerHour)
+
 	return errors.Join(errs...)
 }
 
@@ -269,6 +331,17 @@ func normalize(cfg *Config) {
 	cfg.TrustedProxies = trimList(cfg.TrustedProxies)
 	cfg.TrustedOrigins = trimList(cfg.TrustedOrigins)
 	cfg.AllowedHTTPHosts = trimList(cfg.AllowedHTTPHosts)
+	mg := &cfg.MailGateway
+	mg.Listen = strings.TrimSpace(mg.Listen)
+	mg.Domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(mg.Domain), "."))
+	mg.Hostname = strings.TrimSpace(mg.Hostname)
+	mg.TLSMode = strings.ToLower(strings.TrimSpace(mg.TLSMode))
+	mg.Body = strings.ToLower(strings.TrimSpace(mg.Body))
+	mn := &cfg.MailNotify
+	mn.SMTPHost = strings.TrimSpace(mn.SMTPHost)
+	mn.TLSMode = strings.ToLower(strings.TrimSpace(mn.TLSMode))
+	mn.From = strings.TrimSpace(mn.From)
+	mn.To = trimList(mn.To)
 }
 
 // splitList splits a comma-separated environment value.

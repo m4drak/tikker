@@ -506,13 +506,17 @@ func (s *Service) Enqueue(ctx context.Context, msgs []domain.Message, idem store
 	return res, nil
 }
 
-// SendOptions tune [Service.Send].
+// SendOptions tune [Service.Send] and [Service.SendBatch].
 type SendOptions struct {
 	// IdempotencyKey, when not empty, makes a repeated submission of the
 	// same request return the original messages (the web form sends a nonce
-	// so that a double click or a reload does not send twice). A different
-	// request under the same key yields domain.ErrIdempotencyMismatch.
+	// so that a double click or a reload does not send twice; the SMTP
+	// gateway uses the Message-ID). A different request under the same key
+	// yields domain.ErrIdempotencyMismatch.
 	IdempotencyKey string
+	// Source is recorded in the audit entry ("source" meta); empty means
+	// "ui".
+	Source string
 }
 
 // Send validates, plans and enqueues one request on behalf of actor and
@@ -521,20 +525,65 @@ type SendOptions struct {
 // entry point of the web panel; the API plans and enqueues itself because it
 // batches requests.
 func (s *Service) Send(ctx context.Context, actor domain.Actor, req Request, so SendOptions) (store.EnqueueResult, []FieldError, error) {
-	rt, err := s.LoadRouting(ctx)
-	if err != nil {
-		return store.EnqueueResult{}, nil, err
-	}
-	msgs, errs, err := s.Plan(rt, req, "", actor)
-	if err != nil || len(errs) > 0 {
-		return store.EnqueueResult{}, errs, err
+	return s.SendBatch(ctx, actor, []Request{req}, so)
+}
+
+// SendBatch is [Service.Send] for several requests that are stored
+// atomically: either every message is enqueued or none (one SMTP e-mail to
+// several recipients). Field errors of request i carry the pointer
+// "/messages/i" when there is more than one request. With an idempotency
+// key a replay is answered before validation, as the API does, so a retry
+// succeeds even if routing changed meanwhile. One audit entry is written.
+func (s *Service) SendBatch(ctx context.Context, actor domain.Actor, reqs []Request, so SendOptions) (store.EnqueueResult, []FieldError, error) {
+	if len(reqs) == 0 {
+		return store.EnqueueResult{}, nil, errors.New("sending: no requests")
 	}
 	var idem store.Idempotency
 	if so.IdempotencyKey != "" {
 		idem = store.Idempotency{
-			Key: so.IdempotencyKey, RequestHash: requestHash(req),
+			Key: so.IdempotencyKey, RequestHash: batchHash(reqs),
 			Since: s.clk.Now().Add(-24 * time.Hour),
 		}
+		res, ok, err := s.st.Messages().Replay(ctx, actor, idem)
+		if err != nil {
+			if errors.Is(err, domain.ErrIdempotencyMismatch) {
+				return store.EnqueueResult{}, nil, err //nolint:wrapcheck // sentinel tested by callers
+			}
+			return store.EnqueueResult{}, nil, fmt.Errorf("replay: %w", err)
+		}
+		if ok {
+			return res, nil, nil
+		}
+	}
+	rt, err := s.LoadRouting(ctx)
+	if err != nil {
+		return store.EnqueueResult{}, nil, err
+	}
+	var msgs []domain.Message
+	var errs []FieldError
+	groups := make([]int, 0, len(reqs))
+	for i, req := range reqs {
+		pointer := ""
+		if len(reqs) > 1 {
+			pointer = fmt.Sprintf("/messages/%d", i)
+		}
+		parts, perrs, err := s.Plan(rt, req, pointer, actor)
+		if err != nil {
+			return store.EnqueueResult{}, nil, err
+		}
+		errs = append(errs, perrs...)
+		msgs = append(msgs, parts...)
+		groups = append(groups, len(parts))
+	}
+	if len(errs) > 0 {
+		return store.EnqueueResult{}, errs, nil
+	}
+	if len(reqs) > 1 {
+		idem.Groups = groups
+	}
+	source := so.Source
+	if source == "" {
+		source = "ui"
 	}
 	var res store.EnqueueResult
 	err = s.st.WithTx(ctx, func(tx store.Repos) error {
@@ -545,11 +594,13 @@ func (s *Service) Send(ctx context.Context, actor domain.Actor, req Request, so 
 		if res.Replayed {
 			return nil
 		}
+		meta := map[string]string{"parts": fmt.Sprint(len(res.Messages)), "source": source}
+		if len(reqs) > 1 {
+			meta["recipients"] = fmt.Sprint(len(reqs))
+		}
 		return tx.Audit().Append(ctx, domain.AuditLog{
 			ID: s.ids.NewID(), Actor: actor, Action: domain.AuditMessageSend,
-			Target: "message:" + string(res.Messages[0].ID),
-			Meta:   map[string]string{"parts": fmt.Sprint(len(res.Messages)), "source": "ui"},
-			At:     s.clk.Now(),
+			Target: "message:" + string(res.Messages[0].ID), Meta: meta, At: s.clk.Now(),
 		})
 	})
 	if err != nil {
@@ -562,6 +613,20 @@ func (s *Service) Send(ctx context.Context, actor domain.Actor, req Request, so 
 		s.note.Notify()
 	}
 	return res, nil, nil
+}
+
+// batchHash is the idempotency digest of reqs; for one request it equals
+// requestHash, so records written by earlier versions still replay.
+func batchHash(reqs []Request) string {
+	if len(reqs) == 1 {
+		return requestHash(reqs[0])
+	}
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "batch:%d", len(reqs))
+	for _, r := range reqs {
+		_, _ = fmt.Fprintf(h, ":%s", requestHash(r))
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // requestHash is a digest of the request for the idempotency record.

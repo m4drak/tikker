@@ -278,6 +278,87 @@ func TestLoadServeSettingsFromEnv(t *testing.T) {
 	}
 }
 
+func TestLoadMailGatewayFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := Load(Options{Lookup: envMap(testEnv(dir, map[string]string{
+		envMailGwEnabled:        "true",
+		envMailGwListen:         "127.0.0.1:2526",
+		envMailGwDomain:         " SMS.Example.NET. ",
+		envMailGwHostname:       "mx.example.net",
+		envMailGwTLSMode:        "NONE",
+		envMailGwMaxMessageSize: "32768",
+		envMailGwMaxRecipients:  "3",
+		envMailGwMaxConnections: "5",
+		envMailGwCommandTimeout: "30s",
+		envMailGwDataTimeout:    "2m",
+		envMailGwBody:           "Subject_Text",
+		envMailGwMaxConnsPerIP:  "2",
+		envMailGwMaxSessionDur:  "5m",
+		envMailGwMaxMsgsPerSess: "7",
+	}))})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	m := cfg.MailGateway
+	if !m.Enabled || m.Listen != "127.0.0.1:2526" || m.Domain != "sms.example.net" || m.Hostname != "mx.example.net" ||
+		m.TLSMode != MailTLSNone || m.MaxMessageSize != 32768 || m.MaxRecipients != 3 || m.MaxConnections != 5 ||
+		m.CommandTimeout != 30*time.Second || m.DataTimeout != 2*time.Minute || m.Body != MailBodySubjectText ||
+		m.MaxConnectionsPerIP != 2 || m.MaxSessionDuration != 5*time.Minute || m.MaxMessagesPerSession != 7 {
+		t.Errorf("mail gateway = %+v", m)
+	}
+	if !strings.Contains(cfg.String(), `mail_gateway.domain: "sms.example.net"`) {
+		t.Errorf("String() misses the mail gateway:\n%s", cfg)
+	}
+	if c, k := m.TLSFiles(TLSConfig{CertFile: "a", KeyFile: "b"}); c != "a" || k != "b" {
+		t.Errorf("TLSFiles fallback = %q %q", c, k)
+	}
+	m.TLSCertFile, m.TLSKeyFile = "c", "d"
+	if c, k := m.TLSFiles(TLSConfig{CertFile: "a", KeyFile: "b"}); c != "c" || k != "d" {
+		t.Errorf("TLSFiles own = %q %q", c, k)
+	}
+	if !ListenIsLoopback("127.0.0.1:1") || ListenIsLoopback(":1") {
+		t.Error("ListenIsLoopback")
+	}
+}
+
+func TestLoadMailNotifyFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := Load(Options{Lookup: envMap(testEnv(dir, map[string]string{
+		envMailNotifyEnabled:    "1",
+		envMailNotifyHost:       " smtp.example.net ",
+		envMailNotifyPort:       "465",
+		envMailNotifyTLSMode:    "TLS",
+		envMailNotifyUsername:   "tikker",
+		envMailNotifyPassword:   "relay-secret-1",
+		envMailNotifyFrom:       "sms@example.net",
+		envMailNotifyTo:         "a@example.net, b@example.net",
+		envMailNotifyTimeout:    "10s",
+		envMailNotifyMaxAge:     "24h",
+		envMailNotifyMaxPerHour: "0",
+	}))})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	m := cfg.MailNotify
+	if !m.Enabled || m.SMTPHost != "smtp.example.net" || m.SMTPPort != 465 || m.TLSMode != MailTLSImplicit ||
+		m.Username != "tikker" || m.Password != "relay-secret-1" || m.From != "sms@example.net" ||
+		len(m.To) != 2 || m.To[1] != "b@example.net" || m.Timeout != 10*time.Second ||
+		m.MaxAge != 24*time.Hour || m.MaxPerHour != 0 {
+		t.Errorf("mail notify = %+v", m)
+	}
+	if out := cfg.String(); strings.Contains(out, "relay-secret-1") || !strings.Contains(out, "mail_notify.password: \"[REDACTED]\"") {
+		t.Errorf("String() = %s", out)
+	}
+	for _, h := range []struct {
+		host string
+		want bool
+	}{{"localhost", true}, {"127.0.0.1", true}, {"[::1]", true}, {"smtp.example.net", false}, {"10.0.0.1", false}} {
+		if got := HostIsLoopback(h.host); got != h.want {
+			t.Errorf("HostIsLoopback(%q) = %v", h.host, got)
+		}
+	}
+}
+
 func TestLoadErrors(t *testing.T) {
 	tests := []struct {
 		name    string
