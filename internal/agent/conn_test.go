@@ -816,3 +816,46 @@ func TestFactory(t *testing.T) {
 		t.Fatal("wrong kind accepted")
 	}
 }
+
+// inbox_delete is bounded per response, oldest first, so a backlog of
+// unacknowledged deletions never grows a response past what a RouterOS
+// script can read; the rest follow once earlier ones are acknowledged.
+func TestInboxDeleteBoundedPerResponse(t *testing.T) {
+	tests := []struct {
+		name  string
+		limit int
+		n     int
+		want  []string
+	}{
+		{"under limit", 5, 3, []string{"*1", "*2", "*3"}},
+		{"over limit, oldest first", 2, 4, []string{"*1", "*2"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t, Options{maxDeletesPerResponse: tt.limit}, fakeagent.Options{})
+			e.checkin("lte1")
+			ctx := context.Background()
+			for i := 1; i <= tt.n; i++ {
+				e.request("POST", Prefix+"/inbox", token,
+					fmt.Sprintf(`{"messages":[{"port":"lte1","remote_id":"*%d","phone":"+48511222333","body":"m%d"}]}`, i, i))
+				got, _ := e.conn.FetchInbox(ctx, lte1)
+				if err := e.conn.DeleteInbox(ctx, lte1, []string{got[len(got)-1].RemoteID}); err != nil {
+					t.Fatal(err)
+				}
+				e.clk.Advance(time.Second) // distinct deletion times
+			}
+			res := e.request("POST", Prefix+"/commands", token, "")
+			var resp commandsResponse
+			if err := json.NewDecoder(res.Body).Decode(&resp); err != nil {
+				t.Fatal(err)
+			}
+			var ids []string
+			for _, r := range resp.InboxDelete {
+				ids = append(ids, r.RemoteID)
+			}
+			if !slices.Equal(ids, tt.want) {
+				t.Fatalf("inbox_delete ids = %v, want %v", ids, tt.want)
+			}
+		})
+	}
+}

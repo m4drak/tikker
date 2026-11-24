@@ -52,6 +52,7 @@ const (
 	// defaultMaxPendingDeletes bounds the inbox deletions waiting for the
 	// agent.
 	defaultMaxPendingDeletes = 10000
+	defaultMaxDeletesPerResponse = 50
 )
 
 // Sentinel causes wrapped into connector errors; test with errors.Is.
@@ -137,6 +138,8 @@ type Options struct {
 	// maxPendingDeletes bounds the inbox deletions waiting for the agent
 	// (default defaultMaxPendingDeletes; settable by tests).
 	maxPendingDeletes int
+	// maxDeletesPerResponse bounds inbox_delete in one response (default 50).
+	maxDeletesPerResponse int
 }
 
 func (o Options) withDefaults() Options {
@@ -181,6 +184,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.maxPendingDeletes <= 0 {
 		o.maxPendingDeletes = defaultMaxPendingDeletes
+	}
+	if o.maxDeletesPerResponse <= 0 {
+		o.maxDeletesPerResponse = defaultMaxDeletesPerResponse
 	}
 	if o.RedeliverAfter <= 0 {
 		o.RedeliverAfter = max(o.SendTimeout/2, time.Second)
@@ -726,14 +732,30 @@ func (s *session) markDeleted(port string, handles []string) error {
 func (s *session) pendingDeletes() []inboxRef {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]inboxRef, 0, len(s.deletes))
-	for k, m := range s.deletes {
-		out = append(out, inboxRef{Port: k.port, RemoteID: k.remoteID, Phone: m.phone, Timestamp: m.timestamp})
+	type item struct {
+		ref inboxRef
+		at  time.Time
 	}
-	slices.SortFunc(out, func(a, b inboxRef) int {
-		return cmp.Or(strings.Compare(a.Port, b.Port), strings.Compare(a.RemoteID, b.RemoteID),
-			strings.Compare(a.Phone, b.Phone), strings.Compare(a.Timestamp, b.Timestamp))
+	all := make([]item, 0, len(s.deletes))
+	for k, m := range s.deletes {
+		all = append(all, item{inboxRef{Port: k.port, RemoteID: k.remoteID, Phone: m.phone, Timestamp: m.timestamp}, m.at})
+	}
+	slices.SortFunc(all, func(a, b item) int {
+		return cmp.Or(a.at.Compare(b.at), strings.Compare(a.ref.Port, b.ref.Port),
+			strings.Compare(a.ref.RemoteID, b.ref.RemoteID),
+			strings.Compare(a.ref.Phone, b.ref.Phone), strings.Compare(a.ref.Timestamp, b.ref.Timestamp))
 	})
+	// Bounded per response: a RouterOS script reads the whole body into a
+	// variable, so an unbounded list (acks failing for a while) could grow
+	// past what /tool fetch returns and stall the agent. Oldest go first;
+	// the rest follow in later responses.
+	if n := s.hub.opts.maxDeletesPerResponse; len(all) > n {
+		all = all[:n]
+	}
+	out := make([]inboxRef, len(all))
+	for i, it := range all {
+		out[i] = it.ref
+	}
 	return out
 }
 
