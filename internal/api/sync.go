@@ -79,10 +79,13 @@ type SyncOptions struct {
 // the channels. It implements [ChannelReloader] and [CapabilityProvider].
 //
 // A device's connector is rebuilt only when its stored settings change.
-// Replaced connectors are not closed at once, because the dispatcher may still
-// run a send on them: pass [ChannelSync.Release] as queue.Options
-// OnConnectorReleased so a retired connector is closed when nobody uses it any
-// more, and call [ChannelSync.Close] at shutdown.
+// Replaced connectors that the sinks may still hold are not closed at once,
+// because the dispatcher may still run a send on them: pass
+// [ChannelSync.Release] as queue.Options OnConnectorReleased so a retired
+// connector is closed when nobody uses it any more, and call
+// [ChannelSync.Close] at shutdown. A retired connector the sinks do not hold
+// (a device without channels, or whose channels were removed and released
+// earlier) is closed during Reload, since no Release will ever come for it.
 type ChannelSync struct {
 	opts SyncOptions
 	log  *slog.Logger
@@ -95,6 +98,10 @@ type ChannelSync struct {
 
 	retiredMu sync.Mutex
 	retired   map[connector.Connector]bool
+	// held are connectors handed to the sinks and not released since;
+	// inSpecs are those of the latest specs. Guarded by retiredMu.
+	held    map[connector.Connector]bool
+	inSpecs map[connector.Connector]bool
 }
 
 type deviceConn struct {
@@ -119,7 +126,8 @@ func NewChannelSync(opts SyncOptions) (*ChannelSync, error) {
 	return &ChannelSync{
 		opts: opts, log: log.With(slog.String("component", "channel-sync")),
 		devices: map[domain.ID]*deviceConn{}, caps: map[domain.ID]connector.Capabilities{},
-		retired: map[connector.Connector]bool{},
+		retired: map[connector.Connector]bool{}, held: map[connector.Connector]bool{},
+		inSpecs: map[connector.Connector]bool{},
 	}, nil
 }
 
@@ -204,11 +212,33 @@ func (s *ChannelSync) Reload(ctx context.Context) error {
 	s.caps = caps
 	s.capMu.Unlock()
 
+	// Mark what the sinks are about to hold before handing the specs over,
+	// so a Release racing with SetSpecs cannot unmark it.
+	inSpecs := make(map[connector.Connector]bool, len(next))
+	for _, sp := range specs {
+		if sp.Connector != nil {
+			inSpecs[sp.Connector] = true
+		}
+	}
+	var closeNow []connector.Connector
 	s.retiredMu.Lock()
+	s.inSpecs = inSpecs
+	for c := range inSpecs {
+		s.held[c] = true
+	}
 	for _, c := range retire {
-		s.retired[c] = true
+		if s.held[c] {
+			s.retired[c] = true // closed by Release
+		} else {
+			closeNow = append(closeNow, c)
+		}
 	}
 	s.retiredMu.Unlock()
+	for _, c := range closeNow {
+		if err := c.Close(); err != nil {
+			s.log.Warn("closing a retired connector failed", slog.Any("error", err))
+		}
+	}
 
 	for _, sink := range s.opts.Sinks {
 		sink.SetSpecs(specs)
@@ -239,11 +269,15 @@ func (s *ChannelSync) Connector(deviceID domain.ID) (connector.Connector, bool) 
 
 // Release closes conn if it was replaced by a newer connector. It matches
 // queue.Options.OnConnectorReleased. Connectors that are still current are
-// left alone.
+// left open; one that is no longer in the specs is remembered as released,
+// so that its later retirement closes it at once.
 func (s *ChannelSync) Release(conn connector.Connector) {
 	s.retiredMu.Lock()
 	ok := s.retired[conn]
 	delete(s.retired, conn)
+	if ok || !s.inSpecs[conn] {
+		delete(s.held, conn)
+	}
 	s.retiredMu.Unlock()
 	if !ok {
 		return
@@ -263,6 +297,7 @@ func (s *ChannelSync) Close() error {
 	s.retiredMu.Lock()
 	old := s.retired
 	s.retired = map[connector.Connector]bool{}
+	s.held, s.inSpecs = map[connector.Connector]bool{}, map[connector.Connector]bool{}
 	s.retiredMu.Unlock()
 
 	var errs []error
