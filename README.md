@@ -47,7 +47,7 @@ MikroTik i RouterOS są znakami towarowymi MikroTik. Projekt nie jest powiązany
 
 ## Development
 
-Wymagania: Go 1.26+, `make`, [golangci-lint](https://golangci-lint.run/) v2. Opcjonalnie `reuse` (`pip install reuse`).
+Wymagania: Go 1.26+, `make`, [golangci-lint](https://golangci-lint.run/) v2.9+ (starsze nie obsługują Go 1.26). Opcjonalnie `reuse` (`pip install reuse`).
 
 ```sh
 make build                    # binarka bin/tikker (CGO_ENABLED=0, wersja z git describe)
@@ -108,6 +108,6 @@ Instrukcje dla agentów AI: [AGENTS.md](AGENTS.md). Zgłaszanie luk: [SECURITY.m
 
 ### Development (English summary)
 
-Requirements: Go 1.26+, `make`, golangci-lint v2. Run `make build`, `make test`, `make lint`.
+Requirements: Go 1.26+, `make`, golangci-lint v2.9+. Run `make build`, `make test`, `make lint`.
 Contributions use the Developer Certificate of Origin (`git commit -s`) and Conventional Commits.
 See [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) and [SECURITY.md](SECURITY.md).
