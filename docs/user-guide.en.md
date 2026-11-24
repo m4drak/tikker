@@ -21,8 +21,9 @@ Panel page addresses are relative to the instance address, for example `https://
 There are two ways to create the administrator account. Choose one.
 
 **A. Password in the `TIKKER_ADMIN_PASSWORD` variable.** When the database is empty, tikker creates a user named
-`admin` with this password at startup (at least 12 characters). After the first login, change the password and remove
-the variable from the configuration. When the database is not empty, the variable is ignored.
+`admin` with this password at startup (at least 12 characters). After the first login, change the password in the panel. When the database is not empty, the variable is ignored,
+but do not just remove it: while the listen address is outside loopback, either `TIKKER_ADMIN_PASSWORD` or
+`TIKKER_SETUP_SECRET` must stay set (see below).
 
 **B. Setup wizard in the browser (`/setup`).** As long as no user exists, the login page redirects to `/setup`.
 The form asks for:
@@ -34,10 +35,13 @@ The form asks for:
 After you submit, the account is created and you are signed in. The wizard disappears as soon as at least one user
 exists.
 
-**Setup secret.** The default listen address `:8080` covers all interfaces. If the listen address is outside loopback
-and `TIKKER_ADMIN_PASSWORD` is empty, tikker will not start without `TIKKER_SETUP_SECRET` (at least 12 characters).
-This keeps anyone on the network from taking over an uninitialized instance. You type the secret into the wizard;
-after the account is created, you can remove it from the configuration.
+**Setup secret.** The default listen address `:8080` covers all interfaces. If the listen address is outside loopback,
+tikker will not start unless `TIKKER_ADMIN_PASSWORD` or `TIKKER_SETUP_SECRET` is set (at least 12 characters). This
+is checked on every start, even when users already exist, so **do not remove both variables**. It keeps anyone on
+the network from taking over an uninitialized instance. Recommended: set `TIKKER_SETUP_SECRET` (you type it into the
+wizard; once a user exists the wizard is disabled, so the secret no longer unlocks anything) and leave
+`TIKKER_ADMIN_PASSWORD` unset. Alternative: listen on `127.0.0.1` behind a reverse proxy, where neither variable is
+required.
 
 ## 2. Logging in and sessions
 
@@ -53,8 +57,9 @@ after the account is created, you can remove it from the configuration.
   `X-Forwarded-For` header only from that proxy. Without this, login limits and the audit log see the proxy address
   instead of the client.
 
-Panel menu: **Dashboard**, **Messages**, **Send** (operator and admin), **Devices**, **Tokens**, **Users**, and
-**Audit** (the last four for admins only). Every user has a **Profile** page where they change their password.
+Panel menu: **Dashboard**, **Messages**, **Send** (operator and admin), **Devices**, **API tokens**, **Users**, and
+**Audit log** (the last four for admins only). Every user has a **My profile and password** page where they change
+their password.
 
 ## 3. Devices and channels
 
@@ -87,7 +92,7 @@ switch. Defaults:
 |---|---|---|---|
 | `rate_per_min` | 6 | 1–600 | Sending rate limit of the channel. Excess messages wait in the queue; this is not a `429` error. |
 | `max_segments` | 3 | 1–10 | Maximum number of segments of one message. Works together with the connector's capabilities. |
-| `transliterate` | `true` for `routeros-rest`, `false` for `agent` | – | Replaces Polish letters with ASCII before sending (see section 4). |
+| `transliterate` | `true` for `routeros-rest`, `false` for `agent` (only because `TIKKER_AGENT_UCS2` defaults to `true`; for a connector without UCS-2 the server picks `true`) | – | Replaces Polish letters with ASCII before sending (see section 4). |
 | `tags` | empty | up to 16 tags | Routing: a request with `tags` goes to a channel that has **all** of those tags. |
 
 A channel state is `ok`, `degraded`, `down`, or `disabled`. Health is checked every 60 s (`TIKKER_HEALTH_INTERVAL`).
@@ -142,10 +147,12 @@ for it.
 ### Long messages
 
 The number of segments must not exceed the effective limit, which is the smaller of the channel's `max_segments` and
-the connector's capabilities. What happens when the limit is exceeded is set by `TIKKER_LONG_MESSAGE_STRATEGY`:
+the connector's capabilities. What happens when the limit is exceeded is set by `TIKKER_LONG_MESSAGE_STRATEGY` (a global setting, not per channel):
 
 - `reject` (default): `422` (`too_many_segments`); the message is not queued;
-- `split`: the text is split into several independent messages with a `(1/N) ` prefix, each with its own status;
+- `split`: the text is split into several independent messages with a `(1/N) ` prefix, each with its own status.
+  The total number of segments of all parts still cannot exceed the channel's `max_segments`; beyond that you get
+  `422` (`too_many_segments`) as well;
 - `truncate`: the text is cut to the limit.
 
 ### Message life cycle
@@ -167,7 +174,7 @@ and its `body` becomes `null`.
 
 ## 6. API tokens
 
-A token is access to the API. Create it in the panel (**Tokens**, admins only), or from the command line on the same
+A token is access to the API. Create it in the panel (**API tokens**, admins only), or from the command line on the same
 instance (with the same `TIKKER_DATA_DIR`):
 
 ```sh
@@ -175,7 +182,8 @@ tikker token create --user admin --name ci --scope sms:send --scope sms:read --t
 ```
 
 Defaults: owner `admin`, name `cli`, scope `admin`, no expiry (`--ttl 0`). The token, in the form
-`tkr_<prefix>_<secret>`, is shown **only once**. In a container: `docker compose exec tikker /tikker token create ...`.
+`tkr_<prefix>_<secret>`, is shown **only once**. In a container: `docker compose exec tikker /tikker token create ...`. On the MikroTik container (a `scratch` image
+with no shell) the CLI is not available: create the token in the panel or with `POST /api/v1/tokens`.
 
 | Scope | Allows |
 |---|---|
@@ -184,8 +192,8 @@ Defaults: owner `admin`, name `cli`, scope `admin`, no expiry (`--ttl 0`). The t
 | `admin` | managing devices, channels, tokens and users; includes `sms:read` and `sms:send` |
 
 The effective permissions of a token are the intersection of its scopes and the role of its owner. A token whose owner
-has the `viewer` role cannot send an SMS, even with the `sms:send` scope. A token of a disabled, expired, or revoked
-user is rejected with `401`, and a missing scope gives `403`.
+has the `viewer` role cannot send an SMS, even with the `sms:send` scope. A token of a disabled user, or an expired or revoked
+token, is rejected with `401`, and a missing scope gives `403`.
 
 Good practice: one token per integration, with the narrowest scope (for example, a ticketing system gets only
 `sms:send`), and with an expiry date. To revoke a token, delete it in the panel or with `DELETE /api/v1/tokens/{id}`.
@@ -200,12 +208,12 @@ Administrators manage users (**Users**). Each user has one of these roles:
 | `operator` | as `viewer`, plus send SMS messages and cancel queued messages |
 | `admin` | everything: devices, channels, tokens, users, webhooks, audit |
 
-A user can be disabled (their tokens stop working). The password is changed on the **Profile** page. It is recommended
+A user can be disabled (their tokens stop working). The password is changed on the **My profile and password** page. It is recommended
 to give each person their own administrator account instead of sharing one login.
 
 ## 8. Audit log
 
-**Audit** (admins only) shows events, filterable by action and actor. Recorded events include, among others: successful
+**Audit log** (admins only) shows events, filterable by action and actor. Recorded events include, among others: successful
 and failed logins, logouts, creation and changes of users, creation and deletion of tokens, devices and channels,
 sending and cancelling messages, and changes to webhooks. The audit log is available only in the panel, not in the API.
 
@@ -227,9 +235,11 @@ The data directory (`/data` in the container, `/var/lib/tikker` in a server depl
   messages, tokens, users, and the audit log;
 - `secret.key`: the AES-256-GCM key that encrypts router passwords and agent tokens.
 
-Back up **both** files together and protect them like secrets. The database alone cannot decrypt the router passwords.
-A key given through `TIKKER_SECRET_KEY` (32 bytes in base64) works the same way as the file. If you change or lose
-`secret.key`, startup fails with a key mismatch error, and you have to enter the device passwords again.
+Back up **both** files together and protect them like secrets. The database alone cannot decrypt the router passwords,
+and a copy of `secret.key` is essential to restore the instance. A key given through `TIKKER_SECRET_KEY` (32 bytes in
+base64) works the same way as the file. If you change or lose `secret.key` while the database contains devices,
+startup fails with a key mismatch error and the panel is unreachable. Restore the original key from a backup (or
+remove the devices from the database). With a database that has no devices, a missing key is silently regenerated.
 
 A safe backup: stop tikker, copy the data directory, start tikker again. An example for Docker Compose is in
 [deploy-server.md](deploy-server.md#7-kopie-zapasowe) (section 7 is in Polish), and for the container on MikroTik in
@@ -251,9 +261,10 @@ The full contract: [api/openapi.yaml](../api/openapi.yaml).
 **Sending.** Body (`application/json`): `to` (required), `body` (required), optionally `client_ref` (up to 128
 characters, returned in the response), `tags`, `channel_id`, and `expires_at` (RFC 3339, in the future). The response is
 `202 Accepted`, the `Location` header points to the first message, and `messages[]` contains the created messages in
-the `queued` state. There is usually one; with `split` there are more.
+the `queued` state. There is usually one; with `split` there are more. To send many messages at once (up to 100, atomically) use
+`POST /api/v1/messages/batch`; `Idempotency-Key` then applies to the whole batch (details in `api/openapi.yaml`).
 
-**Idempotency.** `Idempotency-Key` (1–255 printable ASCII characters, for example a UUID v4) is valid for 24 h per token:
+**Idempotency.** `Idempotency-Key` (1–255 printable ASCII characters, no spaces, for example a UUID v4) is valid for 24 h per token:
 
 - same key and same body: the same `202` response with the same messages and the header `Idempotent-Replayed: true`,
   with no new message;
@@ -352,7 +363,9 @@ while True:
         break
 ```
 
-Run it with: `TIKKER_TOKEN=tkr_... python3 sms.py`.
+Run it with: `export TIKKER_TOKEN="$(cat ~/.config/tikker/token)"` (or fetch the token from a secret store, or use
+`read -rs TIKKER_TOKEN && export TIKKER_TOKEN`), then `python3 sms.py`. Do not type the token on the command line, or it
+ends up in your shell history.
 
 ### PHP (curl extension, PHP 8.0+)
 
@@ -421,7 +434,7 @@ do {
 } while ($cursor !== null);
 ```
 
-Run it with: `TIKKER_TOKEN=tkr_... php sms.php`.
+Run it with: set `TIKKER_TOKEN` as above (from a file, a secret store, or `read -rs`), then `php sms.php`.
 
 ## 12. Frequently asked questions
 
@@ -438,8 +451,9 @@ message, instead of 160 and 153. If the text can do without the diacritics, turn
 them.
 
 **Why do I get `422` `too_many_segments`?**
-The text does not fit the effective segment limit (see section 4). Shorten the text, or set
-`TIKKER_LONG_MESSAGE_STRATEGY=split` (several SMS messages) or `truncate` (cut the text). On the `routeros-rest`
+The text does not fit the effective segment limit (see section 4). Shorten the text, or set globally
+`TIKKER_LONG_MESSAGE_STRATEGY=split` (several SMS messages, but the total is still capped by the channel's
+`max_segments`) or `truncate` (cut the text). On the `routeros-rest`
 connector the limit is one segment, because RouterOS does not concatenate SMS messages (assumption `ASSUMPTION(T00)`).
 
 **Why do I get `422` `unsupported_characters`?**
@@ -476,5 +490,7 @@ Only on a trusted local network and only for testing. On the internet, use TLS (
 reverse proxy). Passwords and session cookies sent over plain HTTP can be read on the network.
 
 **I lost `secret.key`. What now?**
-Without the original key, the stored router passwords cannot be read, and tikker will not start with this database.
-Restore `secret.key` or `TIKKER_SECRET_KEY` from a backup.
+Without the original key, the stored router passwords cannot be read, and tikker will not start with this database if
+it contains devices (the panel is unreachable). Restore `secret.key` or `TIKKER_SECRET_KEY` from a backup, or remove
+the devices from the database and add them again. With a database that has no devices, the key is silently
+regenerated. That is why you should back up `secret.key` together with the database.

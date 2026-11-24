@@ -19,8 +19,9 @@ Adresy stron podane są względem adresu instancji, np. `https://sms.example.com
 Konto administratora tworzy się na jeden z dwóch sposobów. Wybierz jeden.
 
 **A. Hasło w zmiennej `TIKKER_ADMIN_PASSWORD`.** Gdy baza jest pusta, tikker przy starcie tworzy użytkownika `admin`
-z tym hasłem (min. 12 znaków). Po pierwszym logowaniu zmień hasło i usuń zmienną z konfiguracji. Przy niepustej bazie
-zmienna jest ignorowana.
+z tym hasłem (min. 12 znaków). Po pierwszym logowaniu zmień hasło w panelu. Przy niepustej bazie zmienna jest ignorowana, ale nie usuwaj jej bez
+zastąpienia: przy nasłuchu poza loopbackiem musi pozostać ustawione `TIKKER_ADMIN_PASSWORD` albo `TIKKER_SETUP_SECRET`
+(patrz niżej).
 
 **B. Kreator w przeglądarce (`/setup`).** Dopóki nie ma żadnego użytkownika, strona logowania przekierowuje na `/setup`.
 Formularz prosi o:
@@ -32,9 +33,12 @@ Formularz prosi o:
 Po zatwierdzeniu konto powstaje i od razu jesteś zalogowany. Kreator znika, gdy istnieje choć jeden użytkownik.
 
 **Sekret kreatora.** Domyślny adres nasłuchu `:8080` obejmuje wszystkie interfejsy. Jeśli nasłuch jest poza
-loopbackiem, a `TIKKER_ADMIN_PASSWORD` jest puste, tikker nie wystartuje bez `TIKKER_SETUP_SECRET` (min. 12 znaków).
-Dzięki temu nikt z sieci nie przejmie niezainicjalizowanej instancji. Sekret wpisujesz w kreatorze; po utworzeniu
-konta można go usunąć z konfiguracji.
+loopbackiem, tikker nie wystartuje, dopóki nie jest ustawione `TIKKER_ADMIN_PASSWORD` albo `TIKKER_SETUP_SECRET`
+(min. 12 znaków). Wymóg obowiązuje przy każdym starcie, także gdy użytkownicy już istnieją, więc **nie usuwaj
+obu zmiennych naraz**. Dzięki temu nikt z sieci nie przejmie niezainicjalizowanej instancji. Zalecane: ustaw
+`TIKKER_SETUP_SECRET` (wpisujesz go w kreatorze; gdy istnieje użytkownik, kreator jest wyłączony, więc sekret już
+niczego nie odblokowuje) i nie ustawiaj `TIKKER_ADMIN_PASSWORD`. Alternatywa: nasłuch na `127.0.0.1` za reverse proxy,
+wtedy żadna z dwóch zmiennych nie jest wymagana.
 
 ## 2. Logowanie i sesje
 
@@ -49,8 +53,9 @@ konta można go usunąć z konfiguracji.
 - Za reverse proxy (np. Caddy) ustaw `TIKKER_TRUSTED_PROXIES` na adres proxy. Tikker wierzy wtedy nagłówkowi
   `X-Forwarded-For` tylko od tego proxy. Bez tego limity i audyt widzą adres proxy zamiast klienta.
 
-Menu panelu: **Pulpit**, **Wiadomości**, **Wyślij** (operator i admin), **Urządzenia**, **Tokeny**, **Użytkownicy**
-i **Audyt** (ostatnie cztery tylko dla admina). Każdy użytkownik ma stronę **Profil**, na której zmienia hasło.
+Menu panelu: **Pulpit**, **Wiadomości**, **Wysyłka** (operator i admin), **Urządzenia**, **Tokeny API**,
+**Użytkownicy** i **Dziennik audytu** (ostatnie cztery tylko dla admina). Każdy użytkownik ma stronę
+**Mój profil i zmiana hasła**, na której zmienia hasło.
 
 ## 3. Urządzenia i kanały
 
@@ -82,7 +87,7 @@ Domyślne wartości:
 |---|---|---|---|
 | `rate_per_min` | 6 | 1–600 | Limit wysyłki kanału. Nadmiar czeka w kolejce; to nie jest błąd `429`. |
 | `max_segments` | 3 | 1–10 | Maksymalna liczba segmentów jednej wiadomości. Działa razem z możliwościami konektora. |
-| `transliterate` | `true` dla `routeros-rest`, `false` dla `agent` | – | Zamiana polskich znaków na ASCII przed wysyłką (patrz rozdz. 4). |
+| `transliterate` | `true` dla `routeros-rest`, `false` dla `agent` (tylko dlatego, że `TIKKER_AGENT_UCS2` domyślnie jest `true`; dla konektora bez UCS-2 serwer ustawia `true`) | – | Zamiana polskich znaków na ASCII przed wysyłką (patrz rozdz. 4). |
 | `tags` | puste | do 16 tagów | Routing: żądanie z `tags` trafia na kanał, który ma **wszystkie** te tagi. |
 
 Stan kanału to `ok`, `degraded`, `down` albo `disabled`. Zdrowie sprawdzane jest co 60 s (`TIKKER_HEALTH_INTERVAL`).
@@ -96,7 +101,7 @@ Wyłączenie przełącznikiem w panelu ma pierwszeństwo przed wynikiem sprawdze
 
 ### Panel
 
-**Wyślij** pokazuje formularz. Przed wysyłką możesz kliknąć podgląd (`POST /send/preview`), który pokaże liczbę części
+**Wysyłka** pokazuje formularz. Przed wysyłką możesz kliknąć podgląd (`POST /send/preview`), który pokaże liczbę części
 i segmentów, a także znaki, które zostaną zamienione przy transliteracji.
 
 ### Numer odbiorcy
@@ -136,10 +141,13 @@ Dla kanału bez transliteracji i bez obsługi UCS-2 tekst z polskimi znakami ko�
 ### Długie wiadomości
 
 Liczba segmentów nie może przekroczyć efektywnego limitu, czyli mniejszej z wartości `max_segments` kanału i
-możliwości konektora. Zachowanie przy przekroczeniu określa `TIKKER_LONG_MESSAGE_STRATEGY`:
+możliwości konektora. Zachowanie przy przekroczeniu określa `TIKKER_LONG_MESSAGE_STRATEGY` (ustawienie globalne,
+nie per kanał):
 
 - `reject` (domyślnie): `422` (`too_many_segments`), wiadomość nie trafia do kolejki;
-- `split`: tekst dzielony jest na kilka niezależnych wiadomości z prefiksem `(1/N) `, każda z własnym statusem;
+- `split`: tekst dzielony jest na kilka niezależnych wiadomości z prefiksem `(1/N) `, każda z własnym statusem.
+  Suma segmentów wszystkich części nadal nie może przekroczyć `max_segments` kanału; powyżej tego limitu
+  też dostajesz `422` (`too_many_segments`);
 - `truncate`: tekst jest obcinany do limitu.
 
 ### Cykl życia wiadomości
@@ -161,7 +169,7 @@ a pole `body` ma wtedy wartość `null`.
 
 ## 6. Tokeny API
 
-Token to dostęp do API. Tworzy się go w panelu (**Tokeny**, tylko admin) albo w linii poleceń na tej samej instancji
+Token to dostęp do API. Tworzy się go w panelu (**Tokeny API**, tylko admin) albo w linii poleceń na tej samej instancji
 (ten sam `TIKKER_DATA_DIR`):
 
 ```sh
@@ -169,7 +177,8 @@ tikker token create --user admin --name ci --scope sms:send --scope sms:read --t
 ```
 
 Domyślnie: właściciel `admin`, nazwa `cli`, zakres `admin`, bez wygaśnięcia (`--ttl 0`). Token w postaci
-`tkr_<prefix>_<secret>` pokazywany jest **tylko raz**. W kontenerze: `docker compose exec tikker /tikker token create ...`.
+`tkr_<prefix>_<secret>` pokazywany jest **tylko raz**. W kontenerze: `docker compose exec tikker /tikker token create ...`. Na kontenerze MikroTika (obraz `scratch`, bez
+powłoki) CLI jest niedostępne: utwórz token w panelu albo przez `POST /api/v1/tokens`.
 
 | Zakres | Uprawnia do |
 |---|---|
@@ -178,7 +187,7 @@ Domyślnie: właściciel `admin`, nazwa `cli`, zakres `admin`, bez wygaśnięcia
 | `admin` | zarządzania urządzeniami, kanałami, tokenami i użytkownikami; zawiera `sms:read` i `sms:send` |
 
 Efektywne uprawnienia tokenu to część wspólna jego zakresów i roli właściciela. Token użytkownika z rolą `viewer` nie
-wyśle SMS-a, nawet z zakresem `sms:send`. Token wyłączonego, wygasłego lub unieważnionego jest odrzucany z `401`,
+wyśle SMS-a, nawet z zakresem `sms:send`. Token wyłączonego użytkownika oraz token wygasły lub unieważniony są odrzucane z `401`,
 a brak zakresu daje `403`.
 
 Dobra praktyka: osobny token na każdą integrację, z najwęższym zakresem (np. system zgłoszeń dostaje tylko `sms:send`),
@@ -194,12 +203,12 @@ Użytkowników zarządza admin (**Użytkownicy**). Każdy użytkownik ma jedną 
 | `operator` | jak `viewer`, plus wysyłać SMS-y, anulować wiadomości w kolejce |
 | `admin` | wszystko: urządzenia, kanały, tokeny, użytkownicy, webhooki, audyt |
 
-Użytkownika można wyłączyć (jego tokeny przestają działać). Hasło zmienia się na stronie **Profil**. Zalecane jest
+Użytkownika można wyłączyć (jego tokeny przestają działać). Hasło zmienia się na stronie **Mój profil i zmiana hasła**. Zalecane jest
 konto administratora dla każdej osoby, zamiast współdzielonego loginu.
 
 ## 8. Dziennik audytu
 
-**Audyt** (tylko admin) pokazuje zdarzenia z filtrem po akcji i aktorze. Rejestrowane są m.in.: udane i nieudane
+**Dziennik audytu** (tylko admin) pokazuje zdarzenia z filtrem po akcji i aktorze. Rejestrowane są m.in.: udane i nieudane
 logowania, wylogowania, tworzenie i zmiany użytkowników, tworzenie i usuwanie tokenów, urządzeń i kanałów, wysyłka
 i anulowanie wiadomości, zmiany webhooków. Dziennik jest dostępny tylko w panelu, nie w API.
 
@@ -221,9 +230,11 @@ W katalogu danych (`/data` w kontenerze, `/var/lib/tikker` w wdrożeniu serwerow
   użytkownicy i audyt;
 - `secret.key`: klucz AES-256-GCM, którym zaszyfrowane są hasła routerów i tokeny agentów.
 
-Kopiuj **oba** pliki razem i chroń je jak sekrety. Sama baza nie pozwoli odszyfrować haseł routerów. Klucz podany
-przez `TIKKER_SECRET_KEY` (32 bajty w base64) działa tak samo jak plik; jeśli go zmienisz albo zgubisz `secret.key`,
-start kończy się błędem o niezgodnym kluczu i trzeba ponownie wpisać hasła urządzeń.
+Kopiuj **oba** pliki razem i chroń je jak sekrety. Sama baza nie pozwoli odszyfrować haseł routerów, a kopia
+`secret.key` jest niezbędna do odtworzenia instancji. Klucz podany przez `TIKKER_SECRET_KEY` (32 bajty w base64)
+działa tak samo jak plik. Jeśli go zmienisz albo zgubisz `secret.key`, a w bazie są urządzenia, start kończy się
+błędem o niezgodnym kluczu i panel jest niedostępny. Przywróć oryginalny klucz z kopii (albo usuń urządzenia z bazy).
+Przy bazie bez urządzeń brakujący klucz jest po cichu generowany od nowa.
 
 Bezpieczna kopia: zatrzymaj tikkera, skopiuj katalog danych, uruchom ponownie. Przykład dla Docker Compose jest
 w [deploy-server.md](deploy-server.md#7-kopie-zapasowe), a dla kontenera na MikroTiku w
@@ -245,9 +256,10 @@ Pełny kontrakt: [api/openapi.yaml](../api/openapi.yaml).
 **Wysyłka.** Body (`application/json`): `to` (wymagane), `body` (wymagane), opcjonalnie `client_ref` (do 128 znaków,
 zwracany w odpowiedzi), `tags`, `channel_id`, `expires_at` (RFC 3339, w przyszłości). Odpowiedź to `202 Accepted`,
 nagłówek `Location` wskazuje pierwszą wiadomość, a `messages[]` zawiera utworzone wiadomości w stanie `queued`.
-Zwykle jest jedna; przy `split` jest ich więcej.
+Zwykle jest jedna; przy `split` jest ich więcej. Wiele wiadomości naraz (do 100, atomowo) wysyła
+`POST /api/v1/messages/batch`; `Idempotency-Key` dotyczy wtedy całej paczki (szczegóły w `api/openapi.yaml`).
 
-**Idempotencja.** `Idempotency-Key` (1–255 znaków ASCII, np. UUID v4) jest ważny 24 h w obrębie tokenu:
+**Idempotencja.** `Idempotency-Key` (1–255 drukowalnych znaków ASCII, bez spacji, np. UUID v4) jest ważny 24 h w obrębie tokenu:
 
 - ten sam klucz i to samo ciało: ponowna odpowiedź `202` z tymi samymi wiadomościami i nagłówkiem
   `Idempotent-Replayed: true`, bez nowej wiadomości;
@@ -344,7 +356,9 @@ while True:
         break
 ```
 
-Uruchomienie: `TIKKER_TOKEN=tkr_... python3 sms.py`.
+Uruchomienie: `export TIKKER_TOKEN="$(cat ~/.config/tikker/token)"` (albo pobierz token z menedżera sekretów, albo wpisz
+`read -rs TIKKER_TOKEN && export TIKKER_TOKEN`), a potem `python3 sms.py`. Nie wpisuj tokenu w linii poleceń, bo trafi do
+historii powłoki.
 
 ### PHP (rozszerzenie curl, PHP 8.0+)
 
@@ -413,7 +427,7 @@ do {
 } while ($cursor !== null);
 ```
 
-Uruchomienie: `TIKKER_TOKEN=tkr_... php sms.php`.
+Uruchomienie: ustaw `TIKKER_TOKEN` jak wyżej (z pliku, menedżera sekretów albo `read -rs`), a potem `php sms.php`.
 
 ## 12. Najczęstsze pytania
 
@@ -429,8 +443,9 @@ Polskie litery nie należą do GSM-7, więc SMS przechodzi na UCS-2: 70 znaków 
 wiadomości, zamiast 160 i 153. Jeśli treść może być bez ogonków, włącz transliterację albo wpisz tekst bez nich.
 
 **Dlaczego dostaję `422` `too_many_segments`?**
-Tekst nie mieści się w efektywnym limicie segmentów (patrz rozdz. 4). Skróć treść, albo ustaw
-`TIKKER_LONG_MESSAGE_STRATEGY=split` (wiele SMS-ów) lub `truncate` (obcięcie). Na konektorze `routeros-rest` limit wynosi
+Tekst nie mieści się w efektywnym limicie segmentów (patrz rozdz. 4). Skróć treść, albo ustaw globalnie
+`TIKKER_LONG_MESSAGE_STRATEGY=split` (wiele SMS-ów, ale suma segmentów nadal ograniczona przez `max_segments` kanału) lub
+`truncate` (obcięcie). Na konektorze `routeros-rest` limit wynosi
 jeden segment, bo RouterOS nie łączy SMS-ów (założenie `ASSUMPTION(T00)`).
 
 **Dlaczego dostaję `422` `unsupported_characters`?**
@@ -466,5 +481,7 @@ Tylko w zaufanej sieci lokalnej i tylko do testów. W Internecie stawiaj TLS (Ca
 reverse proxy). Hasła i cookie sesji przechodzące po HTTP są widoczne w sieci.
 
 **Zgubiłem `secret.key`. Co teraz?**
-Bez oryginalnego klucza zapisane hasła routerów są nieodczytywalne, a tikker nie wystartuje z tą bazą. Przywróć
-`secret.key` albo `TIKKER_SECRET_KEY` z kopii.
+Bez oryginalnego klucza zapisane hasła routerów są nieodczytywalne, a tikker nie wystartuje z tą bazą, jeśli są w niej
+urządzenia (panel będzie niedostępny). Przywróć `secret.key` albo `TIKKER_SECRET_KEY` z kopii; ewentualnie usuń
+urządzenia z bazy i dodaj je od nowa. Przy bazie bez urządzeń klucz jest po cichu generowany od nowa. Dlatego
+rób kopię `secret.key` razem z bazą.
