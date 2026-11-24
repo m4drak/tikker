@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,7 +53,9 @@ func newEnv(t *testing.T, opts Options, aopts fakeagent.Options) *env {
 	if opts.Clock == nil {
 		opts.Clock = e.clk
 	}
-	opts.Logger = discard()
+	if opts.Logger == nil {
+		opts.Logger = discard()
+	}
 	e.hub = NewHub(opts)
 	conn, err := e.hub.NewConn(context.Background(), connector.DeviceConfig{DeviceID: devID, Kind: domain.ConnectorAgent, AgentToken: token})
 	if err != nil {
@@ -173,6 +176,40 @@ func (s *session) waitersOf(id domain.ID) int {
 		return c.waiters
 	}
 	return 0
+}
+
+// checkin reports ports as the agent; inbound SMS are accepted only for
+// ports of the last check-in.
+func (e *env) checkin(ports ...string) {
+	e.t.Helper()
+	var b strings.Builder
+	for i, p := range ports {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(`{"port":"` + p + `","registration":"registered"}`)
+	}
+	if res := e.request("POST", Prefix+"/checkin", token, `{"ports":[`+b.String()+`]}`); res.StatusCode != http.StatusOK {
+		e.t.Fatalf("checkin = %d", res.StatusCode)
+	}
+}
+
+// syncBuffer is a log sink safe for concurrent writes.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 func readAll(t *testing.T, res *http.Response) string {

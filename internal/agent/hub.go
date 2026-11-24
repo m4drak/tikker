@@ -4,9 +4,11 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -34,6 +36,8 @@ const (
 	DefaultMaxConcurrentSends = 1
 	// DefaultMaxInbox bounds the buffered inbound SMS per port.
 	DefaultMaxInbox = 500
+	// DefaultMaxInboxTotal bounds the buffered inbound SMS per device.
+	DefaultMaxInboxTotal = 2000
 	// DefaultResultTTL is how long final send results and pending inbox
 	// deletions are remembered (deduplication of redelivered commands).
 	DefaultResultTTL = 24 * time.Hour
@@ -45,8 +49,10 @@ const (
 
 	// maxResults bounds the remembered results per device.
 	maxResults = 10000
-	// maxPendingDeletes bounds the inbox deletions waiting for the agent.
-	maxPendingDeletes = 10000
+	// defaultMaxPendingDeletes bounds the inbox deletions waiting for the
+	// agent.
+	defaultMaxPendingDeletes     = 10000
+	defaultMaxDeletesPerResponse = 50
 )
 
 // Sentinel causes wrapped into connector errors; test with errors.Is.
@@ -61,10 +67,16 @@ var (
 	// ErrNoResult: the agent fetched the command but did not report a
 	// result in time; the SMS may have been sent.
 	ErrNoResult = errors.New("agent did not report a result")
+	// ErrRedelivered: the agent reported a result for a command it had
+	// been handed more than once; the SMS may have been sent twice.
+	ErrRedelivered = errors.New("command was redelivered")
 	// ErrUnknownPort: the agent did not report the channel's port.
 	ErrUnknownPort = errors.New("port not reported by the agent")
 	// ErrInvalidMessage: the message cannot be sent at all.
 	ErrInvalidMessage = errors.New("invalid message")
+	// ErrTooManyDeletes: too many stored inbox entries wait for the agent
+	// to delete them; the rest stays buffered until it catches up.
+	ErrTooManyDeletes = errors.New("too many inbox deletions pending")
 	// ErrClosed: the connector was closed.
 	ErrClosed = errors.New("connector closed")
 )
@@ -103,6 +115,10 @@ type Options struct {
 	// MaxInbox bounds buffered inbound SMS per port (default
 	// DefaultMaxInbox); further entries are refused and stay on the router.
 	MaxInbox int
+	// MaxInboxTotal bounds buffered inbound SMS per device over all ports
+	// (default DefaultMaxInboxTotal). Entries are also refused for ports
+	// the agent did not report at its last check-in.
+	MaxInboxTotal int
 	// ResultTTL is how long final results and pending inbox deletions are
 	// kept (default DefaultResultTTL).
 	ResultTTL time.Duration
@@ -112,6 +128,18 @@ type Options struct {
 	// MaxCommands is the most commands one poll returns (default
 	// DefaultMaxCommands).
 	MaxCommands int
+	// RedeliverAfter hides a command handed to the agent from further polls
+	// for this long (default SendTimeout/2), so that overlapping polls do
+	// not both get it. After it, the command is handed out again (lost
+	// response, crashed script); an outcome reported for a command handed
+	// out more than once is flagged as a possible duplicate.
+	RedeliverAfter time.Duration
+
+	// maxPendingDeletes bounds the inbox deletions waiting for the agent
+	// (default defaultMaxPendingDeletes; settable by tests).
+	maxPendingDeletes int
+	// maxDeletesPerResponse bounds inbox_delete in one response (default 50).
+	maxDeletesPerResponse int
 }
 
 func (o Options) withDefaults() Options {
@@ -142,6 +170,9 @@ func (o Options) withDefaults() Options {
 	if o.MaxInbox <= 0 {
 		o.MaxInbox = DefaultMaxInbox
 	}
+	if o.MaxInboxTotal <= 0 {
+		o.MaxInboxTotal = DefaultMaxInboxTotal
+	}
 	if o.ResultTTL <= 0 {
 		o.ResultTTL = DefaultResultTTL
 	}
@@ -150,6 +181,15 @@ func (o Options) withDefaults() Options {
 	}
 	if o.MaxCommands <= 0 {
 		o.MaxCommands = DefaultMaxCommands
+	}
+	if o.maxPendingDeletes <= 0 {
+		o.maxPendingDeletes = defaultMaxPendingDeletes
+	}
+	if o.maxDeletesPerResponse <= 0 {
+		o.maxDeletesPerResponse = defaultMaxDeletesPerResponse
+	}
+	if o.RedeliverAfter <= 0 {
+		o.RedeliverAfter = max(o.SendTimeout/2, time.Second)
 	}
 	return o
 }
@@ -313,6 +353,10 @@ type outcome struct {
 	reason    string // sanitized
 	remoteRef string
 	at        time.Time
+	// deliveries is how often the command was handed to the agent before
+	// this outcome was reported (0 for remembered results). More than one
+	// means the agent may have executed it twice.
+	deliveries int
 }
 
 type command struct {
@@ -321,22 +365,36 @@ type command struct {
 	msg        connector.OutboundSMS
 	pdus       []SubmitPDU
 	enqueuedAt time.Time
-	delivered  int // times handed to the agent
-	waiters    int // Sends waiting for the result
+	delivered  int       // times handed to the agent
+	hiddenTill time.Time // not handed out again before (redelivery lease)
+	waiters    int       // Sends waiting for the result
 	done       chan struct{}
 	out        outcome // set before done is closed
 }
 
 type inboxKey struct{ port, remoteID string }
 
+// inboxEntry is one buffered inbound SMS. sms.RemoteID is the router's ID;
+// the connector hands out handle instead (see handleOf).
 type inboxEntry struct {
-	sms connector.InboundSMS
-	fp  [sha256.Size]byte
+	sms    connector.InboundSMS
+	fp     [sha256.Size]byte
+	handle string
 }
 
-type deleteMark struct {
+// deleteKey identifies one stored entry whose deletion on the router is
+// pending. The fingerprint is part of the key: RouterOS reuses IDs, so two
+// different messages may have had the same ID.
+type deleteKey struct {
+	inboxKey
 	fp [sha256.Size]byte
-	at time.Time
+}
+
+// deleteMark carries what the agent compares before deleting an entry: it
+// removes the entry only if phone and timestamp still match.
+type deleteMark struct {
+	phone, timestamp string
+	at               time.Time
 }
 
 // report is the last check-in.
@@ -363,7 +421,7 @@ type session struct {
 	results  map[domain.ID]outcome // final results, for deduplication
 	order    []domain.ID           // results in insertion order
 	inbox    map[string][]inboxEntry
-	deletes  map[inboxKey]deleteMark
+	deletes  map[deleteKey]deleteMark
 	lastSeen time.Time
 	last     *report
 }
@@ -372,7 +430,7 @@ func newSession(h *Hub, id domain.ID) *session {
 	return &session{
 		hub: h, deviceID: id, done: make(chan struct{}), wake: make(chan struct{}),
 		byID: map[domain.ID]*command{}, results: map[domain.ID]outcome{},
-		inbox: map[string][]inboxEntry{}, deletes: map[inboxKey]deleteMark{},
+		inbox: map[string][]inboxEntry{}, deletes: map[deleteKey]deleteMark{},
 	}
 }
 
@@ -453,12 +511,16 @@ func (s *session) removeLocked(cmd *command) {
 }
 
 // pending returns up to max unresolved commands for ports (all ports when
-// empty) and marks them delivered. Every poll returns them again until the
-// agent reports a result: a lost response or a crashed script is covered,
-// and the agent drops commands it has already executed by message ID.
+// empty) and marks them delivered. A delivered command is hidden from
+// further polls for RedeliverAfter, so overlapping polls do not both get it;
+// then it is handed out again until the agent reports a result (a lost
+// response or a crashed script). The agent drops commands it has already
+// executed by message ID; if it does not, the outcome of a command handed
+// out more than once is flagged as a possible duplicate (see Conn.outcome).
 func (s *session) pending(ports []string, limit int) ([]*command, <-chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.now()
 	var out []*command
 	for _, c := range s.queue {
 		if len(out) >= limit {
@@ -467,7 +529,11 @@ func (s *session) pending(ports []string, limit int) ([]*command, <-chan struct{
 		if len(ports) > 0 && !slices.Contains(ports, c.port) {
 			continue
 		}
+		if now.Before(c.hiddenTill) {
+			continue
+		}
 		c.delivered++
+		c.hiddenTill = now.Add(s.hub.opts.RedeliverAfter)
 		out = append(out, c)
 	}
 	return out, s.wake
@@ -493,6 +559,7 @@ func (s *session) resolve(id domain.ID, out outcome) (known bool) {
 	}
 	s.removeLocked(c)
 	c.out = out
+	c.out.deliveries = c.delivered
 	close(c.done)
 	return true
 }
@@ -521,40 +588,71 @@ func (s *session) pruneLocked() {
 // ---------------------------------------------------------------------------
 // Inbox
 
-// push adds inbound SMS reported by the agent. An entry tikker has already
-// stored (its deletion is pending and the content is the same) is skipped;
-// an entry with an ID tikker asked to delete but different content is new
-// (RouterOS reuses IDs after deletion). It returns how many entries were
-// taken and refused (port full; they stay on the router).
-func (s *session) push(entries []pushed) (accepted, refused int) {
+// push adds inbound SMS reported by the agent. An entry is identified by
+// port, router ID and content fingerprint. An entry tikker has already
+// stored (its deletion is pending) or still buffers is skipped. An entry
+// with a known router ID but different content is a new message (RouterOS
+// reuses IDs after deletion): it is buffered next to the old one, which
+// stays until it is stored, and a pending deletion of the old content under
+// that ID is dropped (that entry is gone from the router). Entries for a
+// port the last check-in did not report (or before any check-in) are
+// refused, as are entries beyond MaxInbox per port or MaxInboxTotal per
+// device; refused entries stay on the router and are pushed again later.
+// It returns how many entries were taken and refused, and how many of the
+// refused ones were for unknown ports.
+func (s *session) push(entries []pushed) (accepted, refused, unknownPort int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	limit := s.hub.opts.MaxInbox
+	limit, total := s.hub.opts.MaxInbox, 0
+	for _, l := range s.inbox {
+		total += len(l)
+	}
+	known := map[string]bool{}
+	if s.last != nil {
+		for _, p := range s.last.ports {
+			known[p.Port] = true
+		}
+	}
 	for _, p := range entries {
+		if !known[p.port] {
+			refused++
+			unknownPort++
+			continue
+		}
 		e := p.sms
 		key := inboxKey{port: p.port, remoteID: e.RemoteID}
 		fp := fingerprint(e)
-		if m, ok := s.deletes[key]; ok {
-			if m.fp == fp {
-				accepted++ // already stored; the agent learns to delete it
-				continue
+		if _, ok := s.deletes[deleteKey{key, fp}]; ok {
+			accepted++ // already stored; the agent learns to delete it
+			continue
+		}
+		for k := range s.deletes {
+			if k.inboxKey == key {
+				delete(s.deletes, k)
 			}
-			delete(s.deletes, key)
 		}
 		list := s.inbox[p.port]
-		if i := slices.IndexFunc(list, func(x inboxEntry) bool { return x.sms.RemoteID == e.RemoteID }); i >= 0 {
-			list[i] = inboxEntry{sms: e, fp: fp}
+		if slices.ContainsFunc(list, func(x inboxEntry) bool { return x.sms.RemoteID == e.RemoteID && x.fp == fp }) {
 			accepted++
 			continue
 		}
-		if len(list) >= limit {
+		if len(list) >= limit || total >= s.hub.opts.MaxInboxTotal {
 			refused++
 			continue
 		}
-		s.inbox[p.port] = append(list, inboxEntry{sms: e, fp: fp})
+		s.inbox[p.port] = append(list, inboxEntry{sms: e, fp: fp, handle: handleOf(e.RemoteID, fp)})
+		total++
 		accepted++
 	}
-	return accepted, refused
+	return accepted, refused, unknownPort
+}
+
+// handleOf is the RemoteID the connector hands to the inbox poller: the
+// router's ID plus a short content fingerprint, so that DeleteInbox removes
+// exactly the entry FetchInbox returned even if the router has meanwhile
+// reused the ID for another message.
+func handleOf(remoteID string, fp [sha256.Size]byte) string {
+	return remoteID + "@" + hex.EncodeToString(fp[:6])
 }
 
 // pushed is one inbound SMS reported by the agent for a port.
@@ -583,13 +681,17 @@ func (s *session) fetch(port string) ([]connector.InboundSMS, error) {
 	out := make([]connector.InboundSMS, len(list))
 	for i, e := range list {
 		out[i] = e.sms
+		out[i].RemoteID = e.handle
 	}
 	return out, nil
 }
 
-// markDeleted moves stored entries to the deletions the agent still has to
-// perform on the router. Unknown IDs are ignored.
-func (s *session) markDeleted(port string, ids []string) error {
+// markDeleted moves stored entries, identified by the handles FetchInbox
+// returned, to the deletions the agent still has to perform on the router.
+// Unknown handles are ignored. When the pending deletions are at their cap,
+// the remaining entries stay buffered and ErrTooManyDeletes is returned:
+// dropping them unmarked would let the next push add them again.
+func (s *session) markDeleted(port string, handles []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -597,13 +699,19 @@ func (s *session) markDeleted(port string, ids []string) error {
 	}
 	now := s.now()
 	list := s.inbox[port]
-	for _, id := range ids {
-		i := slices.IndexFunc(list, func(x inboxEntry) bool { return x.sms.RemoteID == id })
+	full := false
+	for _, h := range handles {
+		i := slices.IndexFunc(list, func(x inboxEntry) bool { return x.handle == h })
 		if i < 0 {
 			continue
 		}
-		if len(s.deletes) < maxPendingDeletes {
-			s.deletes[inboxKey{port: port, remoteID: id}] = deleteMark{fp: list[i].fp, at: now}
+		e := list[i]
+		if len(s.deletes) >= s.hub.opts.maxPendingDeletes {
+			full = true
+			break
+		}
+		s.deletes[deleteKey{inboxKey{port: port, remoteID: e.sms.RemoteID}, e.fp}] = deleteMark{
+			phone: e.sms.Phone, timestamp: e.sms.RawTimestamp, at: now,
 		}
 		list = slices.Delete(list, i, i+1)
 	}
@@ -612,36 +720,62 @@ func (s *session) markDeleted(port string, ids []string) error {
 	} else {
 		s.inbox[port] = list
 	}
+	if full {
+		return fmt.Errorf("%w (%d)", ErrTooManyDeletes, len(s.deletes))
+	}
 	return nil
 }
 
 // pendingDeletes lists the entries the agent may delete on the router,
-// sorted.
-func (s *session) pendingDeletes() []inboxKey {
+// sorted. Each carries the phone and timestamp the agent pushed: the agent
+// deletes the router entry only if they still match.
+func (s *session) pendingDeletes() []inboxRef {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]inboxKey, 0, len(s.deletes))
-	for k := range s.deletes {
-		out = append(out, k)
+	type item struct {
+		ref inboxRef
+		at  time.Time
 	}
-	slices.SortFunc(out, func(a, b inboxKey) int {
-		if c := strings.Compare(a.port, b.port); c != 0 {
-			return c
-		}
-		return strings.Compare(a.remoteID, b.remoteID)
+	all := make([]item, 0, len(s.deletes))
+	for k, m := range s.deletes {
+		all = append(all, item{inboxRef{Port: k.port, RemoteID: k.remoteID, Phone: m.phone, Timestamp: m.timestamp}, m.at})
+	}
+	slices.SortFunc(all, func(a, b item) int {
+		return cmp.Or(a.at.Compare(b.at), strings.Compare(a.ref.Port, b.ref.Port),
+			strings.Compare(a.ref.RemoteID, b.ref.RemoteID),
+			strings.Compare(a.ref.Phone, b.ref.Phone), strings.Compare(a.ref.Timestamp, b.ref.Timestamp))
 	})
+	// Bounded per response: a RouterOS script reads the whole body into a
+	// variable, so an unbounded list (acks failing for a while) could grow
+	// past what /tool fetch returns and stall the agent. Oldest go first;
+	// the rest follow in later responses.
+	if n := s.hub.opts.maxDeletesPerResponse; len(all) > n {
+		all = all[:n]
+	}
+	out := make([]inboxRef, len(all))
+	for i, it := range all {
+		out[i] = it.ref
+	}
 	return out
 }
 
-// acked forgets deletions the agent has performed.
-func (s *session) acked(keys []inboxKey) int {
+// acked forgets deletions the agent has performed (or found unnecessary).
+// A reference with phone or timestamp forgets only the matching deletions;
+// one without (older scripts) forgets every deletion under its router ID.
+func (s *session) acked(refs []inboxRef) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := 0
-	for _, k := range keys {
-		if _, ok := s.deletes[k]; ok {
-			delete(s.deletes, k)
-			n++
+	for _, r := range refs {
+		legacy := r.Phone == "" && r.Timestamp == ""
+		for k, m := range s.deletes {
+			if k.port != r.Port || k.remoteID != r.RemoteID {
+				continue
+			}
+			if legacy || (m.phone == r.Phone && m.timestamp == r.Timestamp) {
+				delete(s.deletes, k)
+				n++
+			}
 		}
 	}
 	return n

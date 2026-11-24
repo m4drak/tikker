@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -180,6 +181,122 @@ func TestChannelSync(t *testing.T) {
 	}
 	if err := e.sync.Close(); err != nil {
 		t.Errorf("Close: %v", err)
+	}
+}
+
+// closeRecorder is a connector that records Close; the embedded interface
+// is nil, other methods are not called by ChannelSync.
+type closeRecorder struct {
+	connector.Connector
+	mu     sync.Mutex
+	closed int
+}
+
+func (c *closeRecorder) Capabilities() connector.Capabilities {
+	return connector.Capabilities{Encodings: []domain.Encoding{domain.EncodingGSM7}, MaxSegments: 1}
+}
+
+func (c *closeRecorder) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed++
+	return nil
+}
+
+func (c *closeRecorder) closes() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+type recordingFactory struct {
+	mu    sync.Mutex
+	built []*closeRecorder
+}
+
+func (f *recordingFactory) New(context.Context, connector.DeviceConfig) (connector.Connector, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c := &closeRecorder{}
+	f.built = append(f.built, c)
+	return c, nil
+}
+
+// A retired connector that no sink holds any more (a device without
+// channels, or whose channels were removed before) is closed at once: the
+// dispatcher never releases a connector it does not reference, and an
+// unclosed agent connector would keep its token authenticating.
+func TestChannelSyncClosesUnreferencedRetired(t *testing.T) {
+	tests := []struct {
+		name string
+		// setup prepares the device (it starts without channels); it may
+		// reload and release connectors like the dispatcher would.
+		setup func(e *testEnv, s *ChannelSync, dev string)
+		// releaseLater: the dispatcher still holds the retired connector
+		// and closes it through Release.
+		releaseLater bool
+	}{
+		{"no channels", func(*testEnv, *ChannelSync, string) {}, false},
+		{"channel removed earlier", func(e *testEnv, s *ChannelSync, dev string) {
+			ch := e.addChannel(dev, "lte1", nil)
+			if err := s.Reload(e.ctx); err != nil {
+				t.Fatal(err)
+			}
+			if r := e.req(http.MethodDelete, channelsPath+"/"+ch, e.adminTok, nil); r.Status != 204 {
+				t.Fatal(r)
+			}
+			if err := s.Reload(e.ctx); err != nil {
+				t.Fatal(err)
+			}
+			cur, _ := s.Connector(domain.ID(dev))
+			s.Release(cur) // the dispatcher dropped it with the channel
+		}, false},
+		{"channel still configured", func(e *testEnv, _ *ChannelSync, dev string) {
+			e.addChannel(dev, "lte1", nil)
+		}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t)
+			f := &recordingFactory{}
+			s, err := NewChannelSync(SyncOptions{Store: e.st, Credentials: e.api.creds, Connectors: f})
+			if err != nil {
+				t.Fatal(err)
+			}
+			dev := e.addDevice("router")
+			if err := s.Reload(e.ctx); err != nil {
+				t.Fatal(err)
+			}
+			tt.setup(e, s, dev)
+			if err := s.Reload(e.ctx); err != nil {
+				t.Fatal(err)
+			}
+			conn, ok := s.Connector(domain.ID(dev))
+			if !ok {
+				t.Fatal("no connector")
+			}
+			e.req(http.MethodPatch, devicesPath+"/"+dev, e.adminTok, map[string]any{"enabled": false})
+			if err := s.Reload(e.ctx); err != nil {
+				t.Fatal(err)
+			}
+			rec := conn.(*closeRecorder)
+			want := 1
+			if tt.releaseLater {
+				want = 0
+			}
+			if got := rec.closes(); got != want {
+				t.Fatalf("closes after retirement = %d, want %d", got, want)
+			}
+			if tt.releaseLater {
+				s.Release(conn)
+				if got := rec.closes(); got != 1 {
+					t.Fatalf("closes after Release = %d, want 1", got)
+				}
+			}
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

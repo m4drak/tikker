@@ -113,7 +113,9 @@ func (h *Hub) endpoint(rt route) http.Handler {
 		}
 		s := h.authenticate(bearer(r))
 		if s == nil {
-			h.log.Info("agent authentication failed", slog.String("path", r.URL.Path), slog.String("remote_addr", r.RemoteAddr))
+			// Debug only: unauthenticated clients must not be able to
+			// flood the log at the default level.
+			h.log.Debug("agent authentication failed", slog.String("path", r.URL.Path), slog.String("remote_addr", r.RemoteAddr))
 			w.Header().Set("WWW-Authenticate", `Bearer realm="tikker-agent"`)
 			writeProblem(w, r, http.StatusUnauthorized, problemUnauthorized, "Missing or invalid agent token.", nil)
 			return
@@ -342,7 +344,7 @@ func (h *Hub) handleCommands(w http.ResponseWriter, r *http.Request, s *session)
 		case <-s.done:
 		}
 	}
-	resp := commandsResponse{Commands: make([]commandDTO, 0, len(cmds)), InboxDelete: refsOf(s.pendingDeletes())}
+	resp := commandsResponse{Commands: make([]commandDTO, 0, len(cmds)), InboxDelete: s.pendingDeletes()}
 	for _, c := range cmds {
 		resp.Commands = append(resp.Commands, commandDTO{
 			MessageID: c.id.String(), Port: c.port, To: c.msg.To, Body: c.msg.Body,
@@ -353,14 +355,6 @@ func (h *Hub) handleCommands(w http.ResponseWriter, r *http.Request, s *session)
 		h.log.Debug("commands delivered to the agent", slog.String("device_id", s.deviceID.String()), slog.Int("count", len(cmds)))
 	}
 	writeJSON(w, resp)
-}
-
-func refsOf(keys []inboxKey) []inboxRef {
-	out := make([]inboxRef, len(keys))
-	for i, k := range keys {
-		out[i] = inboxRef{Port: k.port, RemoteID: k.remoteID}
-	}
-	return out
 }
 
 func (h *Hub) handleResult(w http.ResponseWriter, r *http.Request, s *session) {
@@ -442,11 +436,15 @@ func (h *Hub) handleInbox(w http.ResponseWriter, r *http.Request, s *session) {
 	if v.write(w, r) {
 		return
 	}
-	accepted, refused := s.push(entries)
-	if refused > 0 {
-		h.log.Warn("agent inbox full; entries stay on the router", slog.String("device_id", s.deviceID.String()), slog.Int("refused", refused))
+	accepted, refused, unknown := s.push(entries)
+	if unknown > 0 {
+		h.log.Warn("agent pushed SMS for ports it did not report at check-in; they stay on the router",
+			slog.String("device_id", s.deviceID.String()), slog.Int("refused", unknown))
 	}
-	writeJSON(w, inboxResponse{Accepted: accepted, Refused: refused, InboxDelete: refsOf(s.pendingDeletes())})
+	if full := refused - unknown; full > 0 {
+		h.log.Warn("agent inbox full; entries stay on the router", slog.String("device_id", s.deviceID.String()), slog.Int("refused", full))
+	}
+	writeJSON(w, inboxResponse{Accepted: accepted, Refused: refused, InboxDelete: s.pendingDeletes()})
 }
 
 func (h *Hub) parseTimestamp(s string) time.Time {
@@ -468,18 +466,18 @@ func (h *Hub) handleAck(w http.ResponseWriter, r *http.Request, s *session) {
 	if len(req.Deleted) > maxAckRefs {
 		v.add("/deleted", "out_of_range", "At most %d entries.", maxAckRefs)
 	}
-	keys := make([]inboxKey, 0, len(req.Deleted))
 	for i, d := range req.Deleted {
 		f := fmt.Sprintf("/deleted/%d", i)
 		checkPort(&v, f+"/port", d.Port)
 		checkLen(&v, f+"/remote_id", d.RemoteID, maxRemoteIDLen, true)
-		keys = append(keys, inboxKey{port: d.Port, remoteID: d.RemoteID})
+		checkLen(&v, f+"/phone", d.Phone, maxPhoneLen, false)
+		checkLen(&v, f+"/timestamp", d.Timestamp, maxTimestampLen, false)
 	}
 	if v.write(w, r) {
 		return
 	}
-	n := s.acked(keys)
-	writeJSON(w, ackResponse{Removed: n, InboxDelete: refsOf(s.pendingDeletes())})
+	n := s.acked(req.Deleted)
+	writeJSON(w, ackResponse{Removed: n, InboxDelete: s.pendingDeletes()})
 }
 
 func (h *Hub) handleStatus(w http.ResponseWriter, _ *http.Request, s *session) {

@@ -37,7 +37,9 @@
 //
 // A Send whose command the script never fetched fails as a plain Transient
 // error: nothing reached the router. A fetched command without a result is
-// TransientAmbiguous. The message ID is the idempotency key on both sides:
+// TransientAmbiguous. A fetched command is hidden from further polls for
+// Options.RedeliverAfter; any outcome of a command handed out more than
+// once is ambiguous (possible duplicate). The message ID is the idempotency key on both sides:
 // the script remembers the IDs it has executed and answers a redelivered
 // command with the earlier result, and tikker remembers final results
 // (accepted, permanent) for Options.ResultTTL, so a retried Send of an

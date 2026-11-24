@@ -5,7 +5,9 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -185,6 +187,80 @@ func TestRedeliveryDeduplicatedByTikker(t *testing.T) {
 	}
 }
 
+// pollIDs polls once as the raw agent and returns the message IDs received.
+func (e *env) pollIDs() []string {
+	e.t.Helper()
+	res := e.request("POST", Prefix+"/commands", token, "")
+	var resp commandsResponse
+	if err := json.NewDecoder(res.Body).Decode(&resp); err != nil {
+		e.t.Fatal(err)
+	}
+	ids := make([]string, len(resp.Commands))
+	for i, c := range resp.Commands {
+		ids[i] = c.MessageID
+	}
+	return ids
+}
+
+// A command handed to the agent is hidden from overlapping polls for
+// RedeliverAfter; once handed out again, its outcome is a possible
+// duplicate whatever the agent reports (ADR 0002).
+func TestRedeliveryLease(t *testing.T) {
+	tests := []struct {
+		status string
+		kind   domain.ErrorKind
+		// retryOK: a retried Send completes from the remembered result.
+		retryOK bool
+	}{
+		{"accepted", domain.KindTransient, true},
+		{"transient", domain.KindTransient, false},
+		{"permanent", domain.KindPermanent, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			e := newEnv(t, Options{SendTimeout: time.Minute, RedeliverAfter: 10 * time.Second}, fakeagent.Options{})
+			done := e.sendAsync(context.Background(), lte1, msgOf(id1, "Hello"))
+			e.queued(1)
+			if got := e.pollIDs(); !slices.Equal(got, []string{id1}) {
+				t.Fatalf("first poll = %v", got)
+			}
+			if got := e.pollIDs(); len(got) != 0 {
+				t.Fatalf("overlapping poll got %v, want nothing", got)
+			}
+			e.clk.Advance(9 * time.Second)
+			if got := e.pollIDs(); len(got) != 0 {
+				t.Fatalf("poll within the lease got %v", got)
+			}
+			e.clk.Advance(time.Second)
+			if got := e.pollIDs(); !slices.Equal(got, []string{id1}) {
+				t.Fatalf("poll after the lease = %v", got)
+			}
+			e.request("POST", Prefix+"/commands/"+id1+"/result", token, `{"status":"`+tt.status+`"}`)
+			r := e.result(done)
+			wantKind(t, r.err, tt.kind, true, ErrRedelivered)
+			if tt.retryOK {
+				if _, err := e.conn.Send(context.Background(), lte1, msgOf(id1, "Hello")); err != nil {
+					t.Fatalf("retried Send = %v", err)
+				}
+			}
+		})
+	}
+}
+
+// A command delivered once keeps the agent's outcome unchanged.
+func TestSingleDeliveryNotAmbiguous(t *testing.T) {
+	e := newEnv(t, Options{RedeliverAfter: 10 * time.Second}, fakeagent.Options{})
+	done := e.sendAsync(context.Background(), lte1, msgOf(id1, "Hello"))
+	e.queued(1)
+	if got := e.pollIDs(); len(got) != 1 {
+		t.Fatalf("poll = %v", got)
+	}
+	e.request("POST", Prefix+"/commands/"+id1+"/result", token, `{"status":"accepted"}`)
+	if r := e.result(done); r.err != nil {
+		t.Fatalf("Send = %v", r.err)
+	}
+}
+
 // Remembered results expire after ResultTTL.
 func TestResultTTL(t *testing.T) {
 	e := newEnv(t, Options{ResultTTL: time.Hour}, fakeagent.Options{})
@@ -331,8 +407,15 @@ func TestConnectorsShareMailbox(t *testing.T) {
 	}
 }
 
+// isHandleOf reports whether handle is a connector RemoteID of the router
+// entry remoteID.
+func isHandleOf(handle, remoteID string) bool {
+	return strings.HasPrefix(handle, remoteID+"@") && len(handle) == len(remoteID)+13
+}
+
 func TestInboxStoreThenDelete(t *testing.T) {
 	e := newEnv(t, Options{}, fakeagent.Options{})
+	e.checkin("lte1", "lte2")
 	ctx := context.Background()
 	at := time.Date(2026, 11, 23, 10, 0, 0, 0, time.UTC)
 	r1, _ := e.agent.Receive("lte1", "+48511222333", "Odpowiedź: tak", at)
@@ -345,8 +428,8 @@ func TestInboxStoreThenDelete(t *testing.T) {
 	if err != nil || len(got) != 2 {
 		t.Fatalf("FetchInbox = %+v, %v", got, err)
 	}
-	if got[0].RemoteID != r1 || got[0].Phone != "+48511222333" || got[0].PDU == "" ||
-		got[0].RawTimestamp != "2026-11-23 10:00:00" || !got[0].Timestamp.Equal(at) || got[1].RemoteID != r2 {
+	if !isHandleOf(got[0].RemoteID, r1) || got[0].Phone != "+48511222333" || got[0].PDU == "" ||
+		got[0].RawTimestamp != "2026-11-23 10:00:00" || !got[0].Timestamp.Equal(at) || !isHandleOf(got[1].RemoteID, r2) {
 		t.Fatalf("entries = %+v", got)
 	}
 	if !e.conn.Capabilities().InboundPDU {
@@ -362,10 +445,10 @@ func TestInboxStoreThenDelete(t *testing.T) {
 	}
 
 	// Stored -> deleted: gone from FetchInbox, listed to the agent.
-	if err := e.conn.DeleteInbox(ctx, lte1, []string{r1, "*missing"}); err != nil {
+	if err := e.conn.DeleteInbox(ctx, lte1, []string{got[0].RemoteID, r1, "*missing"}); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := e.conn.FetchInbox(ctx, lte1); len(got) != 1 || got[0].RemoteID != r2 {
+	if got, _ := e.conn.FetchInbox(ctx, lte1); len(got) != 1 || !isHandleOf(got[0].RemoteID, r2) {
 		t.Fatalf("after delete: %+v", got)
 	}
 	// A push before the agent has deleted it does not bring it back.
@@ -382,7 +465,7 @@ func TestInboxStoreThenDelete(t *testing.T) {
 		t.Fatalf("pending deletes after ack = %d", st.pendingDeletes)
 	}
 	// Other ports are separate.
-	if got, _ := e.conn.FetchInbox(ctx, connector.ChannelRef{Port: "lte2"}); len(got) != 1 || got[0].RemoteID != r3 {
+	if got, _ := e.conn.FetchInbox(ctx, connector.ChannelRef{Port: "lte2"}); len(got) != 1 || !isHandleOf(got[0].RemoteID, r3) {
 		t.Fatalf("lte2 = %+v", got)
 	}
 }
@@ -391,6 +474,7 @@ func TestInboxStoreThenDelete(t *testing.T) {
 // tikker asked to delete is new.
 func TestInboxRemoteIDReuse(t *testing.T) {
 	e := newEnv(t, Options{}, fakeagent.Options{})
+	e.checkin("lte1", "lte2")
 	ctx := context.Background()
 	push := func(body string) {
 		t.Helper()
@@ -401,7 +485,11 @@ func TestInboxRemoteIDReuse(t *testing.T) {
 		}
 	}
 	push("first")
-	_ = e.conn.DeleteInbox(ctx, lte1, []string{"*1"})
+	got, _ := e.conn.FetchInbox(ctx, lte1)
+	if len(got) != 1 {
+		t.Fatalf("FetchInbox = %+v", got)
+	}
+	_ = e.conn.DeleteInbox(ctx, lte1, []string{got[0].RemoteID})
 	push("first") // same content: already stored
 	if got, _ := e.conn.FetchInbox(ctx, lte1); len(got) != 0 {
 		t.Fatalf("same entry re-added: %+v", got)
@@ -415,8 +503,172 @@ func TestInboxRemoteIDReuse(t *testing.T) {
 	}
 }
 
+// The router reuses an ID while tikker still buffers the old entry under
+// it: FetchInbox returned A, the agent then pushes B under the same ID.
+// DeleteInbox of what was fetched must remove and mark A only; B stays
+// buffered, and the agent is told to delete only an entry matching A.
+func TestInboxRemoteIDReusedBeforeDelete(t *testing.T) {
+	const (
+		tsA = "2026-11-23 10:00:00"
+		tsB = "2026-11-23 10:05:00"
+	)
+	tests := []struct {
+		name   string
+		phoneB string
+		tsB    string
+	}{
+		{"other sender", "+48511222444", tsB},
+		{"same sender, later", "+48511222333", tsB},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t, Options{}, fakeagent.Options{})
+			e.checkin("lte1")
+			ctx := context.Background()
+			push := func(phone, ts, body string) {
+				t.Helper()
+				res := e.request("POST", Prefix+"/inbox", token,
+					`{"messages":[{"port":"lte1","remote_id":"*1","phone":"`+phone+`","timestamp":"`+ts+`","body":"`+body+`"}]}`)
+				if res.StatusCode != 200 {
+					t.Fatalf("push = %d", res.StatusCode)
+				}
+			}
+			push("+48511222333", tsA, "A")
+			fetched, _ := e.conn.FetchInbox(ctx, lte1)
+			if len(fetched) != 1 || fetched[0].Body != "A" {
+				t.Fatalf("FetchInbox = %+v", fetched)
+			}
+			push(tt.phoneB, tt.tsB, "B") // the router reused *1
+			if err := e.conn.DeleteInbox(ctx, lte1, []string{fetched[0].RemoteID}); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := e.conn.FetchInbox(ctx, lte1)
+			if len(got) != 1 || got[0].Body != "B" {
+				t.Fatalf("after deleting A: %+v, want B still buffered", got)
+			}
+			res := e.request("POST", Prefix+"/commands", token, "")
+			var resp commandsResponse
+			if err := json.NewDecoder(res.Body).Decode(&resp); err != nil {
+				t.Fatal(err)
+			}
+			want := []inboxRef{{Port: "lte1", RemoteID: "*1", Phone: "+48511222333", Timestamp: tsA}}
+			if !slices.Equal(resp.InboxDelete, want) {
+				t.Fatalf("inbox_delete = %+v, want %+v", resp.InboxDelete, want)
+			}
+		})
+	}
+}
+
+// An ack with phone and timestamp forgets only the matching deletion; one
+// without (older scripts) forgets every deletion under the ID.
+func TestInboxAckMatchesContent(t *testing.T) {
+	tests := []struct {
+		name    string
+		ack     string
+		removed int
+	}{
+		{"matching", `{"port":"lte1","remote_id":"*1","phone":"+48511222333","timestamp":"2026-11-23 10:00:00"}`, 1},
+		{"other content", `{"port":"lte1","remote_id":"*1","phone":"+48511222999","timestamp":"2026-11-23 10:00:00"}`, 0},
+		{"legacy", `{"port":"lte1","remote_id":"*1"}`, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t, Options{}, fakeagent.Options{})
+			e.checkin("lte1")
+			ctx := context.Background()
+			e.request("POST", Prefix+"/inbox", token,
+				`{"messages":[{"port":"lte1","remote_id":"*1","phone":"+48511222333","timestamp":"2026-11-23 10:00:00","body":"A"}]}`)
+			got, _ := e.conn.FetchInbox(ctx, lte1)
+			if err := e.conn.DeleteInbox(ctx, lte1, []string{got[0].RemoteID}); err != nil {
+				t.Fatal(err)
+			}
+			body := readAll(t, e.request("POST", Prefix+"/inbox/ack", token, `{"deleted":[`+tt.ack+`]}`))
+			if !strings.Contains(body, fmt.Sprintf(`"removed":%d`, tt.removed)) {
+				t.Fatalf("ack = %s", body)
+			}
+			if n := e.conn.s.snapshot().pendingDeletes; n != 1-tt.removed {
+				t.Fatalf("pending deletes = %d", n)
+			}
+		})
+	}
+}
+
+// When the pending deletions are at their cap, DeleteInbox keeps the
+// entries it cannot mark (and fails transiently) instead of dropping them
+// unmarked, which would make the next push add them again.
+func TestInboxPendingDeletesCap(t *testing.T) {
+	e := newEnv(t, Options{maxPendingDeletes: 1}, fakeagent.Options{})
+	e.checkin("lte1", "lte2")
+	ctx := context.Background()
+	e.request("POST", Prefix+"/inbox", token, `{"messages":[
+		{"port":"lte1","remote_id":"*1","phone":"+48511222333","body":"a"},
+		{"port":"lte1","remote_id":"*2","phone":"+48511222333","body":"b"}]}`)
+	got, _ := e.conn.FetchInbox(ctx, lte1)
+	if len(got) != 2 {
+		t.Fatalf("FetchInbox = %+v", got)
+	}
+	err := e.conn.DeleteInbox(ctx, lte1, []string{got[0].RemoteID, got[1].RemoteID})
+	wantKind(t, err, domain.KindTransient, false, ErrTooManyDeletes)
+	left, _ := e.conn.FetchInbox(ctx, lte1)
+	if len(left) != 1 || left[0].Body != "b" {
+		t.Fatalf("after capped delete: %+v, want b kept", left)
+	}
+	if n := e.conn.s.snapshot().pendingDeletes; n != 1 {
+		t.Fatalf("pending deletes = %d", n)
+	}
+	// Re-pushing does not duplicate b.
+	e.request("POST", Prefix+"/inbox", token, `{"messages":[{"port":"lte1","remote_id":"*2","phone":"+48511222333","body":"b"}]}`)
+	if left, _ := e.conn.FetchInbox(ctx, lte1); len(left) != 1 {
+		t.Fatalf("after re-push: %+v", left)
+	}
+}
+
+// Inbound SMS are buffered only for ports the agent reported at its last
+// check-in, and the whole session is bounded, so an agent cannot grow the
+// buffer without limit by inventing port names.
+func TestInboxPortsAndTotalLimit(t *testing.T) {
+	msgs := func(ports ...string) string {
+		var b strings.Builder
+		for i, p := range ports {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, `{"port":%q,"remote_id":"*%d","body":"m%d"}`, p, i+1, i)
+		}
+		return `{"messages":[` + b.String() + `]}`
+	}
+	tests := []struct {
+		name     string
+		checkin  []string // nil: no check-in
+		push     []string
+		accepted int
+		refused  int
+	}{
+		{"no check-in", nil, []string{"lte1"}, 0, 1},
+		{"unknown port", []string{"lte1"}, []string{"lte1", "bogus1", "bogus2"}, 1, 2},
+		{"total limit", []string{"lte1", "lte2"}, []string{"lte1", "lte2", "lte1", "lte2"}, 3, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t, Options{MaxInbox: 10, MaxInboxTotal: 3}, fakeagent.Options{})
+			if tt.checkin != nil {
+				e.checkin(tt.checkin...)
+			}
+			body := readAll(t, e.request("POST", Prefix+"/inbox", token, msgs(tt.push...)))
+			want := fmt.Sprintf(`"accepted":%d,"refused":%d`, tt.accepted, tt.refused)
+			if !strings.Contains(body, want) {
+				t.Fatalf("push = %s, want %s", body, want)
+			}
+			if n := e.conn.s.snapshot().inboxEntries; n != tt.accepted {
+				t.Fatalf("buffered = %d, want %d", n, tt.accepted)
+			}
+		})
+	}
+}
+
 func TestInboxLimit(t *testing.T) {
 	e := newEnv(t, Options{MaxInbox: 2}, fakeagent.Options{})
+	e.checkin("lte1", "lte2")
 	for i := range 3 {
 		if _, err := e.agent.Receive("lte1", "+48511222333", "m", t0.Add(time.Duration(i)*time.Minute)); err != nil {
 			t.Fatal(err)
@@ -562,5 +814,48 @@ func TestFactory(t *testing.T) {
 	}
 	if _, err := hub.NewConn(context.Background(), connector.DeviceConfig{DeviceID: devID, Kind: domain.ConnectorRouterOSREST, AgentToken: token}); err == nil {
 		t.Fatal("wrong kind accepted")
+	}
+}
+
+// inbox_delete is bounded per response, oldest first, so a backlog of
+// unacknowledged deletions never grows a response past what a RouterOS
+// script can read; the rest follow once earlier ones are acknowledged.
+func TestInboxDeleteBoundedPerResponse(t *testing.T) {
+	tests := []struct {
+		name  string
+		limit int
+		n     int
+		want  []string
+	}{
+		{"under limit", 5, 3, []string{"*1", "*2", "*3"}},
+		{"over limit, oldest first", 2, 4, []string{"*1", "*2"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t, Options{maxDeletesPerResponse: tt.limit}, fakeagent.Options{})
+			e.checkin("lte1")
+			ctx := context.Background()
+			for i := 1; i <= tt.n; i++ {
+				e.request("POST", Prefix+"/inbox", token,
+					fmt.Sprintf(`{"messages":[{"port":"lte1","remote_id":"*%d","phone":"+48511222333","body":"m%d"}]}`, i, i))
+				got, _ := e.conn.FetchInbox(ctx, lte1)
+				if err := e.conn.DeleteInbox(ctx, lte1, []string{got[len(got)-1].RemoteID}); err != nil {
+					t.Fatal(err)
+				}
+				e.clk.Advance(time.Second) // distinct deletion times
+			}
+			res := e.request("POST", Prefix+"/commands", token, "")
+			var resp commandsResponse
+			if err := json.NewDecoder(res.Body).Decode(&resp); err != nil {
+				t.Fatal(err)
+			}
+			var ids []string
+			for _, r := range resp.InboxDelete {
+				ids = append(ids, r.RemoteID)
+			}
+			if !slices.Equal(ids, tt.want) {
+				t.Fatalf("inbox_delete ids = %v, want %v", ids, tt.want)
+			}
+		})
 	}
 }

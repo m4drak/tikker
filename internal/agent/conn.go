@@ -187,10 +187,27 @@ func cmpOr[T comparable](v, def T) T {
 }
 
 // outcome turns the agent's result into Send's return values.
+//
+// A command handed to the agent more than once (redelivered after
+// RedeliverAfter) may have been sent twice by an agent that does not
+// deduplicate, so every outcome of it is ambiguous (ADR 0002): accepted and
+// transient become TransientAmbiguous, permanent stays permanent with the
+// ambiguous flag. The dispatcher then records the possible duplicate; for
+// accepted, the retry completes at once from the remembered result.
 func (c *Conn) outcome(log *slog.Logger, o outcome) (connector.SendResult, error) {
 	cause := errors.New("agent reported " + string(o.status))
 	if o.reason != "" {
 		cause = fmt.Errorf("agent reported %s: %s", o.status, o.reason)
+	}
+	if o.deliveries > 1 {
+		err := &domain.ConnectorError{Kind: domain.KindTransient, Op: opSend, Ambiguous: true,
+			Err: fmt.Errorf("%w: command handed to the agent %d times: %w", ErrRedelivered, o.deliveries, cause)}
+		if o.status == statusPermanent {
+			err.Kind = domain.KindPermanent
+		}
+		log.Warn("possible duplicate: the command was handed to the agent more than once",
+			slog.String("status", string(o.status)), slog.Int("deliveries", o.deliveries), slog.Any("error", err))
+		return connector.SendResult{}, err
 	}
 	var err error
 	switch o.status {
@@ -238,7 +255,12 @@ func (c *Conn) DeleteInbox(_ context.Context, ch connector.ChannelRef, remoteIDs
 		return c.errClosed(opDeleteInbox)
 	}
 	if err := c.s.markDeleted(ch.Port, remoteIDs); err != nil {
-		return c.errClosed(opDeleteInbox)
+		if errors.Is(err, ErrClosed) {
+			return c.errClosed(opDeleteInbox)
+		}
+		c.log.Warn("inbox deletions pending on the agent are at their limit; entries stay buffered",
+			slog.String("port", ch.Port), slog.Any("error", err))
+		return domain.Transient(opDeleteInbox, err)
 	}
 	return nil
 }

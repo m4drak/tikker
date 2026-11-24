@@ -62,9 +62,15 @@ type commandDTO struct {
 	PDUs      []SubmitPDU `json:"pdus"`
 }
 
+// inboxRef names a router inbox entry. In inbox_delete, phone and
+// timestamp are the values the agent pushed: the agent deletes the entry
+// only if they still match (RouterOS reuses IDs). In an ack they are
+// optional; when present, only the matching deletion is forgotten.
 type inboxRef struct {
-	Port     string `json:"port"`
-	RemoteID string `json:"remote_id"`
+	Port      string `json:"port"`
+	RemoteID  string `json:"remote_id"`
+	Phone     string `json:"phone,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
 }
 
 type commandsResponse struct {

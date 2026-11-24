@@ -213,7 +213,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	// The pull-based agent connector (backlog #1): a RouterOS script polls
 	// this server over HTTPS (works behind CGNAT). The hub owns the in-memory
 	// mailboxes shared by its connectors and the /agent/v1 handler.
-	a.agentHub = agent.NewHub(agent.Options{Logger: log, Clock: clk})
+	a.agentHub = agent.NewHub(agentOptions(cfg.Agent, log, clk))
 	if err := a.agentHub.Register(reg); err != nil {
 		return nil, fmt.Errorf("connector registry: %w", err)
 	}
@@ -477,6 +477,19 @@ type metricsSource struct {
 
 func (s metricsSource) Snapshot() (metrics.Snapshot, error) {
 	return metrics.Snapshot{Queue: s.stats(), Health: s.snap(), Started: s.started()}, nil
+}
+
+// agentOptions maps the [agent] settings onto the agent hub. Settings the
+// configuration does not expose keep the package defaults.
+func agentOptions(c config.AgentConfig, log *slog.Logger, clk clock.Clock) agent.Options {
+	enc := []domain.Encoding{domain.EncodingGSM7}
+	if c.UCS2 {
+		enc = append(enc, domain.EncodingUCS2)
+	}
+	return agent.Options{
+		Logger: log, Clock: clk, SendTimeout: c.SendTimeout, StaleAfter: c.StaleAfter,
+		MaxSegments: c.MaxSegments, Encodings: enc,
+	}
 }
 
 // keyCheck proves that the loaded key encrypts and decrypts.
