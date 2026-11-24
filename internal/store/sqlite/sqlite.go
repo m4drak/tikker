@@ -11,8 +11,13 @@
 // process and can never meet SQLITE_BUSY from a sibling connection; its
 // transactions start with BEGIN IMMEDIATE. The read pool (a few connections,
 // each with PRAGMA query_only) serves reads in parallel under WAL and never
-// blocks on, or blocks, the writer. An in-memory database lives in a single
-// connection, so there both pools are the same one-connection pool.
+// blocks on, or blocks, the writer. An in-memory database is served by a
+// single connection, so there both pools are the same one-connection pool.
+// database/sql discards a connection that a cancelled context interrupted,
+// and a plain ":memory:" database dies with its connection, so an in-memory
+// store is a uniquely named shared-cache database held open by an idle
+// keep-alive connection: a replacement connection sees the same data instead
+// of an empty database ("no such table").
 //
 // # Time, IDs and tags
 //
@@ -37,6 +42,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	// Pure-Go SQLite driver, registered as "sqlite".
@@ -60,6 +66,9 @@ const (
 
 	memoryPath = ":memory:"
 )
+
+// memorySeq numbers in-memory databases so that each Open gets a private one.
+var memorySeq atomic.Uint64
 
 // Options configures [Open].
 type Options struct {
@@ -93,6 +102,8 @@ type Store struct {
 	clk     clock.Clock
 	opts    Options
 	memory  bool
+	memName string  // in-memory only: name of the shared-cache database
+	keep    *sql.DB // in-memory only: holds the shared database alive
 }
 
 var _ store.Store = (*Store)(nil)
@@ -122,8 +133,23 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 
 	s := &Store{clk: opts.Clock, opts: opts}
 	s.memory = opts.Path == "" || opts.Path == memoryPath
+	if s.memory {
+		s.memName = fmt.Sprintf("tikker-mem-%d", memorySeq.Add(1))
+		s.keep, err = sql.Open("sqlite", dsn(opts, false, s.memName))
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: open: %w", err)
+		}
+		s.keep.SetMaxOpenConns(1)
+		s.keep.SetMaxIdleConns(1)
+		s.keep.SetConnMaxLifetime(0)
+		s.keep.SetConnMaxIdleTime(0)
+		if err := s.keep.PingContext(ctx); err != nil {
+			_ = s.keep.Close()
+			return nil, fmt.Errorf("sqlite: open in-memory: %w", err)
+		}
+	}
 
-	s.writeDB, err = sql.Open("sqlite", dsn(opts, true))
+	s.writeDB, err = sql.Open("sqlite", dsn(opts, true, s.memName))
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: open: %w", err)
 	}
@@ -132,20 +158,20 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 	s.writeDB.SetConnMaxLifetime(0)
 	s.writeDB.SetConnMaxIdleTime(0)
 	if err := s.writeDB.PingContext(ctx); err != nil {
-		_ = s.writeDB.Close()
+		_ = s.Close()
 		return nil, fmt.Errorf("sqlite: open %q: %w", opts.Path, err)
 	}
 	if err := migrate(ctx, s.writeDB, s.clk); err != nil {
-		_ = s.writeDB.Close()
+		_ = s.Close()
 		return nil, err
 	}
 
 	if s.memory {
 		s.readDB = s.writeDB
 	} else {
-		s.readDB, err = sql.Open("sqlite", dsn(opts, false))
+		s.readDB, err = sql.Open("sqlite", dsn(opts, false, ""))
 		if err != nil {
-			_ = s.writeDB.Close()
+			_ = s.Close()
 			return nil, fmt.Errorf("sqlite: open reader: %w", err)
 		}
 		s.readDB.SetMaxOpenConns(opts.ReadConns)
@@ -153,8 +179,7 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 		s.readDB.SetConnMaxLifetime(0)
 		s.readDB.SetConnMaxIdleTime(0)
 		if err := s.readDB.PingContext(ctx); err != nil {
-			_ = s.readDB.Close()
-			_ = s.writeDB.Close()
+			_ = s.Close()
 			return nil, fmt.Errorf("sqlite: open reader: %w", err)
 		}
 	}
@@ -173,8 +198,9 @@ func normalizeSynchronous(v string) (string, error) {
 	return "", fmt.Errorf("sqlite: invalid synchronous level %q (want OFF, NORMAL, FULL or EXTRA)", v)
 }
 
-// dsn builds the connection string with per-connection pragmas.
-func dsn(o Options, writer bool) string {
+// dsn builds the connection string with per-connection pragmas. A non-empty
+// memName selects the named shared-cache in-memory database.
+func dsn(o Options, writer bool, memName string) string {
 	q := url.Values{}
 	add := func(p string) { q.Add("_pragma", p) }
 	add(fmt.Sprintf("busy_timeout(%d)", o.BusyTimeout.Milliseconds()))
@@ -188,8 +214,10 @@ func dsn(o Options, writer bool) string {
 		add("query_only(1)")
 	}
 	var name string
-	if o.Path == "" || o.Path == memoryPath {
-		name = ":memory:"
+	if memName != "" {
+		q.Set("mode", "memory")
+		q.Set("cache", "shared")
+		name = memName
 	} else {
 		r := strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23")
 		name = r.Replace(o.Path)
@@ -210,10 +238,13 @@ func (s *Store) Ping(ctx context.Context) error {
 // Close implements [store.Store].
 func (s *Store) Close() error {
 	var errs []error
-	if !s.memory {
+	if !s.memory && s.readDB != nil { // nil: Open failed before the reader
 		errs = append(errs, s.readDB.Close())
 	}
 	errs = append(errs, s.writeDB.Close())
+	if s.keep != nil {
+		errs = append(errs, s.keep.Close())
+	}
 	return errors.Join(errs...)
 }
 
