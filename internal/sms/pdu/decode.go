@@ -391,13 +391,13 @@ func parseSCTS(b []byte) time.Time {
 	if len(b) != 7 {
 		return time.Time{}
 	}
-	var d [6]int
-	for i := range d {
-		lo, hi := int(b[i]&0x0F), int(b[i]>>4)
+	d := make([]int, 0, 6)
+	for _, o := range b[:6] {
+		lo, hi := int(o&0x0F), int(o>>4)
 		if lo > 9 || hi > 9 {
 			return time.Time{}
 		}
-		d[i] = lo*10 + hi
+		d = append(d, lo*10+hi)
 	}
 	tz := b[6]
 	neg := tz&0x08 != 0
