@@ -51,7 +51,7 @@ const (
 	maxResults = 10000
 	// defaultMaxPendingDeletes bounds the inbox deletions waiting for the
 	// agent.
-	defaultMaxPendingDeletes = 10000
+	defaultMaxPendingDeletes     = 10000
 	defaultMaxDeletesPerResponse = 50
 )
 
