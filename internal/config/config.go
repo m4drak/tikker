@@ -87,6 +87,32 @@ type Config struct {
 	// MailGateway is the e-mail to SMS gateway: an SMTP submission
 	// server (PLAN §5 #5, ADR 0004, docs/email-gateway.md).
 	MailGateway MailGatewayConfig `yaml:"mail_gateway"`
+	// MailNotify forwards inbound SMS by e-mail through an SMTP relay
+	// (ADR 0004).
+	MailNotify MailNotifyConfig `yaml:"mail_notify"`
+}
+
+// MailNotifyConfig configures the e-mail notifications of inbound SMS.
+type MailNotifyConfig struct {
+	// Enabled turns the notifications on; off by default.
+	Enabled bool `yaml:"enabled"`
+	// SMTPHost and SMTPPort locate the relay (submission port 587 by
+	// default).
+	SMTPHost string `yaml:"smtp_host"`
+	SMTPPort int    `yaml:"smtp_port"`
+	// TLSMode is starttls (default), tls (implicit, port 465) or none
+	// (loopback relay only).
+	TLSMode string `yaml:"tls_mode"`
+	// Username and Password log in to the relay (AUTH PLAIN); empty: no
+	// login. PasswordFile reads the password from a file instead.
+	Username     string `yaml:"username"`
+	Password     Secret `yaml:"password"`
+	PasswordFile string `yaml:"password_file"`
+	// From is the sender address; To the recipients.
+	From string   `yaml:"from"`
+	To   []string `yaml:"to"`
+	// Timeout bounds one delivery to the relay.
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 // Mail gateway TLS modes.
@@ -234,6 +260,11 @@ func Default() Config {
 			DataTimeout:    5 * time.Minute,
 			Body:           MailBodyText,
 		},
+		MailNotify: MailNotifyConfig{
+			SMTPPort: 587,
+			TLSMode:  MailTLSStartTLS,
+			Timeout:  30 * time.Second,
+		},
 		Retry: RetryConfig{
 			MaxAttempts: rp.MaxAttempts,
 			Base:        rp.Initial,
@@ -318,6 +349,16 @@ func (c Config) entries() []entry {
 		{"mail_gateway.command_timeout", strconv.Quote(c.MailGateway.CommandTimeout.String())},
 		{"mail_gateway.data_timeout", strconv.Quote(c.MailGateway.DataTimeout.String())},
 		{"mail_gateway.body", strconv.Quote(c.MailGateway.Body)},
+		{"mail_notify.enabled", strconv.FormatBool(c.MailNotify.Enabled)},
+		{"mail_notify.smtp_host", strconv.Quote(c.MailNotify.SMTPHost)},
+		{"mail_notify.smtp_port", strconv.Itoa(c.MailNotify.SMTPPort)},
+		{"mail_notify.tls_mode", strconv.Quote(c.MailNotify.TLSMode)},
+		{"mail_notify.username", strconv.Quote(c.MailNotify.Username)},
+		{"mail_notify.password", strconv.Quote(c.MailNotify.Password.String())},
+		{"mail_notify.password_file", strconv.Quote(c.MailNotify.PasswordFile)},
+		{"mail_notify.from", strconv.Quote(c.MailNotify.From)},
+		{"mail_notify.to", quoteList(c.MailNotify.To)},
+		{"mail_notify.timeout", strconv.Quote(c.MailNotify.Timeout.String())},
 	}
 }
 

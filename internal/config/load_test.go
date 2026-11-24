@@ -317,6 +317,41 @@ func TestLoadMailGatewayFromEnv(t *testing.T) {
 	}
 }
 
+func TestLoadMailNotifyFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := Load(Options{Lookup: envMap(testEnv(dir, map[string]string{
+		envMailNotifyEnabled:  "1",
+		envMailNotifyHost:     " smtp.example.net ",
+		envMailNotifyPort:     "465",
+		envMailNotifyTLSMode:  "TLS",
+		envMailNotifyUsername: "tikker",
+		envMailNotifyPassword: "relay-secret-1",
+		envMailNotifyFrom:     "sms@example.net",
+		envMailNotifyTo:       "a@example.net, b@example.net",
+		envMailNotifyTimeout:  "10s",
+	}))})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	m := cfg.MailNotify
+	if !m.Enabled || m.SMTPHost != "smtp.example.net" || m.SMTPPort != 465 || m.TLSMode != MailTLSImplicit ||
+		m.Username != "tikker" || m.Password != "relay-secret-1" || m.From != "sms@example.net" ||
+		len(m.To) != 2 || m.To[1] != "b@example.net" || m.Timeout != 10*time.Second {
+		t.Errorf("mail notify = %+v", m)
+	}
+	if out := cfg.String(); strings.Contains(out, "relay-secret-1") || !strings.Contains(out, "mail_notify.password: \"[REDACTED]\"") {
+		t.Errorf("String() = %s", out)
+	}
+	for _, h := range []struct {
+		host string
+		want bool
+	}{{"localhost", true}, {"127.0.0.1", true}, {"[::1]", true}, {"smtp.example.net", false}, {"10.0.0.1", false}} {
+		if got := HostIsLoopback(h.host); got != h.want {
+			t.Errorf("HostIsLoopback(%q) = %v", h.host, got)
+		}
+	}
+}
+
 func TestLoadErrors(t *testing.T) {
 	tests := []struct {
 		name    string

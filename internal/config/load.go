@@ -70,6 +70,17 @@ const (
 	envMailGwCommandTimeout = "TIKKER_MAIL_GATEWAY_COMMAND_TIMEOUT"
 	envMailGwDataTimeout    = "TIKKER_MAIL_GATEWAY_DATA_TIMEOUT"
 	envMailGwBody           = "TIKKER_MAIL_GATEWAY_BODY"
+
+	envMailNotifyEnabled      = "TIKKER_MAIL_NOTIFY_ENABLED"
+	envMailNotifyHost         = "TIKKER_MAIL_NOTIFY_SMTP_HOST"
+	envMailNotifyPort         = "TIKKER_MAIL_NOTIFY_SMTP_PORT"
+	envMailNotifyTLSMode      = "TIKKER_MAIL_NOTIFY_TLS_MODE"
+	envMailNotifyUsername     = "TIKKER_MAIL_NOTIFY_USERNAME"
+	envMailNotifyPassword     = "TIKKER_MAIL_NOTIFY_PASSWORD"      //nolint:gosec // G101: variable name, not a credential
+	envMailNotifyPasswordFile = "TIKKER_MAIL_NOTIFY_PASSWORD_FILE" //nolint:gosec // G101: variable name, not a credential
+	envMailNotifyFrom         = "TIKKER_MAIL_NOTIFY_FROM"
+	envMailNotifyTo           = "TIKKER_MAIL_NOTIFY_TO"
+	envMailNotifyTimeout      = "TIKKER_MAIL_NOTIFY_TIMEOUT"
 )
 
 // DefaultConfigFile is the YAML file name looked up in the data directory
@@ -283,6 +294,18 @@ func applyEnv(cfg *Config, lookup LookupFunc) error {
 	duration(envMailGwDataTimeout, &mg.DataTimeout)
 	str(envMailGwBody, &mg.Body)
 
+	mn := &cfg.MailNotify
+	boolean(envMailNotifyEnabled, &mn.Enabled)
+	str(envMailNotifyHost, &mn.SMTPHost)
+	integer(envMailNotifyPort, &mn.SMTPPort)
+	str(envMailNotifyTLSMode, &mn.TLSMode)
+	str(envMailNotifyUsername, &mn.Username)
+	secret(envMailNotifyPassword, &mn.Password)
+	str(envMailNotifyPasswordFile, &mn.PasswordFile)
+	str(envMailNotifyFrom, &mn.From)
+	list(envMailNotifyTo, &mn.To)
+	duration(envMailNotifyTimeout, &mn.Timeout)
+
 	return errors.Join(errs...)
 }
 
@@ -304,6 +327,11 @@ func normalize(cfg *Config) {
 	mg.Hostname = strings.TrimSpace(mg.Hostname)
 	mg.TLSMode = strings.ToLower(strings.TrimSpace(mg.TLSMode))
 	mg.Body = strings.ToLower(strings.TrimSpace(mg.Body))
+	mn := &cfg.MailNotify
+	mn.SMTPHost = strings.TrimSpace(mn.SMTPHost)
+	mn.TLSMode = strings.ToLower(strings.TrimSpace(mn.TLSMode))
+	mn.From = strings.TrimSpace(mn.From)
+	mn.To = trimList(mn.To)
 }
 
 // splitList splits a comma-separated environment value.

@@ -133,6 +133,39 @@ func TestValidate(t *testing.T) {
 			"mail_gateway.max_recipients", "mail_gateway.max_connections", "mail_gateway.command_timeout",
 			"mail_gateway.data_timeout", "mail_gateway.body",
 		}},
+		{name: "mail notify disabled ignores its settings", mutate: func(c *Config) { c.MailNotify.TLSMode = "bogus" }},
+		{name: "mail notify valid", mutate: func(c *Config) { c.MailNotify = mailNotify(nil) }},
+		{name: "mail notify loopback relay without tls or login", mutate: func(c *Config) {
+			c.MailNotify = mailNotify(func(m *MailNotifyConfig) {
+				m.SMTPHost, m.TLSMode, m.Username, m.Password = "localhost", MailTLSNone, "", ""
+			})
+		}},
+		{name: "mail notify password file", mutate: func(c *Config) {
+			c.MailNotify = mailNotify(func(m *MailNotifyConfig) { m.Password, m.PasswordFile = "", existing })
+		}},
+		{name: "mail notify without tls to a remote relay", mutate: func(c *Config) {
+			c.MailNotify = mailNotify(func(m *MailNotifyConfig) { m.TLSMode = MailTLSNone })
+		}, wantErr: []string{"mail_notify.tls_mode (TIKKER_MAIL_NOTIFY_TLS_MODE)", "loopback"}},
+		{name: "mail notify bad values", mutate: func(c *Config) {
+			c.MailNotify = mailNotify(func(m *MailNotifyConfig) {
+				m.SMTPHost, m.SMTPPort, m.TLSMode = "bad host", 0, "ssl"
+				m.PasswordFile = "/nonexistent/pw"
+				m.From, m.To, m.Timeout = "not an address", []string{"ok@example.net", "nope"}, 0
+			})
+		}, wantErr: []string{
+			"mail_notify.smtp_host (TIKKER_MAIL_NOTIFY_SMTP_HOST)", "mail_notify.smtp_port", "must be starttls, tls or none",
+			"not both", "mail_notify.password_file", "not accessible", "mail_notify.from", `"nope" is not an e-mail address`,
+			"mail_notify.timeout",
+		}},
+		{name: "mail notify missing values", mutate: func(c *Config) {
+			c.MailNotify = mailNotify(func(m *MailNotifyConfig) { m.SMTPHost, m.From, m.To, m.Password = "", "", nil, "" })
+		}, wantErr: []string{"mail_notify.smtp_host", "mail_notify.from", "at least one recipient", "mail_notify.password (TIKKER_MAIL_NOTIFY_PASSWORD)"}},
+		{name: "mail notify password without user, too many recipients", mutate: func(c *Config) {
+			c.MailNotify = mailNotify(func(m *MailNotifyConfig) {
+				m.Username = ""
+				m.To = strings.Split(strings.Repeat("a@example.net,", 21), ",")[:21]
+			})
+		}, wantErr: []string{"mail_notify.username", "at most 20 recipients"}},
 		{name: "mail gateway bad tls mode and listen", mutate: func(c *Config) {
 			c.MailGateway = mailGw(func(m *MailGatewayConfig) { m.TLSMode, m.Listen, m.Domain = "ssl", "2525", "bad_domain" })
 		}, wantErr: []string{"must be starttls, tls or none", "mail_gateway.listen (TIKKER_MAIL_GATEWAY_LISTEN)", "is not a domain name"}},
@@ -236,6 +269,19 @@ func mailGw(mod func(*MailGatewayConfig)) MailGatewayConfig {
 	m := Default().MailGateway
 	m.Enabled = true
 	m.Domain = "sms.example.net"
+	if mod != nil {
+		mod(&m)
+	}
+	return m
+}
+
+// mailNotify returns enabled notifications with valid values, changed by mod.
+func mailNotify(mod func(*MailNotifyConfig)) MailNotifyConfig {
+	m := Default().MailNotify
+	m.Enabled = true
+	m.SMTPHost = "smtp.example.net"
+	m.Username, m.Password = "tikker", "relay-password"
+	m.From, m.To = "tikker <sms@example.net>", []string{"owner@example.net"}
 	if mod != nil {
 		mod(&m)
 	}
