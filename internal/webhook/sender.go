@@ -528,7 +528,8 @@ var ErrBadSignature = errors.New("webhook: signature does not match")
 // VerifyRequest is what a receiver does with a delivery: it checks the
 // signature of body, parses the envelope and requires the X-Tikker-Delivery
 // header to equal the signed delivery ID (so a replayed request cannot carry
-// a different ID). Deduplicate on the returned Envelope.ID.
+// a different ID) and the X-Tikker-Event header to equal the signed event.
+// Deduplicate on the returned Envelope.ID.
 func VerifyRequest(secret, body []byte, h http.Header) (Envelope, error) {
 	if !Verify(secret, body, h.Get(HeaderSignature)) {
 		return Envelope{}, ErrBadSignature
@@ -539,6 +540,9 @@ func VerifyRequest(secret, body []byte, h http.Header) (Envelope, error) {
 	}
 	if env.ID == "" || h.Get(HeaderDelivery) != env.ID {
 		return Envelope{}, fmt.Errorf("%w: delivery header differs from the signed ID", ErrBadSignature)
+	}
+	if env.Event.String() == "" || h.Get(HeaderEvent) != env.Event.String() {
+		return Envelope{}, fmt.Errorf("%w: event header differs from the signed event", ErrBadSignature)
 	}
 	return env, nil
 }
@@ -553,6 +557,13 @@ var errBlockedDestination = errors.New("destination address is not allowed")
 var blockedPrefixes = mustPrefixes(
 	"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "198.18.0.0/15", "240.0.0.0/4",
 	"100::/64", "fc00::/7", "fe80::/10",
+	// IPv6 ranges that embed or tunnel IPv4 addresses; blocked as a whole
+	// rather than inspecting the embedded address.
+	"64:ff9b::/96",   // NAT64
+	"64:ff9b:1::/48", // local-use NAT64
+	"2002::/16",      // 6to4
+	"2001::/32",      // Teredo
+	"::/96",          // IPv4-compatible (deprecated)
 )
 
 func mustPrefixes(ss ...string) []netip.Prefix {
