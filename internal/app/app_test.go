@@ -700,7 +700,11 @@ func TestAgentConfigApplied(t *testing.T) {
 			tt.mod(&cfg.Agent)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			a, err := New(ctx, Options{Config: cfg, Logger: slog.New(slog.DiscardHandler), PasswordParams: fastParams})
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			a, err := New(ctx, Options{Config: cfg, Logger: slog.New(slog.DiscardHandler), PasswordParams: fastParams, Listener: ln})
 			if err != nil {
 				t.Fatal(err)
 			}
