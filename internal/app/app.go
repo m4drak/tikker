@@ -10,7 +10,8 @@
 //	-> check that the key opens every stored device password
 //	-> auth (bootstrap admin) -> connector registry (routeros)
 //	-> health checker, dispatcher, channel sync, inbox pollers
-//	-> /readyz checks -> HTTP server -> retention and session janitor
+//	-> /readyz checks -> HTTP server -> SMTP gateway (optional, ADR 0004)
+//	-> retention and session janitor
 //
 // The dispatcher, the health checker and the channel sync refer to each other
 // (the health checker sets channel states in the dispatcher, the dispatcher
@@ -20,7 +21,8 @@
 // # Shutdown
 //
 // When the context given to [App.Run] ends: the HTTP server stops accepting
-// requests and lets running ones finish, the inbox pollers stop, the dispatcher
+// requests and lets running ones finish, the SMTP gateway (if enabled) does
+// the same with its sessions, the inbox pollers stop, the dispatcher
 // finishes in-flight sends (ADR 0002: what does not finish in time is requeued
 // as a possible duplicate), the health checker flushes its state, connectors
 // are closed and the database is closed. Every step is bounded by
@@ -50,6 +52,7 @@ import (
 	"github.com/m4drak/tikker/internal/connector/routeros"
 	"github.com/m4drak/tikker/internal/domain"
 	"github.com/m4drak/tikker/internal/health"
+	"github.com/m4drak/tikker/internal/mailgw"
 	"github.com/m4drak/tikker/internal/metrics"
 	"github.com/m4drak/tikker/internal/probes"
 	"github.com/m4drak/tikker/internal/queue"
@@ -101,6 +104,10 @@ type Options struct {
 	// Connector tunes the RouterOS connector; Logger and Clock are filled
 	// in when empty.
 	Connector routeros.Options
+	// MailListener, if set, is served by the SMTP gateway instead of
+	// listening on Config.MailGateway.Listen (tests). It is used only when
+	// the gateway is enabled.
+	MailListener net.Listener
 }
 
 // App is an assembled tikker server. Create it with [New] and run it with
@@ -122,6 +129,10 @@ type App struct {
 	webhooks      *webhook.Service
 	agentHub      *agent.Hub
 	metricsSrv    *metrics.Server
+	send          *sending.Service
+	tokenLimiter  *api.TokenLimiter
+	mailSrv       *mailgw.Server // nil: e-mail gateway disabled
+	mailLn        net.Listener
 	ln            net.Listener
 	srv           *http.Server
 	startedAt     time.Time
@@ -228,6 +239,12 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	h, err := a.handler(creds, reg, ring)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.MailGateway.Enabled {
+		if err := a.initMailGateway(ctx, opts.MailListener); err != nil {
+			return nil, err
+		}
+		cleanup = append(cleanup, func() { _ = a.mailLn.Close() })
 	}
 
 	var tlsConfig *tls.Config
@@ -394,6 +411,8 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	if a.cfg.APIRateLimit == 0 {
 		rate.Requests = -1 // disabled
 	}
+	// One budget per token, shared by the API and the SMTP gateway.
+	a.tokenLimiter = api.NewTokenLimiter(rate, a.clk)
 	// One sending service for the API and the web panel.
 	snd, err := sending.New(sending.Deps{
 		Store: a.store, Capabilities: a.sync, Notifier: a.disp, Clock: a.clk,
@@ -405,6 +424,7 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	if err != nil {
 		return nil, fmt.Errorf("sending: %w", err)
 	}
+	a.send = snd
 	adm, err := admin.New(admin.Deps{
 		Store: a.store, Credentials: creds, Connectors: reg, Reloader: a.sync, Health: a.health, Checker: a.health,
 		Clock: a.clk, Logger: a.log,
@@ -415,7 +435,7 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	}
 	apiH, err := api.New(api.Deps{
 		Store: a.store, Auth: a.auth, Dispatcher: a.disp, Reloader: a.sync, Capabilities: a.sync, Sending: snd, Admin: adm,
-		Health: a.health, Credentials: creds, Connectors: reg, Webhooks: a.webhooks,
+		Health: a.health, Credentials: creds, Connectors: reg, Webhooks: a.webhooks, Limiter: a.tokenLimiter,
 		Clock: a.clk, Logger: a.log,
 		Options: api.Options{
 			DefaultRegion:       a.cfg.DefaultRegion,
@@ -466,6 +486,55 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	mux.Handle(agent.Prefix+"/", a.agentHub.Handler())
 	mux.Handle("/", panel.Handler()) // the web panel owns everything else
 	return mux, nil
+}
+
+// initMailGateway creates the SMTP gateway (ADR 0004) and opens its
+// listener; it is served by Run. The configuration was validated: TLS is
+// set up unless the listener is on loopback.
+func (a *App) initMailGateway(ctx context.Context, ln net.Listener) error {
+	mg := a.cfg.MailGateway
+	o := mailgw.Options{
+		Domain: mg.Domain, Hostname: mg.Hostname,
+		MaxMessageBytes: mg.MaxMessageSize, MaxRecipients: mg.MaxRecipients, MaxConnections: mg.MaxConnections,
+		CommandTimeout: mg.CommandTimeout, DataTimeout: mg.DataTimeout,
+		SubjectInBody: mg.Body == config.MailBodySubjectText,
+		DefaultRegion: a.cfg.DefaultRegion, AllowShortNumbers: a.cfg.AllowShortNumbers,
+		Auth: a.auth, Sender: a.send, Limiter: a.tokenLimiter,
+		Clock: a.clk, Logger: a.log, BaseContext: a.runCtx,
+	}
+	switch mg.TLSMode {
+	case config.MailTLSNone:
+		o.Insecure = true
+	default:
+		certFile, keyFile := mg.TLSFiles(a.cfg.TLS)
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return fmt.Errorf("mail gateway tls certificate: %w", err)
+		}
+		o.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}
+		o.ImplicitTLS = mg.TLSMode == config.MailTLSImplicit
+	}
+	srv, err := mailgw.New(o)
+	if err != nil {
+		return fmt.Errorf("mail gateway: %w", err)
+	}
+	if ln == nil {
+		var lc net.ListenConfig
+		if ln, err = lc.Listen(ctx, "tcp", mg.Listen); err != nil {
+			return fmt.Errorf("mail gateway listen %s: %w", mg.Listen, err)
+		}
+	}
+	a.mailSrv, a.mailLn = srv, ln
+	return nil
+}
+
+// MailAddr returns the address of the SMTP gateway, or nil when it is
+// disabled.
+func (a *App) MailAddr() net.Addr {
+	if a.mailLn == nil {
+		return nil
+	}
+	return a.mailLn.Addr()
 }
 
 // metricsSource adapts the app's background state to a metrics.Snapshot.
@@ -539,6 +608,12 @@ func (a *App) Run(ctx context.Context) error {
 	}()
 	a.log.Info("tikker listening", slog.String("addr", a.ln.Addr().String()), slog.Bool("tls", useTLS))
 
+	var mailErr chan error // nil (never ready) without the gateway
+	if a.mailSrv != nil {
+		mailErr = make(chan error, 1)
+		go func() { mailErr <- a.mailSrv.Serve(a.mailLn) }()
+	}
+
 	var runErr error
 	select {
 	case <-ctx.Done():
@@ -547,6 +622,10 @@ func (a *App) Run(ctx context.Context) error {
 		runErr = fmt.Errorf("http server: %w", err)
 		a.log.Error("http server failed; shutting down", slog.Any("error", err))
 		serveErr <- nil // the server is gone; Shutdown below returns at once
+	case err := <-mailErr:
+		runErr = fmt.Errorf("smtp gateway: %w", err)
+		a.log.Error("smtp gateway failed; shutting down", slog.Any("error", err))
+		mailErr <- mailgw.ErrServerClosed
 	}
 
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), a.cfg.ShutdownTimeout)
@@ -561,6 +640,18 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		runErr = errors.Join(runErr, fmt.Errorf("http server: %w", err))
+	}
+	// The SMTP gateway enqueues like the API: stop it before the pipeline.
+	if a.mailSrv != nil {
+		if err := a.mailSrv.Shutdown(sctx); err != nil {
+			a.log.Warn("smtp sessions did not finish in time", slog.Any("error", err))
+			runErr = errors.Join(runErr, fmt.Errorf("smtp shutdown: %w", err))
+		} else {
+			a.log.Info("smtp gateway stopped")
+		}
+		if err := <-mailErr; err != nil && !errors.Is(err, mailgw.ErrServerClosed) {
+			runErr = errors.Join(runErr, fmt.Errorf("smtp gateway: %w", err))
+		}
 	}
 
 	runErr = errors.Join(runErr, a.stopPipeline(sctx))

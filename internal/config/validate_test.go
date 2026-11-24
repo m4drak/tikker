@@ -97,6 +97,45 @@ func TestValidate(t *testing.T) {
 		{name: "negative api rate limit", mutate: func(c *Config) { c.APIRateLimit = -1 }, wantErr: []string{"api_rate_limit (TIKKER_API_RATE_LIMIT)"}},
 		{name: "shutdown timeout too short", mutate: func(c *Config) { c.ShutdownTimeout = 0 }, wantErr: []string{"shutdown_timeout (TIKKER_SHUTDOWN_TIMEOUT)"}},
 		{name: "admin password too short", mutate: func(c *Config) { c.AdminPassword = "short" }, wantErr: []string{"admin_password (TIKKER_ADMIN_PASSWORD)", "at least 12"}},
+		{name: "mail gateway disabled ignores its settings", mutate: func(c *Config) { c.MailGateway.TLSMode = "bogus" }},
+		{name: "mail gateway starttls with own cert", mutate: func(c *Config) {
+			c.MailGateway = mailGw(func(m *MailGatewayConfig) { m.TLSCertFile, m.TLSKeyFile = existing, existing })
+		}},
+		{name: "mail gateway implicit tls with the https cert", mutate: func(c *Config) {
+			c.TLS = TLSConfig{CertFile: existing, KeyFile: existing}
+			c.MailGateway = mailGw(func(m *MailGatewayConfig) { m.TLSMode = MailTLSImplicit })
+		}},
+		{name: "mail gateway without tls on loopback", mutate: func(c *Config) {
+			c.MailGateway = mailGw(func(m *MailGatewayConfig) { m.TLSMode, m.Listen = MailTLSNone, "127.0.0.1:2525" })
+		}},
+		{name: "mail gateway without tls exposed", mutate: func(c *Config) {
+			c.MailGateway = mailGw(func(m *MailGatewayConfig) { m.TLSMode = MailTLSNone })
+		}, wantErr: []string{"mail_gateway.tls_mode (TIKKER_MAIL_GATEWAY_TLS_MODE)", "loopback"}},
+		{name: "mail gateway starttls without cert", mutate: func(c *Config) {
+			c.MailGateway = mailGw(nil)
+		}, wantErr: []string{"mail_gateway.tls_cert_file (TIKKER_MAIL_GATEWAY_TLS_CERT_FILE)", "needs a certificate"}},
+		{name: "mail gateway cert without key", mutate: func(c *Config) {
+			c.TLS = TLSConfig{CertFile: existing, KeyFile: existing}
+			c.MailGateway = mailGw(func(m *MailGatewayConfig) { m.TLSCertFile = existing })
+		}, wantErr: []string{"mail_gateway.tls_key_file", "set together"}},
+		{name: "mail gateway cert missing", mutate: func(c *Config) {
+			c.MailGateway = mailGw(func(m *MailGatewayConfig) { m.TLSCertFile, m.TLSKeyFile = "/nonexistent/c", "/nonexistent/k" })
+		}, wantErr: []string{"mail_gateway.tls_cert_file", "not accessible"}},
+		{name: "mail gateway bad values", mutate: func(c *Config) {
+			c.MailGateway = mailGw(func(m *MailGatewayConfig) {
+				m.TLSMode, m.Listen = MailTLSNone, "127.0.0.1:2525"
+				m.Domain, m.Hostname = "", "bad host!"
+				m.MaxMessageSize, m.MaxRecipients, m.MaxConnections = 10, 0, 5000
+				m.CommandTimeout, m.DataTimeout, m.Body = 0, 2*time.Hour, "html"
+			})
+		}, wantErr: []string{
+			"mail_gateway.domain (TIKKER_MAIL_GATEWAY_DOMAIN)", "mail_gateway.hostname", "mail_gateway.max_message_size",
+			"mail_gateway.max_recipients", "mail_gateway.max_connections", "mail_gateway.command_timeout",
+			"mail_gateway.data_timeout", "mail_gateway.body",
+		}},
+		{name: "mail gateway bad tls mode and listen", mutate: func(c *Config) {
+			c.MailGateway = mailGw(func(m *MailGatewayConfig) { m.TLSMode, m.Listen, m.Domain = "ssl", "2525", "bad_domain" })
+		}, wantErr: []string{"must be starttls, tls or none", "mail_gateway.listen (TIKKER_MAIL_GATEWAY_LISTEN)", "is not a domain name"}},
 	}
 
 	for _, tt := range tests {
@@ -190,4 +229,15 @@ func TestDecodeSecretKey(t *testing.T) {
 			}
 		})
 	}
+}
+
+// mailGw returns an enabled gateway with defaults, changed by mod.
+func mailGw(mod func(*MailGatewayConfig)) MailGatewayConfig {
+	m := Default().MailGateway
+	m.Enabled = true
+	m.Domain = "sms.example.net"
+	if mod != nil {
+		mod(&m)
+	}
+	return m
 }

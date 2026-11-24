@@ -278,6 +278,45 @@ func TestLoadServeSettingsFromEnv(t *testing.T) {
 	}
 }
 
+func TestLoadMailGatewayFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := Load(Options{Lookup: envMap(testEnv(dir, map[string]string{
+		envMailGwEnabled:        "true",
+		envMailGwListen:         "127.0.0.1:2526",
+		envMailGwDomain:         " SMS.Example.NET. ",
+		envMailGwHostname:       "mx.example.net",
+		envMailGwTLSMode:        "NONE",
+		envMailGwMaxMessageSize: "32768",
+		envMailGwMaxRecipients:  "3",
+		envMailGwMaxConnections: "5",
+		envMailGwCommandTimeout: "30s",
+		envMailGwDataTimeout:    "2m",
+		envMailGwBody:           "Subject_Text",
+	}))})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	m := cfg.MailGateway
+	if !m.Enabled || m.Listen != "127.0.0.1:2526" || m.Domain != "sms.example.net" || m.Hostname != "mx.example.net" ||
+		m.TLSMode != MailTLSNone || m.MaxMessageSize != 32768 || m.MaxRecipients != 3 || m.MaxConnections != 5 ||
+		m.CommandTimeout != 30*time.Second || m.DataTimeout != 2*time.Minute || m.Body != MailBodySubjectText {
+		t.Errorf("mail gateway = %+v", m)
+	}
+	if !strings.Contains(cfg.String(), `mail_gateway.domain: "sms.example.net"`) {
+		t.Errorf("String() misses the mail gateway:\n%s", cfg)
+	}
+	if c, k := m.TLSFiles(TLSConfig{CertFile: "a", KeyFile: "b"}); c != "a" || k != "b" {
+		t.Errorf("TLSFiles fallback = %q %q", c, k)
+	}
+	m.TLSCertFile, m.TLSKeyFile = "c", "d"
+	if c, k := m.TLSFiles(TLSConfig{CertFile: "a", KeyFile: "b"}); c != "c" || k != "d" {
+		t.Errorf("TLSFiles own = %q %q", c, k)
+	}
+	if !ListenIsLoopback("127.0.0.1:1") || ListenIsLoopback(":1") {
+		t.Error("ListenIsLoopback")
+	}
+}
+
 func TestLoadErrors(t *testing.T) {
 	tests := []struct {
 		name    string

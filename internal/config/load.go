@@ -56,6 +56,20 @@ const (
 	envAgentStaleAfter        = "TIKKER_AGENT_STALE_AFTER"
 	envAgentMaxSegments       = "TIKKER_AGENT_MAX_SEGMENTS"
 	envAgentUCS2              = "TIKKER_AGENT_UCS2"
+
+	envMailGwEnabled        = "TIKKER_MAIL_GATEWAY_ENABLED"
+	envMailGwListen         = "TIKKER_MAIL_GATEWAY_LISTEN"
+	envMailGwDomain         = "TIKKER_MAIL_GATEWAY_DOMAIN"
+	envMailGwHostname       = "TIKKER_MAIL_GATEWAY_HOSTNAME"
+	envMailGwTLSMode        = "TIKKER_MAIL_GATEWAY_TLS_MODE"
+	envMailGwTLSCertFile    = "TIKKER_MAIL_GATEWAY_TLS_CERT_FILE"
+	envMailGwTLSKeyFile     = "TIKKER_MAIL_GATEWAY_TLS_KEY_FILE"
+	envMailGwMaxMessageSize = "TIKKER_MAIL_GATEWAY_MAX_MESSAGE_SIZE"
+	envMailGwMaxRecipients  = "TIKKER_MAIL_GATEWAY_MAX_RECIPIENTS"
+	envMailGwMaxConnections = "TIKKER_MAIL_GATEWAY_MAX_CONNECTIONS"
+	envMailGwCommandTimeout = "TIKKER_MAIL_GATEWAY_COMMAND_TIMEOUT"
+	envMailGwDataTimeout    = "TIKKER_MAIL_GATEWAY_DATA_TIMEOUT"
+	envMailGwBody           = "TIKKER_MAIL_GATEWAY_BODY"
 )
 
 // DefaultConfigFile is the YAML file name looked up in the data directory
@@ -254,6 +268,21 @@ func applyEnv(cfg *Config, lookup LookupFunc) error {
 	integer(envAgentMaxSegments, &cfg.Agent.MaxSegments)
 	boolean(envAgentUCS2, &cfg.Agent.UCS2)
 
+	mg := &cfg.MailGateway
+	boolean(envMailGwEnabled, &mg.Enabled)
+	str(envMailGwListen, &mg.Listen)
+	str(envMailGwDomain, &mg.Domain)
+	str(envMailGwHostname, &mg.Hostname)
+	str(envMailGwTLSMode, &mg.TLSMode)
+	str(envMailGwTLSCertFile, &mg.TLSCertFile)
+	str(envMailGwTLSKeyFile, &mg.TLSKeyFile)
+	integer(envMailGwMaxMessageSize, &mg.MaxMessageSize)
+	integer(envMailGwMaxRecipients, &mg.MaxRecipients)
+	integer(envMailGwMaxConnections, &mg.MaxConnections)
+	duration(envMailGwCommandTimeout, &mg.CommandTimeout)
+	duration(envMailGwDataTimeout, &mg.DataTimeout)
+	str(envMailGwBody, &mg.Body)
+
 	return errors.Join(errs...)
 }
 
@@ -269,6 +298,12 @@ func normalize(cfg *Config) {
 	cfg.TrustedProxies = trimList(cfg.TrustedProxies)
 	cfg.TrustedOrigins = trimList(cfg.TrustedOrigins)
 	cfg.AllowedHTTPHosts = trimList(cfg.AllowedHTTPHosts)
+	mg := &cfg.MailGateway
+	mg.Listen = strings.TrimSpace(mg.Listen)
+	mg.Domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(mg.Domain), "."))
+	mg.Hostname = strings.TrimSpace(mg.Hostname)
+	mg.TLSMode = strings.ToLower(strings.TrimSpace(mg.TLSMode))
+	mg.Body = strings.ToLower(strings.TrimSpace(mg.Body))
 }
 
 // splitList splits a comma-separated environment value.

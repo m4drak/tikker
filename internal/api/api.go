@@ -159,6 +159,9 @@ type Deps struct {
 	// Webhooks administers webhooks. Optional: without it the /webhooks
 	// routes are not served.
 	Webhooks *webhook.Service
+	// Limiter, if set, is the per-token budget shared with other entry
+	// points (the SMTP gateway); nil: a limiter from Options.RateLimit.
+	Limiter *TokenLimiter
 
 	Clock  clock.Clock        // default: system clock
 	IDs    domain.IDGenerator // default: ULIDs from Clock
@@ -295,7 +298,11 @@ func newAPI(deps Deps) (*API, error) {
 			return nil, fmt.Errorf("api: %w", err)
 		}
 	}
-	a.limiter = newLimiter(a.opts.RateLimit, a.clk)
+	if deps.Limiter != nil {
+		a.limiter = deps.Limiter.l
+	} else {
+		a.limiter = newLimiter(a.opts.RateLimit, a.clk)
+	}
 	a.mux = http.NewServeMux()
 	a.routes()
 	return a, nil

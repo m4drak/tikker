@@ -392,6 +392,63 @@ func TestSend(t *testing.T) {
 	}
 }
 
+func TestSendBatch(t *testing.T) {
+	e := newEnv(t, Options{})
+	e.channel("lte1", routerOS)
+	reqs := []Request{
+		{To: sp("600100200"), Body: sp("hello")},
+		{To: sp("600100201"), Body: sp("hello")},
+	}
+	key := SendOptions{IdempotencyKey: "smtp:k1", Source: "smtp"}
+
+	tests := []struct {
+		name      string
+		reqs      []Request
+		so        SendOptions
+		wantErr   error
+		wantField string
+		wantMsgs  int
+		replayed  bool
+	}{
+		{name: "two recipients", reqs: reqs, so: key, wantMsgs: 2},
+		{name: "replay before validation", reqs: reqs, so: key, wantMsgs: 2, replayed: true},
+		{name: "same key, other request", reqs: reqs[:1], so: key, wantErr: domain.ErrIdempotencyMismatch},
+		{name: "one invalid: nothing stored", reqs: []Request{reqs[0], {To: sp("12"), Body: sp("x")}}, so: SendOptions{Source: "smtp"}, wantField: "/messages/1/to"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, errs, err := e.svc.SendBatch(e.ctx, actor, tt.reqs, tt.so)
+			switch {
+			case tt.wantErr != nil:
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("err = %v, want %v", err, tt.wantErr)
+				}
+				return
+			case err != nil:
+				t.Fatal(err)
+			case tt.wantField != "":
+				if len(errs) != 1 || errs[0].Field != tt.wantField {
+					t.Fatalf("errs = %+v", errs)
+				}
+				return
+			}
+			if len(errs) > 0 || len(res.Messages) != tt.wantMsgs || res.Replayed != tt.replayed {
+				t.Fatalf("res = %+v, errs = %v", res, errs)
+			}
+		})
+	}
+	if n, _ := e.st.Messages().Count(e.ctx, store.MessageFilter{}); n != 2 {
+		t.Errorf("%d messages stored, want 2", n)
+	}
+	log := e.audit()
+	if len(log) != 1 || log[0].Meta["source"] != "smtp" || log[0].Meta["recipients"] != "2" || e.wake.n != 1 {
+		t.Errorf("audit = %+v, wake-ups %d", log, e.wake.n)
+	}
+	if _, _, err := e.svc.SendBatch(e.ctx, actor, nil, SendOptions{}); err == nil {
+		t.Error("empty batch: no error")
+	}
+}
+
 func TestSendSplitAudit(t *testing.T) {
 	e := newEnv(t, Options{LongMessageStrategy: sms.StrategySplit})
 	e.channel("lte1", routerOS, withMax(5))

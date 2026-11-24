@@ -84,6 +84,69 @@ type Config struct {
 	// Agent tunes the "agent" connector (routers that poll tikker,
 	// docs/agent.md).
 	Agent AgentConfig `yaml:"agent"`
+	// MailGateway is the e-mail to SMS gateway: an SMTP submission
+	// server (PLAN §5 #5, ADR 0004, docs/email-gateway.md).
+	MailGateway MailGatewayConfig `yaml:"mail_gateway"`
+}
+
+// Mail gateway TLS modes.
+const (
+	// MailTLSStartTLS offers STARTTLS and requires it before AUTH.
+	MailTLSStartTLS = "starttls"
+	// MailTLSImplicit wraps every connection in TLS (port 465 style).
+	MailTLSImplicit = "tls"
+	// MailTLSNone disables TLS; allowed only on a loopback address.
+	MailTLSNone = "none"
+)
+
+// Mail gateway body modes.
+const (
+	// MailBodyText uses the text of the e-mail only.
+	MailBodyText = "text"
+	// MailBodySubjectText puts the subject on the first line, then the text.
+	MailBodySubjectText = "subject_text"
+)
+
+// MailGatewayConfig configures the SMTP submission server that turns
+// e-mails to <number>@Domain into SMS messages (ADR 0004).
+type MailGatewayConfig struct {
+	// Enabled starts the SMTP listener; off by default.
+	Enabled bool `yaml:"enabled"`
+	// Listen is the SMTP address (default ":2525").
+	Listen string `yaml:"listen"`
+	// Domain is the recipient domain: RCPT TO:<number>@Domain. Required
+	// when enabled; any other domain is refused (no relaying).
+	Domain string `yaml:"domain"`
+	// Hostname is announced in the greeting (default: Domain).
+	Hostname string `yaml:"hostname"`
+	// TLSMode is starttls (default), tls (implicit) or none (loopback
+	// listen address only).
+	TLSMode string `yaml:"tls_mode"`
+	// TLSCertFile and TLSKeyFile are the server certificate; empty: the
+	// certificate of the HTTPS server (tls.cert_file, tls.key_file).
+	TLSCertFile string `yaml:"tls_cert_file"`
+	TLSKeyFile  string `yaml:"tls_key_file"`
+	// MaxMessageSize limits one e-mail in bytes (SIZE).
+	MaxMessageSize int `yaml:"max_message_size"`
+	// MaxRecipients limits RCPT TO per e-mail.
+	MaxRecipients int `yaml:"max_recipients"`
+	// MaxConnections limits concurrent SMTP sessions.
+	MaxConnections int `yaml:"max_connections"`
+	// CommandTimeout bounds waiting for one command; DataTimeout bounds
+	// receiving the message after DATA.
+	CommandTimeout time.Duration `yaml:"command_timeout"`
+	DataTimeout    time.Duration `yaml:"data_timeout"`
+	// Body is text (default) or subject_text.
+	Body string `yaml:"body"`
+}
+
+// TLSFiles returns the certificate and key of the SMTP server: its own,
+// or the HTTPS ones when it has none.
+func (m MailGatewayConfig) TLSFiles(global TLSConfig) (cert, key string) {
+	if m.TLSCertFile != "" || m.TLSKeyFile != "" {
+		return m.TLSCertFile, m.TLSKeyFile
+	}
+	return global.CertFile, global.KeyFile
 }
 
 // AgentConfig tunes the agent connector (PLAN §5 #1).
@@ -161,6 +224,16 @@ func Default() Config {
 			MaxSegments: 1,
 			UCS2:        false,
 		},
+		MailGateway: MailGatewayConfig{
+			Listen:         ":2525",
+			TLSMode:        MailTLSStartTLS,
+			MaxMessageSize: 64 << 10,
+			MaxRecipients:  10,
+			MaxConnections: 20,
+			CommandTimeout: time.Minute,
+			DataTimeout:    5 * time.Minute,
+			Body:           MailBodyText,
+		},
 		Retry: RetryConfig{
 			MaxAttempts: rp.MaxAttempts,
 			Base:        rp.Initial,
@@ -232,6 +305,19 @@ func (c Config) entries() []entry {
 		{"agent.stale_after", strconv.Quote(c.Agent.StaleAfter.String())},
 		{"agent.max_segments", strconv.Itoa(c.Agent.MaxSegments)},
 		{"agent.ucs2", strconv.FormatBool(c.Agent.UCS2)},
+		{"mail_gateway.enabled", strconv.FormatBool(c.MailGateway.Enabled)},
+		{"mail_gateway.listen", strconv.Quote(c.MailGateway.Listen)},
+		{"mail_gateway.domain", strconv.Quote(c.MailGateway.Domain)},
+		{"mail_gateway.hostname", strconv.Quote(c.MailGateway.Hostname)},
+		{"mail_gateway.tls_mode", strconv.Quote(c.MailGateway.TLSMode)},
+		{"mail_gateway.tls_cert_file", strconv.Quote(c.MailGateway.TLSCertFile)},
+		{"mail_gateway.tls_key_file", strconv.Quote(c.MailGateway.TLSKeyFile)},
+		{"mail_gateway.max_message_size", strconv.Itoa(c.MailGateway.MaxMessageSize)},
+		{"mail_gateway.max_recipients", strconv.Itoa(c.MailGateway.MaxRecipients)},
+		{"mail_gateway.max_connections", strconv.Itoa(c.MailGateway.MaxConnections)},
+		{"mail_gateway.command_timeout", strconv.Quote(c.MailGateway.CommandTimeout.String())},
+		{"mail_gateway.data_timeout", strconv.Quote(c.MailGateway.DataTimeout.String())},
+		{"mail_gateway.body", strconv.Quote(c.MailGateway.Body)},
 	}
 }
 

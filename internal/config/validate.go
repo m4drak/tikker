@@ -76,6 +76,19 @@ var (
 	sAgentSendTimeout    = setting{"agent.send_timeout", envAgentSendTimeout}
 	sAgentStaleAfter     = setting{"agent.stale_after", envAgentStaleAfter}
 	sAgentMaxSegments    = setting{"agent.max_segments", envAgentMaxSegments}
+
+	sMailGwListen         = setting{"mail_gateway.listen", envMailGwListen}
+	sMailGwDomain         = setting{"mail_gateway.domain", envMailGwDomain}
+	sMailGwHostname       = setting{"mail_gateway.hostname", envMailGwHostname}
+	sMailGwTLSMode        = setting{"mail_gateway.tls_mode", envMailGwTLSMode}
+	sMailGwTLSCertFile    = setting{"mail_gateway.tls_cert_file", envMailGwTLSCertFile}
+	sMailGwTLSKeyFile     = setting{"mail_gateway.tls_key_file", envMailGwTLSKeyFile}
+	sMailGwMaxMessageSize = setting{"mail_gateway.max_message_size", envMailGwMaxMessageSize}
+	sMailGwMaxRecipients  = setting{"mail_gateway.max_recipients", envMailGwMaxRecipients}
+	sMailGwMaxConnections = setting{"mail_gateway.max_connections", envMailGwMaxConnections}
+	sMailGwCommandTimeout = setting{"mail_gateway.command_timeout", envMailGwCommandTimeout}
+	sMailGwDataTimeout    = setting{"mail_gateway.data_timeout", envMailGwDataTimeout}
+	sMailGwBody           = setting{"mail_gateway.body", envMailGwBody}
 )
 
 var regionPattern = regexp.MustCompile(`^[A-Z]{2}$`)
@@ -135,6 +148,7 @@ func Validate(c Config) error {
 	add(validateRetry(c.Retry))
 	add(validateTLS(c.TLS))
 	add(validateAgent(c.Agent))
+	add(validateMailGateway(c.MailGateway, c.TLS))
 
 	if n := utf8.RuneCountInString(string(c.AdminPassword)); n > 0 && n < minAdminPasswordLen {
 		add(sAdminPassword.errorf("must be at least %d characters", minAdminPasswordLen))
@@ -191,17 +205,23 @@ func DecodeSecretKey(s string) ([]byte, error) {
 	return key, nil
 }
 
-func validateListen(addr string) error {
+func validateListen(addr string) error { return validateAddr(sListen, addr) }
+
+func validateAddr(s setting, addr string) error {
 	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return sListen.errorf("must be host:port, got %q", addr)
+		return s.errorf("must be host:port, got %q", addr)
 	}
 	n, err := strconv.Atoi(port)
 	if err != nil || n < 1 || n > 65535 {
-		return sListen.errorf("port must be between 1 and 65535, got %q", port)
+		return s.errorf("port must be between 1 and 65535, got %q", port)
 	}
 	return nil
 }
+
+// ListenIsLoopback reports whether a listen address binds a loopback
+// address only (127.0.0.1, ::1 or localhost).
+func ListenIsLoopback(addr string) bool { return !listenExposed(addr) }
 
 // listenExposed reports whether the listen address is reachable outside the
 // loopback interface. ":8080", "0.0.0.0:8080" and "::8080" bind all
@@ -374,6 +394,92 @@ func validateAgent(a AgentConfig) error {
 	}
 	if a.MaxSegments < 1 || a.MaxSegments > maxAgentSegments {
 		errs = append(errs, sAgentMaxSegments.errorf("must be between 1 and %d, got %d", maxAgentSegments, a.MaxSegments))
+	}
+	return errors.Join(errs...)
+}
+
+// Mail gateway bounds (ADR 0004).
+const (
+	minMailMessageSize = 1 << 10
+	maxMailMessageSize = 10 << 20
+	maxMailRecipients  = 100
+	maxMailConnections = 1000
+	minMailTimeout     = time.Second
+	maxMailTimeout     = time.Hour
+)
+
+// validateMailGateway checks the SMTP gateway settings. They are checked
+// only when the gateway is enabled, so a disabled gateway never blocks a
+// start. TLS is mandatory unless the listener is on loopback: the SMTP
+// password is an API token.
+func validateMailGateway(m MailGatewayConfig, global TLSConfig) error {
+	if !m.Enabled {
+		return nil
+	}
+	var errs []error
+	add := func(err error) {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	add(validateAddr(sMailGwListen, m.Listen))
+	switch {
+	case m.Domain == "":
+		add(sMailGwDomain.errorf("required when the mail gateway is enabled (recipients are <number>@domain)"))
+	case !hostNamePattern.MatchString(m.Domain):
+		add(sMailGwDomain.errorf("%q is not a domain name", m.Domain))
+	}
+	if m.Hostname != "" && !hostNamePattern.MatchString(m.Hostname) {
+		add(sMailGwHostname.errorf("%q is not a host name", m.Hostname))
+	}
+	switch m.TLSMode {
+	case MailTLSStartTLS, MailTLSImplicit:
+		cert, key := m.TLSFiles(global)
+		if cert == "" || key == "" {
+			add(sMailGwTLSCertFile.errorf("tls_mode %s needs a certificate: set mail_gateway.tls_cert_file and tls_key_file (or tls.cert_file and tls.key_file)", m.TLSMode))
+		}
+		if (m.TLSCertFile == "") != (m.TLSKeyFile == "") {
+			add(sMailGwTLSKeyFile.errorf("mail_gateway.tls_cert_file and tls_key_file must be set together"))
+		}
+		for _, f := range []struct {
+			s    setting
+			path string
+		}{{sMailGwTLSCertFile, m.TLSCertFile}, {sMailGwTLSKeyFile, m.TLSKeyFile}} {
+			if f.path == "" {
+				continue
+			}
+			if _, err := os.Stat(f.path); err != nil {
+				add(f.s.errorf("file is not accessible: %v", err))
+			}
+		}
+	case MailTLSNone:
+		if listenExposed(m.Listen) {
+			add(sMailGwTLSMode.errorf("none is allowed only on a loopback listen address (127.0.0.1, ::1); the SMTP password is an API token, use starttls or tls"))
+		}
+	default:
+		add(sMailGwTLSMode.errorf("must be starttls, tls or none, got %q", m.TLSMode))
+	}
+	if m.MaxMessageSize < minMailMessageSize || m.MaxMessageSize > maxMailMessageSize {
+		add(sMailGwMaxMessageSize.errorf("must be between %d and %d bytes, got %d", minMailMessageSize, maxMailMessageSize, m.MaxMessageSize))
+	}
+	if m.MaxRecipients < 1 || m.MaxRecipients > maxMailRecipients {
+		add(sMailGwMaxRecipients.errorf("must be between 1 and %d, got %d", maxMailRecipients, m.MaxRecipients))
+	}
+	if m.MaxConnections < 1 || m.MaxConnections > maxMailConnections {
+		add(sMailGwMaxConnections.errorf("must be between 1 and %d, got %d", maxMailConnections, m.MaxConnections))
+	}
+	for _, d := range []struct {
+		s setting
+		v time.Duration
+	}{{sMailGwCommandTimeout, m.CommandTimeout}, {sMailGwDataTimeout, m.DataTimeout}} {
+		if d.v < minMailTimeout || d.v > maxMailTimeout {
+			add(d.s.errorf("must be between %s and %s, got %s", minMailTimeout, maxMailTimeout, d.v))
+		}
+	}
+	switch m.Body {
+	case MailBodyText, MailBodySubjectText:
+	default:
+		add(sMailGwBody.errorf("must be text or subject_text, got %q", m.Body))
 	}
 	return errors.Join(errs...)
 }

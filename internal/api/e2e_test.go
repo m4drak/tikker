@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/m4drak/tikker/internal/clock"
 	"github.com/m4drak/tikker/internal/connector"
 	"github.com/m4drak/tikker/internal/domain"
 	"github.com/m4drak/tikker/internal/sending"
@@ -436,5 +437,32 @@ func TestLimiterSweep(t *testing.T) {
 	l.take("fresh")
 	if n := len(l.buckets); n > 2 {
 		t.Errorf("%d buckets kept after the sweep", n)
+	}
+}
+
+// TestTokenLimiter: the exported limiter has the API semantics.
+func TestTokenLimiter(t *testing.T) {
+	fake := clock.NewFake(time.Date(2026, 3, 4, 10, 0, 0, 0, time.UTC))
+	tests := []struct {
+		name string
+		cfg  RateLimit
+		want []bool
+	}{
+		{"two per minute", RateLimit{Requests: 2, Window: time.Minute}, []bool{true, true, false}},
+		{"disabled", RateLimit{Requests: -1}, []bool{true, true, true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l := NewTokenLimiter(tt.cfg, fake)
+			for i, want := range tt.want {
+				ok, wait := l.Allow("tok")
+				if ok != want || (!ok && wait < time.Second) {
+					t.Errorf("call %d: Allow() = %v %s", i, ok, wait)
+				}
+			}
+		})
+	}
+	if NewTokenLimiter(RateLimit{}, nil).l.clk == nil {
+		t.Error("nil clock not defaulted")
 	}
 }
