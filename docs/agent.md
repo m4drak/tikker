@@ -10,6 +10,13 @@ Konektor `agent` pozwala tikkerowi wysyłać i odbierać SMS-y przez router, kt�
 przez HTTPS i odpytuje oraz raportuje. Dzięki temu działa za CGNAT, bez port
 forwarding i bez VPN (PLAN §5 #1).
 
+> **Uwaga: skrypt `deploy/routeros/agent.rsc` nie był uruchomiony na
+> prawdziwym routerze [WERYFIKACJA T00/T51].** Powstał wyłącznie na podstawie
+> dokumentacji RouterOS 7 i jest zgodny z protokołem serwera (testy
+> `internal/agent` używają `fakeagent`, nie skryptu). Przed użyciem
+> produkcyjnym przetestuj go na routerze laboratoryjnym: wysyłkę, odbiór,
+> usuwanie ze skrzynki i zachowanie po zerwaniu połączenia.
+
 ## Dlaczego pull?
 
 Konektor `routeros-rest` (MVP) wymaga, by tikker mógł się **połączyć do**
@@ -19,25 +26,38 @@ Konektor `agent` odwraca role:
 ```
 MikroTik RouterOS (za CGNAT, tylko NAT out)          tikker (serwer publiczny)
   deploy/routeros/agent.rsc  ===HTTPS polling===>    GET /agent/v1/...
-      (cyklicznie)                              (autoryzacja Bearer token)
+      (cyklicznie, scheduler)                          (autoryzacja Bearer token)
 ```
 
-Skrypt na routerze:
-1. co kilka sekund robi `/tool fetch` na endpointy tikkera;
-2. pobiera oczekujące komendy wysyłki (`POST /agent/v1/commands`);
-3. wykonuje SMS-y na modemach przez `/tool sms send` (GSM-7) albo przez
-   at-chat/PDU (UCS-2 i wielosegmentowe);
-4. raportuje wynik (`POST /agent/v1/commands/{id}/result`);
-5. wypycha odebrane SMS-y (`POST /agent/v1/inbox`) i sprząta je na routerze
-   dopiero gdy tikker je zapisze (`inbox_delete` → `/inbox/ack`);
-6. raportuje stan modemów (`POST /agent/v1/checkin`) — z tego tikker czerpie
-   zdrowie kanałów.
+Skrypt na routerze (uruchamiany przez `/system scheduler`, jeden cykl na
+uruchomienie, wymaga RouterOS **7.13+** ze względu na `:serialize`/`:deserialize`):
+1. raportuje stan modemów (`POST /agent/v1/checkin`: wersja RouterOS, board,
+   wszystkie porty `/interface lte` ze stanem z `monitor`) — z tego tikker
+   czerpie zdrowie kanałów;
+2. wypycha odebrane SMS-y z `/tool sms inbox` (`POST /agent/v1/inbox`,
+   po jednym, z `pdu` jeśli jest);
+3. pobiera oczekujące komendy wysyłki (`POST /agent/v1/commands`) tylko dla
+   swoich portów;
+4. wysyła SMS przez `/tool sms send` i dopiero potem raportuje wynik
+   (`POST /agent/v1/commands/{id}/result`);
+5. usuwa z routera wpisy wskazane w `inbox_delete` (po sprawdzeniu numeru i
+   czasu) i potwierdza je (`/inbox/ack`).
+
+Obecna wersja skryptu obsługuje **tylko jednosegmentowe SMS-y GSM-7**. Komendy
+UCS-2 lub wielosegmentowe (tryb PDU przez at-chat nie jest zaimplementowany)
+zgłasza jako `permanent` z powodem „unsupported” — nigdy jako `accepted`.
+Przy tym skrypcie ustaw więc w tikkerze `agent.ucs2: false` i
+`agent.max_segments: 1` (domyślne `true` i `10` zakładają agenta, który
+obsługuje PDU).
 
 ## Zapytania i deduplikacja
 
 - Komenda wysyłki ma `message_id`. Agent **deduplikuje** po nim: jeśli przyjdzie
   drugi raz (tikker nie dostał wyniku i ponawia), agent nie wysyła drugi raz,
-  tylko powtarza ostatni wynik.
+  tylko powtarza ostatni wynik końcowy (`accepted`/`permanent`). Jeśli wysyłka
+  się zaczęła, ale wynik nie został zapisany (przerwany skrypt), agent odpowiada
+  `ambiguous`. Wynik `transient` nie jest zapamiętywany: ponowienie z tym samym
+  `message_id` jest wysyłane.
 - Wynik `accepted`/`permanent` jest **zapamiętywany** przez tikker na
   `ResultTTL` (24 h): redelivery danej komendy kończy się bez kontaktu z agentem.
 - Brak potwierdzenia w czasie `SendTimeout` → `TransientAmbiguous` (router mógł
@@ -122,6 +142,11 @@ routerze i agent wypchnie je ponownie.
   + `TestAgentEndToEnd` w `internal/app` (fakeagent przez prawdziwe HTTP:
   checkin, komenda → `sent`, inbound → odebrane, skrzynka opróżniona, brak
   tokenu/treści w logach).
-- **[WERYFIKACJA: wymaga T00 / sprzętu]** konkretne `:local`, certyfikaty CA,
-  pobieranie na prawdziwym RouterOS 7 i wysyłka przez at-chat/PDU — patrz
-  `deploy/routeros/agent.rsc`. Test na sprzęcie to zadanie T51.
+- **[WERYFIKACJA: wymaga T00 / sprzętu]** cały skrypt
+  `deploy/routeros/agent.rsc`: składnia i zachowanie `/tool fetch`
+  (`output=user`, kody błędów, certyfikaty CA), pola `/interface lte monitor`
+  i `/tool sms inbox` (w tym format `pdu` i `timestamp`), to, czy
+  `/tool sms send` wraca dopiero po przyjęciu SMS-a przez modem, minimalne
+  polityki skryptu. Deduplikacja po `message_id` trzyma stan w zmiennej
+  globalnej, więc nie przetrwa restartu routera. Test na sprzęcie to
+  zadanie T51.
