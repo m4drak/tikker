@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -84,6 +85,31 @@ func TestHandlerAuth(t *testing.T) {
 			var st statusResponse
 			if err := json.NewDecoder(res.Body).Decode(&st); err != nil || res.StatusCode != 200 || st.DeviceID != devID.String() {
 				t.Fatalf("status = %d %+v %v", res.StatusCode, st, err)
+			}
+		})
+	}
+}
+
+// Failed authentication is not logged at Info: an unauthenticated client
+// must not be able to fill the log.
+func TestHandlerAuthFailureNotLoggedAtInfo(t *testing.T) {
+	tests := []struct {
+		name  string
+		level slog.Level
+		want  bool
+	}{
+		{"info", slog.LevelInfo, false},
+		{"debug", slog.LevelDebug, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logs := &syncBuffer{}
+			e := newEnv(t, Options{Logger: slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: tt.level}))}, fakeagent.Options{})
+			for range 3 {
+				wantProblem(t, e.request("GET", Prefix+"/status", "wrong-token-0123456789abcdef-012345", ""), 401, problemUnauthorized)
+			}
+			if got := strings.Contains(logs.String(), "agent authentication failed"); got != tt.want {
+				t.Fatalf("logged = %v, want %v:\n%s", got, tt.want, logs)
 			}
 		})
 	}

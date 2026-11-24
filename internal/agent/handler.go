@@ -113,7 +113,9 @@ func (h *Hub) endpoint(rt route) http.Handler {
 		}
 		s := h.authenticate(bearer(r))
 		if s == nil {
-			h.log.Info("agent authentication failed", slog.String("path", r.URL.Path), slog.String("remote_addr", r.RemoteAddr))
+			// Debug only: unauthenticated clients must not be able to
+			// flood the log at the default level.
+			h.log.Debug("agent authentication failed", slog.String("path", r.URL.Path), slog.String("remote_addr", r.RemoteAddr))
 			w.Header().Set("WWW-Authenticate", `Bearer realm="tikker-agent"`)
 			writeProblem(w, r, http.StatusUnauthorized, problemUnauthorized, "Missing or invalid agent token.", nil)
 			return

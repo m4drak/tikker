@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,7 +53,9 @@ func newEnv(t *testing.T, opts Options, aopts fakeagent.Options) *env {
 	if opts.Clock == nil {
 		opts.Clock = e.clk
 	}
-	opts.Logger = discard()
+	if opts.Logger == nil {
+		opts.Logger = discard()
+	}
 	e.hub = NewHub(opts)
 	conn, err := e.hub.NewConn(context.Background(), connector.DeviceConfig{DeviceID: devID, Kind: domain.ConnectorAgent, AgentToken: token})
 	if err != nil {
@@ -173,6 +176,24 @@ func (s *session) waitersOf(id domain.ID) int {
 		return c.waiters
 	}
 	return 0
+}
+
+// syncBuffer is a log sink safe for concurrent writes.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 func readAll(t *testing.T, res *http.Response) string {
