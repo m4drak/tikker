@@ -54,6 +54,23 @@ Skrypt na routerze:
   wiadomość kończy jako `failed` z `possible_duplicate`, choć wyszła —
   interfejs konektora nie pozwala zgłosić „wysłano, ale możliwy duplikat”.
 
+## Usuwanie odebranych SMS-ów
+
+RouterOS używa ponownie `.id` po usunięciu wpisu, więc samo `remote_id` nie
+identyfikuje wiadomości. tikker rozróżnia wpisy po porcie, `remote_id` i
+odcisku treści. Każda pozycja `inbox_delete` zawiera, oprócz `port` i
+`remote_id`, także `phone` i `timestamp` w postaci wypchniętej przez agenta:
+
+```json
+{"port": "lte1", "remote_id": "*1", "phone": "+48511222333", "timestamp": "2026-11-23 10:00:00"}
+```
+
+Agent usuwa wpis z routera **tylko wtedy**, gdy pod tym `.id` nadal jest wpis
+o tym samym numerze i czasie. Potwierdza (`/inbox/ack`) każdą pozycję, także
+taką, której wpis już zniknął lub zawiera inną wiadomość, odsyłając ją bez
+zmian (z `phone` i `timestamp`). Potwierdzenie bez `phone`/`timestamp`
+(starsze skrypty) usuwa wszystkie oczekujące usunięcia pod tym `remote_id`.
+
 ## Health
 
 Stan kanału agenta pochodzi z ostatniego `checkin`:

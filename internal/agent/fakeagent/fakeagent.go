@@ -5,7 +5,8 @@
 // (deploy/routeros/agent.rsc) for tests: it speaks the /agent/v1 protocol
 // over real HTTP, keeps a simulated router inbox and records what it "sent".
 // It follows the script's rules: commands are deduplicated by message ID,
-// inbox entries are deleted only when tikker lists them in inbox_delete.
+// inbox entries are deleted only when tikker lists them in inbox_delete
+// and phone and timestamp still match.
 package fakeagent
 
 import (
@@ -53,9 +54,23 @@ type InboxEntry struct {
 	Body      string `json:"body"`
 }
 
+// ref names an inbox entry tikker asks to delete. Phone and Timestamp are
+// what the agent pushed; the entry is deleted only if they still match.
 type ref struct {
-	Port     string `json:"port"`
-	RemoteID string `json:"remote_id"`
+	Port      string `json:"port"`
+	RemoteID  string `json:"remote_id"`
+	Phone     string `json:"phone,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
+func (r ref) matches(e InboxEntry) bool {
+	if r.Port != e.Port || r.RemoteID != e.RemoteID {
+		return false
+	}
+	if r.Phone == "" && r.Timestamp == "" {
+		return true // older servers
+	}
+	return r.Phone == e.Phone && r.Timestamp == e.Timestamp
 }
 
 // Port is the modem state reported at check-in.
@@ -204,7 +219,7 @@ func (a *Agent) deleteAndAck(ctx context.Context, refs []ref) error {
 	for _, e := range a.inbox {
 		del := false
 		for _, r := range refs {
-			if r.Port == e.Port && r.RemoteID == e.RemoteID {
+			if r.matches(e) {
 				del = true
 				break
 			}
@@ -215,6 +230,8 @@ func (a *Agent) deleteAndAck(ctx context.Context, refs []ref) error {
 	}
 	a.inbox = kept
 	a.mu.Unlock()
+	// Every ref is acknowledged, also one whose entry is gone or holds
+	// another message now: there is nothing left to delete for it.
 	return a.post(ctx, "/inbox/ack", map[string]any{"deleted": refs}, nil)
 }
 
