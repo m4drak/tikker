@@ -178,6 +178,41 @@ func TestCancelledContext(t *testing.T) {
 	}
 }
 
+// TestMemorySurvivesInterruptedConnection covers the flaky
+// TestShutdownCancelsInFlightSend (#8): a query cancelled mid-flight
+// interrupts its SQLite connection, database/sql then discards it, and a plain
+// ":memory:" database would be replaced by a new, empty one ("no such table").
+func TestMemorySurvivesInterruptedConnection(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"empty path", ""},
+		{"memory path", ":memory:"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := open(t, sqlite.Options{Path: tt.path})
+			db := s.WriteDB()
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			const forever = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) SELECT count(*) FROM c"
+			var n int
+			if err := db.QueryRowContext(ctx, forever).Scan(&n); err == nil {
+				t.Fatal("endless query finished")
+			}
+			var tables int
+			if err := db.QueryRowContext(context.Background(),
+				"SELECT count(*) FROM sqlite_master WHERE name = 'messages'").Scan(&tables); err != nil || tables != 1 {
+				t.Fatalf("messages table after interrupt: n=%d err=%v", tables, err)
+			}
+			if _, err := s.Messages().Get(context.Background(), "01JZZZZZZZZZZZZZZZZZZZZZZD"); !errors.Is(err, domain.ErrNotFound) {
+				t.Fatalf("Get = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
 // TestNoWritesWhenIdle verifies SPEC §2.2: reads and empty polls leave the
 // database untouched (no new WAL frames, no change visible to another
 // connection, no growth of the files).

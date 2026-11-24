@@ -461,7 +461,7 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 		return nil, fmt.Errorf("metrics: %w", err)
 	}
 	a.metricsSrv = m
-	mux.Handle("/metrics", m.Handler())
+	mux.Handle("GET /metrics", m.Handler())
 	// The agent API lets a RouterOS script poll and report (backlog #1).
 	mux.Handle(agent.Prefix+"/", a.agentHub.Handler())
 	mux.Handle("/", panel.Handler()) // the web panel owns everything else

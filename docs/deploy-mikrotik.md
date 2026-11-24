@@ -122,9 +122,13 @@ nie uruchomisz. Zamiast tego:
    (`ssh -L 8080:172.17.0.2:8080 admin@<router>` [niezweryfikowane na sprzęcie]) lub `exposePanel="yes"` tylko
    dla zaufanej listy LAN. **Nigdy nie wystawiaj panelu do WAN** (sekcja 10).
 2. Zaloguj się na `http://<adres>:8080` jako `admin` z hasłem `adminPassword` (utworzonym tylko przy pustej bazie).
-   Po pierwszym logowaniu zmień hasło, a z konfiguracji kontenera usuń je:
-   `/container/envs remove [find name=tikker key=TIKKER_ADMIN_PASSWORD]` i uruchom ponownie kontener.
-3. Token API utwórz w panelu (zakładka tokeny; pokazywany tylko raz) albo przez API
+   Po pierwszym logowaniu zmień hasło w panelu. Przy nasłuchu poza loopbackiem tikker przy każdym starcie wymaga
+   `TIKKER_ADMIN_PASSWORD` albo `TIKKER_SETUP_SECRET`, więc nie usuwaj samej zmiennej bez zastępstwa: zamień ją na
+   `TIKKER_SETUP_SECRET` (min. 12 znaków; po utworzeniu użytkownika kreator jest wyłączony, więc sekret niczego
+   nie odblokowuje). Najpierw dodaj `TIKKER_SETUP_SECRET` w `/container/envs`, potem usuń
+   `TIKKER_ADMIN_PASSWORD` (`/container/envs remove [find name=tikker key=TIKKER_ADMIN_PASSWORD]`)
+   i uruchom ponownie kontener.
+3. Token API utwórz w panelu (**Tokeny API**; pokazywany tylko raz) albo przez API
    (`POST /api/v1/tokens`) z sesji administratora.
 4. Dodaj urządzenie (panel lub `POST /api/v1/devices`):
    - `base_url`: `https://172.17.0.1` (adres bramy `veth`);
@@ -160,7 +164,7 @@ Migracje bazy uruchamiają się przy starcie. Przy cofnięciu wersji przywróć 
 
 W `/data` są baza `tikker.db` (+ pliki WAL) i **`secret.key`**, klucz szyfrujący hasła urządzeń (AES-256-GCM).
 Bez `secret.key` kopia bazy jest bezużyteczna: hasła routerów nie da się odszyfrować, a utracony klucz
-oznacza ponowne wpisanie haseł. Kopiuj oba pliki razem, trzymaj je w tym samym, chronionym miejscu.
+oznacza, że przy bazie z urządzeniami tikker w ogóle nie wystartuje (przywróć oryginalny `secret.key` z kopii). Kopiuj oba pliki razem, trzymaj je w tym samym, chronionym miejscu.
 
 - Zatrzymaj kontener (`/container stop`), skopiuj katalog `mediaPath/data` (`/file print`, pobranie z Files lub
   `scp` z routera), uruchom kontener. Spójna kopia bez zatrzymania wymaga mechanizmów SQLite
@@ -188,7 +192,7 @@ oznacza ponowne wpisanie haseł. Kopiuj oba pliki razem, trzymaj je w tym samym,
 - Konto `tikker` ma `address=` ograniczone do podsieci `veth`, a `www-ssl` także. Nie rozszerzaj tego bez potrzeby.
 - Grupa `tikker` nie ma polityk `ssh`, `ftp`, `policy`, `reboot`, `sensitive`: kompromitacja tikkera nie daje
   administracji routerem. Hasło REST przechowuje tikker zaszyfrowane, ale w `/container/envs` leży
-  `TIKKER_ADMIN_PASSWORD` (usuń po pierwszym logowaniu).
+  `TIKKER_ADMIN_PASSWORD` (po pierwszym logowaniu zamień go na `TIKKER_SETUP_SECRET`, patrz sekcja 6).
 - Trzymaj RouterOS aktualny i rozważ wyłączenie niepotrzebnych usług (`/ip service`).
 
 ## 11. Rozwiązywanie problemów

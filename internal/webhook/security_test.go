@@ -35,6 +35,10 @@ func TestBlockedAddr(t *testing.T) {
 		{"::ffff:127.0.0.1", true}, {"::ffff:169.254.169.254", true}, {"::ffff:10.0.0.1", true},
 		{"8.8.8.8", false}, {"93.184.216.34", false}, {"172.32.0.1", false}, {"100.128.0.1", false},
 		{"198.20.0.1", false}, {"2606:4700:4700::1111", false}, {"::ffff:8.8.8.8", false},
+		{"64:ff9b::7f00:1", true}, {"64:ff9b::808:808", true}, {"64:ff9b:1::1", true},
+		{"2002:7f00:1::1", true}, {"2002:808:808::1", true}, {"2001:0:4136:e378:8000:63bf:3fff:fdd2", true},
+		{"::7f00:1", true}, {"::808:808", true},
+		{"2001:db9::1", false}, {"2003::1", false}, {"64:ff9b:2::1", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.ip, func(t *testing.T) {
@@ -229,6 +233,7 @@ func TestDeliveryIDIsSigned(t *testing.T) {
 	header := func(id, sig string) http.Header {
 		h := http.Header{}
 		h.Set(HeaderDelivery, id)
+		h.Set(HeaderEvent, r.Event)
 		h.Set(HeaderSignature, sig)
 		return h
 	}
@@ -252,6 +257,30 @@ func TestDeliveryIDIsSigned(t *testing.T) {
 	if _, err := VerifyRequest(secret, r.Body, header(r.Delivery, "")); !errors.Is(err, ErrBadSignature) {
 		t.Errorf("missing signature accepted: %v", err)
 	}
+	// The event header must match the signed event.
+	eventTests := []struct {
+		name  string
+		event func(h http.Header)
+		ok    bool
+	}{
+		{"matching", func(http.Header) {}, true},
+		{"different", func(h http.Header) { h.Set(HeaderEvent, "message_status") }, false},
+		{"missing", func(h http.Header) { h.Del(HeaderEvent) }, false},
+		{"empty", func(h http.Header) { h.Set(HeaderEvent, "") }, false},
+	}
+	for _, tt := range eventTests {
+		t.Run("event header "+tt.name, func(t *testing.T) {
+			h := header(r.Delivery, r.Sign)
+			tt.event(h)
+			_, err := VerifyRequest(secret, r.Body, h)
+			if tt.ok && err != nil {
+				t.Errorf("rejected: %v", err)
+			}
+			if !tt.ok && !errors.Is(err, ErrBadSignature) {
+				t.Errorf("accepted or wrong error: %v", err)
+			}
+		})
+	}
 }
 
 // Two deliveries of one event to two webhooks have different signed IDs.
@@ -271,7 +300,7 @@ func TestEachDeliveryHasItsOwnSignedID(t *testing.T) {
 		t.Fatalf("requests = %+v", reqs)
 	}
 	for _, r := range reqs {
-		if _, err := VerifyRequest([]byte(testSecret), r.Body, http.Header{HeaderDelivery: {r.Delivery}, HeaderSignature: {r.Sign}}); err != nil {
+		if _, err := VerifyRequest([]byte(testSecret), r.Body, http.Header{HeaderDelivery: {r.Delivery}, HeaderEvent: {r.Event}, HeaderSignature: {r.Sign}}); err != nil {
 			t.Errorf("verify: %v", err)
 		}
 	}
