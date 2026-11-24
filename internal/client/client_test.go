@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testToken = "tkr_abc_secret"
@@ -20,7 +21,7 @@ func newTestClient(t *testing.T, h http.HandlerFunc, prefix string) *Client {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	c, err := New(srv.URL+prefix, testToken, srv.Client())
+	c, err := New(srv.URL+prefix, testToken, srv.Client(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,6 +35,11 @@ func TestNew(t *testing.T) {
 	}{
 		{name: "ok", url: "http://127.0.0.1:8080", token: "t"},
 		{name: "https with path", url: "https://example.org/sms/", token: "t"},
+		{name: "localhost", url: "http://localhost:8080", token: "t"},
+		{name: "ipv6 loopback", url: "http://[::1]:8080", token: "t"},
+		{name: "127.0.0.2", url: "http://127.0.0.2", token: "t"},
+		{name: "plain http to a remote host", url: "http://sms.example.org", token: "t", wantErr: "refusing"},
+		{name: "plain http to a private address", url: "http://192.168.1.1", token: "t", wantErr: "refusing"},
 		{name: "no scheme", url: "127.0.0.1:8080", token: "t", wantErr: "invalid URL"},
 		{name: "ftp", url: "ftp://example.org", token: "t", wantErr: "invalid URL"},
 		{name: "no host", url: "http://", token: "t", wantErr: "invalid URL"},
@@ -41,7 +47,7 @@ func TestNew(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := New(tt.url, tt.token, nil)
+			_, err := New(tt.url, tt.token, nil, false)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("New: %v", err)
@@ -116,6 +122,7 @@ func TestSendOmitsOptionalFieldsAndKey(t *testing.T) {
 		_, hasKey = r.Header["Idempotency-Key"]
 		_ = json.NewDecoder(r.Body).Decode(&raw)
 		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
 		_, _ = io.WriteString(w, `{"messages":[]}`)
 	}, "")
 	if _, _, err := c.Send(context.Background(), SendRequest{To: "1", Body: "x"}, ""); err != nil {
@@ -252,7 +259,7 @@ func TestTransportErrorDoesNotLeakToken(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	url := srv.URL
 	srv.Close()
-	c, err := New(url, testToken, nil)
+	c, err := New(url, testToken, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,6 +285,136 @@ func TestIsTerminal(t *testing.T) {
 	} {
 		if got := IsTerminal(status); got != want {
 			t.Errorf("IsTerminal(%q) = %v, want %v", status, got, want)
+		}
+	}
+}
+
+func TestNewInsecureOverride(t *testing.T) {
+	c, err := New("http://sms.example.org", "t", nil, true)
+	if err != nil || !c.Insecure() {
+		t.Fatalf("override: %v insecure=%v", err, c != nil && c.Insecure())
+	}
+	c, err = New("https://sms.example.org", "t", nil, true)
+	if err != nil || c.Insecure() {
+		t.Fatalf("https: %v", err)
+	}
+	if _, err := New("http://sms.example.org", "t", nil, false); !errors.Is(err, ErrInsecureTransport) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestRedirectIsNotFollowed(t *testing.T) {
+	hits := 0
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.URL.Path == "/elsewhere" {
+			t.Error("redirect was followed")
+		}
+		w.Header().Set("Location", "https://evil.example/elsewhere")
+		w.WriteHeader(http.StatusMovedPermanently)
+	}, "")
+	_, _, err := c.Send(context.Background(), SendRequest{To: "1", Body: "x"}, "k")
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.HTTPStatus != 301 || !strings.HasPrefix(ae.Location, "https://evil.example/") {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.ContainsRune(err.Error(), 0x1b) || !strings.Contains(err.Error(), "redirect to https://evil.example/") {
+		t.Errorf("error text = %q", err.Error())
+	}
+	if hits != 1 {
+		t.Errorf("hits = %d", hits)
+	}
+}
+
+func TestExactSuccessStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(c *Client) error
+		code int
+		ok   bool
+	}{
+		{"send 202", func(c *Client) error { _, _, err := c.Send(context.Background(), SendRequest{}, ""); return err }, 202, true},
+		{"send 200", func(c *Client) error { _, _, err := c.Send(context.Background(), SendRequest{}, ""); return err }, 200, false},
+		{"get 200", func(c *Client) error { _, _, err := c.Get(context.Background(), "x"); return err }, 200, true},
+		{"get 202", func(c *Client) error { _, _, err := c.Get(context.Background(), "x"); return err }, 202, false},
+		{"list 200", func(c *Client) error { _, _, err := c.List(context.Background(), ListParams{}); return err }, 200, true},
+		{"list 204", func(c *Client) error { _, _, err := c.List(context.Background(), ListParams{}); return err }, 204, false},
+		{"cancel 200", func(c *Client) error { _, _, err := c.Cancel(context.Background(), "x"); return err }, 200, true},
+		{"cancel 202", func(c *Client) error { _, _, err := c.Cancel(context.Background(), "x"); return err }, 202, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.code)
+				if tt.code != 204 {
+					_, _ = io.WriteString(w, `{"messages":[]}`)
+				}
+			}, "")
+			err := tt.call(c)
+			if tt.ok && err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if !tt.ok && (err == nil || !strings.Contains(err.Error(), "unexpected HTTP status")) {
+				t.Fatalf("err = %v, want unexpected HTTP status", err)
+			}
+		})
+	}
+}
+
+func TestRetryAfterAndSanitizedProblem(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.Header().Set("Retry-After", "7")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"type":"urn:tikker:problem:rate-limited\u001b[2J","title":"Too\nmany","status":429,"detail":"\u001b]0;x\u0007slow down","errors":[{"field":"a\r\nb","code":"c\u001b","detail":"d\u0000"}]}`)
+	}, "")
+	_, _, err := c.Get(context.Background(), "x")
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.RetryAfter != 7*time.Second {
+		t.Fatalf("err = %v", err)
+	}
+	for _, r := range err.Error() {
+		if r < 0x20 && r != '\n' || r == 0x7f {
+			t.Fatalf("control character %q in %q", r, err.Error())
+		}
+	}
+	if got := strings.Count(err.Error(), "\n"); got != 1 {
+		t.Errorf("newlines = %d in %q", got, err.Error())
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	future := time.Now().Add(30 * time.Second).UTC().Format(http.TimeFormat)
+	tests := []struct {
+		in       string
+		min, max time.Duration
+	}{
+		{"", 0, 0}, {"abc", 0, 0}, {"-5", 0, 0}, {"3", 3 * time.Second, 3 * time.Second},
+		{"999999", time.Hour, time.Hour}, {future, 20 * time.Second, 31 * time.Second},
+	}
+	for _, tt := range tests {
+		if got := parseRetryAfter(tt.in); got < tt.min || got > tt.max {
+			t.Errorf("parseRetryAfter(%q) = %v", tt.in, got)
+		}
+	}
+}
+
+func TestSanitize(t *testing.T) {
+	tests := []struct {
+		in    string
+		limit int
+		want  string
+	}{
+		{"a\nb\tc", 10, "a b c"},
+		{"x\x1b[2Jy", 10, "x [2Jy"},
+		{"abcdefghij", 8, "abcde..."},
+		{"bad\xffutf", 20, "bad?utf"},
+		{"line\u2028sep", 20, "line sep"},
+	}
+	for _, tt := range tests {
+		if got := Sanitize(tt.in, tt.limit); got != tt.want {
+			t.Errorf("Sanitize(%q) = %q, want %q", tt.in, got, tt.want)
 		}
 	}
 }

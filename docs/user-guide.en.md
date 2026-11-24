@@ -299,6 +299,7 @@ echo "Alarm: server room 31 C" | tikker sms send --to 600100200 --tag alarm   # 
 tikker sms send --to 600100200 --body-file msg.txt --idempotency-key "job-42"
 tikker sms get 01M89304ZQ61F6CVNX486V10VC
 tikker sms list --status queued --status sending --limit 20
+tikker sms list --limit 50 --cursor <next_cursor>    # next page (cursor from the hint under the table)
 tikker sms list --all --output json                  # all pages as one object {"items":[…],"next_cursor":null}
 tikker sms cancel 01M89304ZQ61F6CVNX486V10VC         # only a message in the queued state
 tikker sms inbox --limit 10                          # incoming (GET /messages?direction=in)
@@ -306,16 +307,24 @@ tikker sms inbox --limit 10                          # incoming (GET /messages?d
 
 | Option | Meaning |
 |---|---|
-| `--url`, `TIKKER_URL` | gateway address (without `/api/v1`; the suffix is tolerated) |
+| `--url`, `TIKKER_URL` | gateway address (without `/api/v1`; the suffix is tolerated). `http://` is refused (exit `2`) unless the host is loopback (`localhost`, `127.0.0.0/8`, `::1`) |
+| `--insecure-http` | allows `http://` to another host; the token then travels in clear text and the command warns on stderr. Use only on a trusted network |
 | `--token-file`, `TIKKER_TOKEN` | API token; the file takes precedence over the variable |
 | `--output text\|json` | `text` (default) or the API response as indented JSON |
 | `--timeout` | timeout of a single HTTP request (default 10 s) |
 
 `sms send` takes `--to` (required), the text from `--body`, `--body-file PATH` (`-` is stdin) or from stdin (when it is
 not a terminal), and `--channel`, `--tag` (repeatable), `--client-ref`, `--expires-at` (RFC 3339), `--idempotency-key`
-and `--wait DURATION`. Without `--wait` the command ends once the message is queued and prints `id<TAB>status<TAB>number`
-lines. With `--wait` it polls until `sent`, `failed` or `cancelled`; for a long message split by the `split` strategy it
+and `--wait DURATION`. Without `--idempotency-key` the CLI generates a random key (32 hex characters) and sends it as
+`Idempotency-Key`; when the outcome is unknown (timeout, network error, 5xx) it prints
+`retry safely with --idempotency-key <key>` on stderr, and repeating the command with that key cannot create a duplicate.
+Without `--wait` the command ends once the message is queued and prints `id<TAB>status<TAB>number`
+lines. With `--wait` it polls until `sent`, `failed` or `cancelled`, retrying transient errors (429, 5xx, network) with a backoff
+(1 s, doubling to 10 s, honouring `Retry-After`) until the `--wait` deadline; Ctrl-C ends with `interrupted`; for a long message split by the `split` strategy it
 waits for every part.
+
+`list` and `inbox` accept `--cursor`; `--all` stops with an error if the server repeats a cursor or after 1000 pages.
+HTTP redirects are not followed (a 3xx is an error that names the `Location`).
 
 Exit codes: `0` success; `1` API error (stderr shows the `type`, `title`, `detail` and `errors[]` of the RFC 9457
 problem), network error, a message that ended `failed`/`cancelled`, or the `--wait` time running out; `2` usage error

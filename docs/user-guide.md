@@ -291,6 +291,7 @@ echo "Alarm: serwerownia 31 C" | tikker sms send --to 600100200 --tag alarm   # 
 tikker sms send --to 600100200 --body-file msg.txt --idempotency-key "job-42"
 tikker sms get 01M89304ZQ61F6CVNX486V10VC
 tikker sms list --status queued --status sending --limit 20
+tikker sms list --limit 50 --cursor <next_cursor>    # kolejna strona (kursor z podpowiedzi pod tabelą)
 tikker sms list --all --output json                  # wszystkie strony jako jeden obiekt {"items":[…],"next_cursor":null}
 tikker sms cancel 01M89304ZQ61F6CVNX486V10VC         # tylko wiadomość w stanie queued
 tikker sms inbox --limit 10                          # przychodzące (GET /messages?direction=in)
@@ -298,16 +299,23 @@ tikker sms inbox --limit 10                          # przychodzące (GET /messa
 
 | Opcja | Znaczenie |
 |---|---|
-| `--url`, `TIKKER_URL` | adres bramki (bez `/api/v1`; sufiks jest tolerowany) |
+| `--url`, `TIKKER_URL` | adres bramki (bez `/api/v1`; sufiks jest tolerowany). `http://` jest odrzucane (kod `2`), chyba że host jest pętlą zwrotną (`localhost`, `127.0.0.0/8`, `::1`) |
+| `--insecure-http` | pozwala na `http://` do innego hosta; token idzie wtedy jawnym tekstem, a polecenie ostrzega na stderr. Używaj tylko w zaufanej sieci |
 | `--token-file`, `TIKKER_TOKEN` | token API; plik ma pierwszeństwo przed zmienną |
 | `--output text\|json` | `text` (domyślnie) albo odpowiedź API w JSON (z wcięciami) |
 | `--timeout` | limit czasu pojedynczego żądania HTTP (domyślnie 10 s) |
 
 `sms send` przyjmuje `--to` (wymagane), treść z `--body`, `--body-file PATH` (`-` to stdin) albo ze stdin (bez
 terminala), oraz `--channel`, `--tag` (powtarzalna), `--client-ref`, `--expires-at` (RFC 3339), `--idempotency-key`
-i `--wait DURATION`. Bez `--wait` polecenie kończy się po przyjęciu do kolejki i wypisuje wiersze `id<TAB>status<TAB>numer`.
-Z `--wait` odpytuje status do `sent`, `failed` lub `cancelled`. Przy podziale długiej wiadomości (`split`)
+i `--wait DURATION`. Bez `--idempotency-key` CLI losuje klucz (32 znaki hex) i wysyła go w `Idempotency-Key`; gdy wynik jest
+nieznany (timeout, błąd sieci, 5xx), wypisuje na stderr `retry safely with --idempotency-key <klucz>`, a ponowienie z tym
+kluczem nie utworzy duplikatu. Bez `--wait` polecenie kończy się po przyjęciu do kolejki i wypisuje wiersze `id<TAB>status<TAB>numer`.
+Z `--wait` odpytuje status do `sent`, `failed` lub `cancelled`; błędy przejściowe (429, 5xx, sieć) ponawia z wycofaniem
+(1 s, podwajane do 10 s, z uwzględnieniem `Retry-After`) do końca czasu `--wait`. Ctrl-C kończy z komunikatem `interrupted`. Przy podziale długiej wiadomości (`split`)
 czeka na wszystkie części.
+
+`list` i `inbox` przyjmują `--cursor`, a `--all` przerywa z błędem, gdy serwer powtórzy kursor lub strona przekroczy
+1000 stron. Przekierowania HTTP nie są śledzone (3xx to błąd z adresem z `Location`).
 
 Kody wyjścia: `0` powodzenie; `1` błąd API (komunikat z `type`, `title`, `detail` i `errors[]` problemu RFC 9457 na stderr),
 błąd sieci, wiadomość zakończona jako `failed`/`cancelled` albo upłynięcie `--wait`; `2` błąd wywołania (zła opcja,

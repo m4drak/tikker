@@ -77,8 +77,9 @@ func smsEnv(t *testing.T, url string) string {
 	t.Setenv("TIKKER_URL", url)
 	t.Setenv("TIKKER_TOKEN", smsToken)
 	old := pollInterval
-	pollInterval = 5 * time.Millisecond
-	t.Cleanup(func() { pollInterval = old })
+	oldMin, oldMax := retryBackoffMin, retryBackoffMax
+	pollInterval, retryBackoffMin, retryBackoffMax = 5*time.Millisecond, 5*time.Millisecond, 20*time.Millisecond
+	t.Cleanup(func() { pollInterval, retryBackoffMin, retryBackoffMax = old, oldMin, oldMax })
 	return t.TempDir()
 }
 
@@ -119,6 +120,7 @@ func TestSMSUsageErrors(t *testing.T) {
 		{name: "list bad limit", args: []string{"sms", "list", "--limit", "500"}, wantErr: "between 1 and 200"},
 		{name: "list bad status", args: []string{"sms", "list", "--status", "lost"}, wantErr: "invalid --status"},
 		{name: "inbox has no status flag", args: []string{"sms", "inbox", "--status", "sent"}, wantErr: "status"},
+		{name: "plain http to a remote host", args: []string{"sms", "list", "--url", "http://sms.example.org"}, wantErr: "refusing to send the API token over plain http://"},
 		{name: "list stray argument", args: []string{"sms", "list", "x"}, wantErr: "unexpected argument"},
 	}
 	for _, tt := range tests {
@@ -239,7 +241,14 @@ func TestSMSSend(t *testing.T) {
 			if r.method != http.MethodPost || r.path != "/api/v1/messages" {
 				t.Errorf("request = %s %s", r.method, r.path)
 			}
-			if r.idemKey != tt.wantIdem || r.auth != tt.wantAuth {
+			if tt.wantIdem == "" {
+				if !autoKeyPattern.MatchString(r.idemKey) {
+					t.Errorf("generated Idempotency-Key = %q", r.idemKey)
+				}
+			} else if r.idemKey != tt.wantIdem {
+				t.Errorf("Idempotency-Key = %q, want %q", r.idemKey, tt.wantIdem)
+			}
+			if r.auth != tt.wantAuth {
 				t.Errorf("idem %q auth %q", r.idemKey, r.auth)
 			}
 			var got map[string]any

@@ -17,10 +17,12 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // maxResponseBytes bounds the response body read from the server.
@@ -137,41 +139,87 @@ type APIError struct {
 	Problem    Problem
 	// Body is a short excerpt of a non-problem response body.
 	Body string
+	// Location is the Location header of a redirect response.
+	Location string
+	// RetryAfter is the parsed Retry-After header (zero when absent).
+	RetryAfter time.Duration
 }
 
 // Error renders the problem as a readable message: one summary line, then one
 // line per field error.
 func (e *APIError) Error() string {
+	// Every server-supplied string goes through Sanitize so that it cannot
+	// inject terminal escapes or extra lines.
 	var b strings.Builder
 	fmt.Fprintf(&b, "API error %d", e.HTTPStatus)
-	if code := e.Problem.Code(); code != "" {
+	if code := Sanitize(e.Problem.Code(), 128); code != "" {
 		fmt.Fprintf(&b, " (%s)", code)
 	}
-	if e.Problem.Title != "" {
-		b.WriteString(": " + e.Problem.Title)
+	if e.Location != "" {
+		fmt.Fprintf(&b, ": redirect to %s (redirects are not followed; check --url, use https:// if the server redirects to it)", Sanitize(e.Location, 256))
 	}
-	if e.Problem.Detail != "" {
-		b.WriteString(": " + e.Problem.Detail)
+	if t := Sanitize(e.Problem.Title, 256); t != "" {
+		b.WriteString(": " + t)
+	}
+	if d := Sanitize(e.Problem.Detail, 1024); d != "" {
+		b.WriteString(": " + d)
 	}
 	if e.Problem.Title == "" && e.Problem.Detail == "" && e.Body != "" {
-		b.WriteString(": " + e.Body)
+		b.WriteString(": " + Sanitize(e.Body, 200))
 	}
 	for _, fe := range e.Problem.Errors {
-		fmt.Fprintf(&b, "\n  - %s: %s: %s", fe.Field, fe.Code, fe.Detail)
+		fmt.Fprintf(&b, "\n  - %s: %s: %s", Sanitize(fe.Field, 128), Sanitize(fe.Code, 64), Sanitize(fe.Detail, 512))
 	}
 	return b.String()
 }
 
+// ErrInsecureTransport is returned by New for a plain http:// URL whose host
+// is not a loopback address, unless the caller allowed it explicitly.
+var ErrInsecureTransport = errors.New("refusing to send the API token over plain http:// to a non-loopback host (use https://, or --insecure-http to override)")
+
 // Client talks to one tikker instance.
 type Client struct {
-	base  *url.URL
-	token string
-	http  *http.Client
+	base     *url.URL
+	token    string
+	http     *http.Client
+	insecure bool
+}
+
+// Insecure reports whether the client sends the token over plain http:// to
+// a non-loopback host (allowed explicitly with allowInsecure).
+func (c *Client) Insecure() bool { return c.insecure }
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// Sanitize replaces control characters (including terminal escapes and
+// newlines) with spaces, collapses whitespace and truncates s to limit runes.
+// Use it for every server-supplied string that is printed as text.
+func Sanitize(s string, limit int) string {
+	s = strings.ToValidUTF8(s, "?")
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || r == 0x2028 || r == 0x2029 {
+			return ' '
+		}
+		return r
+	}, s)
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); limit > 3 && len(r) > limit {
+		s = string(r[:limit-3]) + "..."
+	}
+	return s
 }
 
 // New creates a client for the instance at baseURL (http or https, without
 // the /api/v1 suffix, which is tolerated). token is sent as a bearer token; hc may be nil.
-func New(baseURL, token string, hc *http.Client) (*Client, error) {
+// Plain http:// is accepted only for loopback hosts unless allowInsecure is set.
+// Redirects are never followed (a copy of hc is used).
+func New(baseURL, token string, hc *http.Client, allowInsecure bool) (*Client, error) {
 	u, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil {
 		return nil, errors.New("invalid URL: " + urlErrReason(err))
@@ -182,13 +230,20 @@ func New(baseURL, token string, hc *http.Client) (*Client, error) {
 	if token == "" {
 		return nil, errors.New("empty token")
 	}
+	insecure := u.Scheme == "http" && !isLoopbackHost(u.Hostname())
+	if insecure && !allowInsecure {
+		return nil, ErrInsecureTransport
+	}
 	if hc == nil {
 		hc = &http.Client{}
 	}
+	hcCopy := *hc
+	hcCopy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	hc = &hcCopy
 	u.RawQuery, u.Fragment, u.RawPath = "", "", ""
 	// Tolerate an address copied together with the API prefix.
 	u.Path = strings.TrimSuffix(strings.TrimRight(u.Path, "/"), "/api/v1")
-	return &Client{base: u, token: token, http: hc}, nil
+	return &Client{base: u, token: token, http: hc, insecure: insecure}, nil
 }
 
 func urlErrReason(err error) string {
@@ -207,21 +262,21 @@ func (c *Client) Send(ctx context.Context, req SendRequest, idempotencyKey strin
 	if idempotencyKey != "" {
 		h.Set("Idempotency-Key", idempotencyKey)
 	}
-	raw, err := c.do(ctx, http.MethodPost, "/messages", nil, h, req, &out)
+	raw, err := c.do(ctx, http.MethodPost, "/messages", http.StatusAccepted, nil, h, req, &out)
 	return out, raw, err
 }
 
 // Get fetches one message.
 func (c *Client) Get(ctx context.Context, id string) (Message, json.RawMessage, error) {
 	var out Message
-	raw, err := c.do(ctx, http.MethodGet, "/messages/"+url.PathEscape(id), nil, nil, nil, &out)
+	raw, err := c.do(ctx, http.MethodGet, "/messages/"+url.PathEscape(id), http.StatusOK, nil, nil, nil, &out)
 	return out, raw, err
 }
 
 // Cancel cancels a queued message and returns it in its new state.
 func (c *Client) Cancel(ctx context.Context, id string) (Message, json.RawMessage, error) {
 	var out Message
-	raw, err := c.do(ctx, http.MethodDelete, "/messages/"+url.PathEscape(id), nil, nil, nil, &out)
+	raw, err := c.do(ctx, http.MethodDelete, "/messages/"+url.PathEscape(id), http.StatusOK, nil, nil, nil, &out)
 	return out, raw, err
 }
 
@@ -241,13 +296,14 @@ func (c *Client) List(ctx context.Context, p ListParams) (MessagePage, json.RawM
 		q.Set("cursor", p.Cursor)
 	}
 	var out MessagePage
-	raw, err := c.do(ctx, http.MethodGet, "/messages", q, nil, nil, &out)
+	raw, err := c.do(ctx, http.MethodGet, "/messages", http.StatusOK, q, nil, nil, &out)
 	return out, raw, err
 }
 
-// do performs one request. On 2xx it decodes the body into out; otherwise it
-// returns an *APIError.
-func (c *Client) do(ctx context.Context, method, path string, query url.Values, header http.Header, body, out any) (json.RawMessage, error) {
+// do performs one request. It decodes the body into out when the status is
+// exactly wantStatus (the code the contract documents); any other status
+// returns an *APIError (or an error for an undocumented 2xx).
+func (c *Client) do(ctx context.Context, method, path string, wantStatus int, query url.Values, header http.Header, body, out any) (json.RawMessage, error) {
 	u := *c.base
 	// path is already escaped; set Path and RawPath so that %2F in an id is
 	// sent as-is instead of being escaped a second time.
@@ -296,7 +352,10 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		return nil, errors.New("response too large")
 	}
 
-	if res.StatusCode < 200 || res.StatusCode > 299 {
+	if res.StatusCode != wantStatus {
+		if res.StatusCode >= 200 && res.StatusCode <= 299 {
+			return nil, fmt.Errorf("unexpected HTTP status %d (want %d)", res.StatusCode, wantStatus)
+		}
 		return nil, newAPIError(res, data)
 	}
 	if err := json.Unmarshal(data, out); err != nil {
@@ -306,7 +365,10 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 }
 
 func newAPIError(res *http.Response, data []byte) *APIError {
-	e := &APIError{HTTPStatus: res.StatusCode}
+	e := &APIError{HTTPStatus: res.StatusCode, RetryAfter: parseRetryAfter(res.Header.Get("Retry-After"))}
+	if res.StatusCode >= 300 && res.StatusCode < 400 {
+		e.Location = res.Header.Get("Location")
+	}
 	mt, _, _ := mime.ParseMediaType(res.Header.Get("Content-Type"))
 	if mt == "application/problem+json" || mt == "application/json" {
 		var p Problem
@@ -319,12 +381,23 @@ func newAPIError(res *http.Response, data []byte) *APIError {
 	return e
 }
 
+// parseRetryAfter parses a Retry-After header (delta-seconds or HTTP date);
+// it returns 0 when absent or invalid. The result is capped at one hour.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	var d time.Duration
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		d = time.Duration(n) * time.Second
+	} else if t, err := http.ParseTime(v); err == nil {
+		d = time.Until(t)
+	}
+	return max(0, min(d, time.Hour))
+}
+
 // excerpt returns a short single-line, printable excerpt of a body.
 func excerpt(data []byte) string {
-	s := strings.Join(strings.Fields(string(bytes.ToValidUTF8(data, nil))), " ")
-	const limit = 200
-	if r := []rune(s); len(r) > limit {
-		s = string(r[:limit]) + "..."
-	}
-	return s
+	return Sanitize(string(data), 200)
 }
