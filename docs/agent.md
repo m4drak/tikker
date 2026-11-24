@@ -111,7 +111,10 @@ Sekcja `agent` w `tikker.yaml` (lub zmienne środowiskowe):
 
 Pozostałe limity są stałe w kodzie (`internal/agent`, `Options`) i **nie** są
 konfigurowalne: jedna wysyłka naraz na port, do 500 buforowanych SMS-ów
-przychodzących na port, wyniki końcowe pamiętane przez 24 h.
+przychodzących na port i 2000 na urządzenie, wyniki końcowe pamiętane przez
+24 h. SMS-y przychodzące są przyjmowane tylko dla portów zgłoszonych w
+ostatnim `checkin` (przed pierwszym `checkin` żadne); odrzucone zostają na
+routerze i agent wypchnie je ponownie.
 
 ## Weryfikacja
 

@@ -178,6 +178,22 @@ func (s *session) waitersOf(id domain.ID) int {
 	return 0
 }
 
+// checkin reports ports as the agent; inbound SMS are accepted only for
+// ports of the last check-in.
+func (e *env) checkin(ports ...string) {
+	e.t.Helper()
+	var b strings.Builder
+	for i, p := range ports {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(`{"port":"` + p + `","registration":"registered"}`)
+	}
+	if res := e.request("POST", Prefix+"/checkin", token, `{"ports":[`+b.String()+`]}`); res.StatusCode != http.StatusOK {
+		e.t.Fatalf("checkin = %d", res.StatusCode)
+	}
+}
+
 // syncBuffer is a log sink safe for concurrent writes.
 type syncBuffer struct {
 	mu sync.Mutex

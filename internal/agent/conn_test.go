@@ -415,6 +415,7 @@ func isHandleOf(handle, remoteID string) bool {
 
 func TestInboxStoreThenDelete(t *testing.T) {
 	e := newEnv(t, Options{}, fakeagent.Options{})
+	e.checkin("lte1", "lte2")
 	ctx := context.Background()
 	at := time.Date(2026, 11, 23, 10, 0, 0, 0, time.UTC)
 	r1, _ := e.agent.Receive("lte1", "+48511222333", "Odpowiedź: tak", at)
@@ -473,6 +474,7 @@ func TestInboxStoreThenDelete(t *testing.T) {
 // tikker asked to delete is new.
 func TestInboxRemoteIDReuse(t *testing.T) {
 	e := newEnv(t, Options{}, fakeagent.Options{})
+	e.checkin("lte1", "lte2")
 	ctx := context.Background()
 	push := func(body string) {
 		t.Helper()
@@ -521,6 +523,7 @@ func TestInboxRemoteIDReusedBeforeDelete(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := newEnv(t, Options{}, fakeagent.Options{})
+			e.checkin("lte1")
 			ctx := context.Background()
 			push := func(phone, ts, body string) {
 				t.Helper()
@@ -571,6 +574,7 @@ func TestInboxAckMatchesContent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := newEnv(t, Options{}, fakeagent.Options{})
+			e.checkin("lte1")
 			ctx := context.Background()
 			e.request("POST", Prefix+"/inbox", token,
 				`{"messages":[{"port":"lte1","remote_id":"*1","phone":"+48511222333","timestamp":"2026-11-23 10:00:00","body":"A"}]}`)
@@ -594,6 +598,7 @@ func TestInboxAckMatchesContent(t *testing.T) {
 // unmarked, which would make the next push add them again.
 func TestInboxPendingDeletesCap(t *testing.T) {
 	e := newEnv(t, Options{maxPendingDeletes: 1}, fakeagent.Options{})
+	e.checkin("lte1", "lte2")
 	ctx := context.Background()
 	e.request("POST", Prefix+"/inbox", token, `{"messages":[
 		{"port":"lte1","remote_id":"*1","phone":"+48511222333","body":"a"},
@@ -618,8 +623,52 @@ func TestInboxPendingDeletesCap(t *testing.T) {
 	}
 }
 
+// Inbound SMS are buffered only for ports the agent reported at its last
+// check-in, and the whole session is bounded, so an agent cannot grow the
+// buffer without limit by inventing port names.
+func TestInboxPortsAndTotalLimit(t *testing.T) {
+	msgs := func(ports ...string) string {
+		var b strings.Builder
+		for i, p := range ports {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, `{"port":%q,"remote_id":"*%d","body":"m%d"}`, p, i+1, i)
+		}
+		return `{"messages":[` + b.String() + `]}`
+	}
+	tests := []struct {
+		name     string
+		checkin  []string // nil: no check-in
+		push     []string
+		accepted int
+		refused  int
+	}{
+		{"no check-in", nil, []string{"lte1"}, 0, 1},
+		{"unknown port", []string{"lte1"}, []string{"lte1", "bogus1", "bogus2"}, 1, 2},
+		{"total limit", []string{"lte1", "lte2"}, []string{"lte1", "lte2", "lte1", "lte2"}, 3, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t, Options{MaxInbox: 10, MaxInboxTotal: 3}, fakeagent.Options{})
+			if tt.checkin != nil {
+				e.checkin(tt.checkin...)
+			}
+			body := readAll(t, e.request("POST", Prefix+"/inbox", token, msgs(tt.push...)))
+			want := fmt.Sprintf(`"accepted":%d,"refused":%d`, tt.accepted, tt.refused)
+			if !strings.Contains(body, want) {
+				t.Fatalf("push = %s, want %s", body, want)
+			}
+			if n := e.conn.s.snapshot().inboxEntries; n != tt.accepted {
+				t.Fatalf("buffered = %d, want %d", n, tt.accepted)
+			}
+		})
+	}
+}
+
 func TestInboxLimit(t *testing.T) {
 	e := newEnv(t, Options{MaxInbox: 2}, fakeagent.Options{})
+	e.checkin("lte1", "lte2")
 	for i := range 3 {
 		if _, err := e.agent.Receive("lte1", "+48511222333", "m", t0.Add(time.Duration(i)*time.Minute)); err != nil {
 			t.Fatal(err)

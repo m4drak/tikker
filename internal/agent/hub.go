@@ -36,6 +36,8 @@ const (
 	DefaultMaxConcurrentSends = 1
 	// DefaultMaxInbox bounds the buffered inbound SMS per port.
 	DefaultMaxInbox = 500
+	// DefaultMaxInboxTotal bounds the buffered inbound SMS per device.
+	DefaultMaxInboxTotal = 2000
 	// DefaultResultTTL is how long final send results and pending inbox
 	// deletions are remembered (deduplication of redelivered commands).
 	DefaultResultTTL = 24 * time.Hour
@@ -112,6 +114,10 @@ type Options struct {
 	// MaxInbox bounds buffered inbound SMS per port (default
 	// DefaultMaxInbox); further entries are refused and stay on the router.
 	MaxInbox int
+	// MaxInboxTotal bounds buffered inbound SMS per device over all ports
+	// (default DefaultMaxInboxTotal). Entries are also refused for ports
+	// the agent did not report at its last check-in.
+	MaxInboxTotal int
 	// ResultTTL is how long final results and pending inbox deletions are
 	// kept (default DefaultResultTTL).
 	ResultTTL time.Duration
@@ -160,6 +166,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.MaxInbox <= 0 {
 		o.MaxInbox = DefaultMaxInbox
+	}
+	if o.MaxInboxTotal <= 0 {
+		o.MaxInboxTotal = DefaultMaxInboxTotal
 	}
 	if o.ResultTTL <= 0 {
 		o.ResultTTL = DefaultResultTTL
@@ -579,13 +588,31 @@ func (s *session) pruneLocked() {
 // with a known router ID but different content is a new message (RouterOS
 // reuses IDs after deletion): it is buffered next to the old one, which
 // stays until it is stored, and a pending deletion of the old content under
-// that ID is dropped (that entry is gone from the router). It returns how
-// many entries were taken and refused (port full; they stay on the router).
-func (s *session) push(entries []pushed) (accepted, refused int) {
+// that ID is dropped (that entry is gone from the router). Entries for a
+// port the last check-in did not report (or before any check-in) are
+// refused, as are entries beyond MaxInbox per port or MaxInboxTotal per
+// device; refused entries stay on the router and are pushed again later.
+// It returns how many entries were taken and refused, and how many of the
+// refused ones were for unknown ports.
+func (s *session) push(entries []pushed) (accepted, refused, unknownPort int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	limit := s.hub.opts.MaxInbox
+	limit, total := s.hub.opts.MaxInbox, 0
+	for _, l := range s.inbox {
+		total += len(l)
+	}
+	known := map[string]bool{}
+	if s.last != nil {
+		for _, p := range s.last.ports {
+			known[p.Port] = true
+		}
+	}
 	for _, p := range entries {
+		if !known[p.port] {
+			refused++
+			unknownPort++
+			continue
+		}
 		e := p.sms
 		key := inboxKey{port: p.port, remoteID: e.RemoteID}
 		fp := fingerprint(e)
@@ -603,14 +630,15 @@ func (s *session) push(entries []pushed) (accepted, refused int) {
 			accepted++
 			continue
 		}
-		if len(list) >= limit {
+		if len(list) >= limit || total >= s.hub.opts.MaxInboxTotal {
 			refused++
 			continue
 		}
 		s.inbox[p.port] = append(list, inboxEntry{sms: e, fp: fp, handle: handleOf(e.RemoteID, fp)})
+		total++
 		accepted++
 	}
-	return accepted, refused
+	return accepted, refused, unknownPort
 }
 
 // handleOf is the RemoteID the connector hands to the inbox poller: the

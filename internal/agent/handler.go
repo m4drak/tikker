@@ -436,9 +436,13 @@ func (h *Hub) handleInbox(w http.ResponseWriter, r *http.Request, s *session) {
 	if v.write(w, r) {
 		return
 	}
-	accepted, refused := s.push(entries)
-	if refused > 0 {
-		h.log.Warn("agent inbox full; entries stay on the router", slog.String("device_id", s.deviceID.String()), slog.Int("refused", refused))
+	accepted, refused, unknown := s.push(entries)
+	if unknown > 0 {
+		h.log.Warn("agent pushed SMS for ports it did not report at check-in; they stay on the router",
+			slog.String("device_id", s.deviceID.String()), slog.Int("refused", unknown))
+	}
+	if full := refused - unknown; full > 0 {
+		h.log.Warn("agent inbox full; entries stay on the router", slog.String("device_id", s.deviceID.String()), slog.Int("refused", full))
 	}
 	writeJSON(w, inboxResponse{Accepted: accepted, Refused: refused, InboxDelete: s.pendingDeletes()})
 }
