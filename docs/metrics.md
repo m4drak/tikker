@@ -56,5 +56,7 @@ tikker_queue_sent_total 7
 tikker_channel_health_severity{channel_id="01...",port="lte1"} 1
 ```
 
-Metryki nie zawierają treści SMS ani numerów (tylko liczniki i stany) — bezpieczne
-bezpieczne do wystawienia poza zaplecze.
+Metryki nie zawierają treści SMS ani numerów, ale endpoint `/metrics` jest
+nieuwierzytelniony i ujawnia identyfikatory kanałów, nazwy portów, liczniki oraz
+poziom sygnału (RSSI). Nie wystawiaj go publicznie: ogranicz dostęp zaporą
+sieciową lub reverse proxy (np. allowlista adresów skanera Prometheus).

@@ -5,6 +5,7 @@ package metrics
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -95,4 +96,107 @@ func TestNewRequiresSource(t *testing.T) {
 	if _, err := New(Options{}); err == nil {
 		t.Fatal("New() with nil Source should error")
 	}
+}
+
+func TestRenderFamiliesOncePerMetricAndContiguous(t *testing.T) {
+	src := &stubSource{snap: Snapshot{
+		Started: 1,
+		Queue: queue.Stats{Channels: []queue.ChannelStats{
+			{ChannelID: "A", Counters: queue.Counters{Sent: 1}}, {ChannelID: "B", Counters: queue.Counters{Sent: 2}}, {ChannelID: "C", Counters: queue.Counters{Sent: 3}},
+		}},
+		Health: []health.ChannelStatus{
+			{ChannelID: "A", Port: "lte1", State: domain.ChannelOK},
+			{ChannelID: "B", Port: "lte2", State: domain.ChannelDown},
+		},
+	}}
+	srv, err := New(Options{Source: src, Namespace: "tikker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := srv.render(src.snap)
+	if err := validateExposition(body); err != nil {
+		t.Fatalf("invalid exposition: %v\n%s", err, body)
+	}
+	for _, want := range []string{
+		`tikker_channel_sent_total{channel_id="A"} 1`,
+		`tikker_channel_sent_total{channel_id="C"} 3`,
+		`tikker_channel_health_severity{channel_id="B",port="lte2"} 3`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+}
+
+func TestEscapeLabelValue(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{"plain", "abc", "abc"},
+		{"quote", `a"b`, `a\"b`},
+		{"backslash", `a\b`, `a\\b`},
+		{"newline", "a\nb", `a\nb`},
+		{"unicode kept", "zażółć", "zażółć"},
+		{"control not hex-escaped", "a\x01b", "a\x01b"},
+		{"all", "\\\"\n", `\\\"\n`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := escapeLabelValue(tc.in); got != tc.want {
+				t.Errorf("escapeLabelValue(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRenderEscapesLabels(t *testing.T) {
+	src := &stubSource{snap: Snapshot{
+		Queue: queue.Stats{Channels: []queue.ChannelStats{{ChannelID: "a\"b\\c\nd\x01"}}},
+	}}
+	srv, err := New(Options{Source: src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := srv.render(src.snap)
+	if !strings.Contains(body, `channel_id="a\"b\\c\nd`+"\x01"+`"`) {
+		t.Errorf("label not escaped per exposition format:\n%q", body)
+	}
+	if strings.Contains(body, `\x01`) {
+		t.Errorf("unexpected \\x escape:\n%q", body)
+	}
+	if err := validateExposition(body); err != nil {
+		t.Errorf("invalid exposition: %v", err)
+	}
+}
+
+// validateExposition is a tiny strict check: one HELP and one TYPE per
+// family, and samples of a family contiguous right after its TYPE line.
+func validateExposition(body string) error {
+	help := map[string]bool{}
+	typ := map[string]bool{}
+	cur := ""
+	for i, line := range strings.Split(strings.TrimSuffix(body, "\n"), "\n") {
+		switch {
+		case strings.HasPrefix(line, "# HELP "):
+			n := strings.Fields(line)[2]
+			if help[n] {
+				return fmt.Errorf("line %d: duplicate HELP for %s", i+1, n)
+			}
+			help[n] = true
+		case strings.HasPrefix(line, "# TYPE "):
+			n := strings.Fields(line)[2]
+			if typ[n] {
+				return fmt.Errorf("line %d: duplicate TYPE for %s", i+1, n)
+			}
+			typ[n] = true
+			cur = n
+		default:
+			name := line
+			if j := strings.IndexAny(line, "{ "); j >= 0 {
+				name = line[:j]
+			}
+			if name != cur {
+				return fmt.Errorf("line %d: sample %s outside its family (current %q)", i+1, name, cur)
+			}
+		}
+	}
+	return nil
 }
