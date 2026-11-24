@@ -292,6 +292,9 @@ func TestLoadMailGatewayFromEnv(t *testing.T) {
 		envMailGwCommandTimeout: "30s",
 		envMailGwDataTimeout:    "2m",
 		envMailGwBody:           "Subject_Text",
+		envMailGwMaxConnsPerIP:  "2",
+		envMailGwMaxSessionDur:  "5m",
+		envMailGwMaxMsgsPerSess: "7",
 	}))})
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -299,7 +302,8 @@ func TestLoadMailGatewayFromEnv(t *testing.T) {
 	m := cfg.MailGateway
 	if !m.Enabled || m.Listen != "127.0.0.1:2526" || m.Domain != "sms.example.net" || m.Hostname != "mx.example.net" ||
 		m.TLSMode != MailTLSNone || m.MaxMessageSize != 32768 || m.MaxRecipients != 3 || m.MaxConnections != 5 ||
-		m.CommandTimeout != 30*time.Second || m.DataTimeout != 2*time.Minute || m.Body != MailBodySubjectText {
+		m.CommandTimeout != 30*time.Second || m.DataTimeout != 2*time.Minute || m.Body != MailBodySubjectText ||
+		m.MaxConnectionsPerIP != 2 || m.MaxSessionDuration != 5*time.Minute || m.MaxMessagesPerSession != 7 {
 		t.Errorf("mail gateway = %+v", m)
 	}
 	if !strings.Contains(cfg.String(), `mail_gateway.domain: "sms.example.net"`) {

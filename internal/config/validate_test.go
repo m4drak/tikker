@@ -126,12 +126,14 @@ func TestValidate(t *testing.T) {
 				m.TLSMode, m.Listen = MailTLSNone, "127.0.0.1:2525"
 				m.Domain, m.Hostname = "", "bad host!"
 				m.MaxMessageSize, m.MaxRecipients, m.MaxConnections = 10, 0, 5000
+				m.MaxConnectionsPerIP, m.MaxSessionDuration, m.MaxMessagesPerSession = 0, time.Second, 0
 				m.CommandTimeout, m.DataTimeout, m.Body = 0, 2*time.Hour, "html"
 			})
 		}, wantErr: []string{
 			"mail_gateway.domain (TIKKER_MAIL_GATEWAY_DOMAIN)", "mail_gateway.hostname", "mail_gateway.max_message_size",
 			"mail_gateway.max_recipients", "mail_gateway.max_connections", "mail_gateway.command_timeout",
 			"mail_gateway.data_timeout", "mail_gateway.body",
+			"mail_gateway.max_connections_per_ip", "mail_gateway.max_session_duration", "mail_gateway.max_messages_per_session",
 		}},
 		{name: "mail notify disabled ignores its settings", mutate: func(c *Config) { c.MailNotify.TLSMode = "bogus" }},
 		{name: "mail notify valid", mutate: func(c *Config) { c.MailNotify = mailNotify(nil) }},

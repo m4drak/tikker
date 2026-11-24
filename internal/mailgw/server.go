@@ -17,8 +17,13 @@
 //     ([Sender], the sending service), one message per recipient, stored
 //     atomically; the Message-ID is the idempotency key, so a client that
 //     retries does not send twice;
-//   - sizes, line lengths, recipients, connections, failed logins and time
-//     per command are bounded; there is no PIPELINING, BDAT or relaying.
+//   - sizes, line lengths, recipients, connections (in total and per client
+//     address), failed logins, time and commands before AUTH, time per
+//     command, session lifetime and messages per session are bounded; there
+//     is no PIPELINING, BDAT or relaying;
+//   - the token is checked again at every MAIL FROM and before a message is
+//     stored, so revoking it, its expiry or disabling its owner also stops
+//     sessions that are already open.
 package mailgw
 
 import (
@@ -48,6 +53,20 @@ const (
 	DefaultMaxConnections  = 20
 	DefaultCommandTimeout  = time.Minute
 	DefaultDataTimeout     = 5 * time.Minute
+	// DefaultMaxConnectionsPerIP bounds the sessions of one client address
+	// (IPv6: one /64), so a few hosts cannot hold every slot.
+	DefaultMaxConnectionsPerIP = 3
+	// DefaultMaxSessionDuration and DefaultMaxMessagesPerSession bound one
+	// session: a long-lived session cannot outlive its token by much, and
+	// a client has to reconnect (and authenticate) from time to time.
+	DefaultMaxSessionDuration    = 10 * time.Minute
+	DefaultMaxMessagesPerSession = 100
+	// DefaultPreAuthTimeout and DefaultMaxPreAuthCommands bound a session
+	// that has not authenticated yet.
+	DefaultPreAuthTimeout     = 30 * time.Second
+	DefaultMaxPreAuthCommands = 10
+	// DefaultHandshakeTimeout bounds a TLS handshake.
+	DefaultHandshakeTimeout = 10 * time.Second
 	// maxLine is the longest line accepted, in commands and in DATA
 	// (RFC 5321 allows 1000; base64 and quoted-printable use 76).
 	maxLine = 4096
@@ -103,6 +122,19 @@ type Options struct {
 	MaxConnections  int
 	CommandTimeout  time.Duration
 	DataTimeout     time.Duration
+	// MaxConnectionsPerIP bounds concurrent sessions per client address
+	// (IPv6: per /64).
+	MaxConnectionsPerIP int
+	// MaxSessionDuration and MaxMessagesPerSession end a session with 421
+	// when reached.
+	MaxSessionDuration    time.Duration
+	MaxMessagesPerSession int
+	// PreAuthTimeout and MaxPreAuthCommands bound the time and the commands
+	// before a successful AUTH; then the session ends with 421.
+	PreAuthTimeout     time.Duration
+	MaxPreAuthCommands int
+	// HandshakeTimeout bounds a TLS handshake (STARTTLS or implicit).
+	HandshakeTimeout time.Duration
 	// AuthLimit bounds failed AUTH per client address (default
 	// DefaultAuthLimit).
 	AuthLimit Limit
@@ -138,6 +170,7 @@ type Server struct {
 	mu       sync.Mutex
 	ln       net.Listener
 	sessions map[*session]struct{}
+	perIP    map[string]int // open sessions per client key
 	closing  bool
 	wg       sync.WaitGroup
 }
@@ -165,6 +198,12 @@ func New(opts Options) (*Server, error) {
 	setInt(&opts.MaxConnections, DefaultMaxConnections)
 	setDuration(&opts.CommandTimeout, DefaultCommandTimeout)
 	setDuration(&opts.DataTimeout, DefaultDataTimeout)
+	setInt(&opts.MaxConnectionsPerIP, DefaultMaxConnectionsPerIP)
+	setDuration(&opts.MaxSessionDuration, DefaultMaxSessionDuration)
+	setInt(&opts.MaxMessagesPerSession, DefaultMaxMessagesPerSession)
+	setDuration(&opts.PreAuthTimeout, DefaultPreAuthTimeout)
+	setInt(&opts.MaxPreAuthCommands, DefaultMaxPreAuthCommands)
+	setDuration(&opts.HandshakeTimeout, DefaultHandshakeTimeout)
 	if opts.AuthLimit == (Limit{}) {
 		opts.AuthLimit = DefaultAuthLimit
 	}
@@ -196,6 +235,7 @@ func New(opts Options) (*Server, error) {
 		authLim:  newAuthLimiter(opts.AuthLimit),
 		sem:      make(chan struct{}, opts.MaxConnections),
 		sessions: map[*session]struct{}{},
+		perIP:    map[string]int{},
 	}, nil
 }
 
@@ -268,19 +308,30 @@ func (s *Server) accept(conn net.Conn) {
 	}
 	sess := newSession(s, conn)
 	s.mu.Lock()
-	if s.closing {
+	switch {
+	case s.closing:
 		s.mu.Unlock()
 		<-s.sem
 		s.reject(conn, "421 4.3.2 Service shutting down")
 		return
+	case s.perIP[sess.clientIP] >= s.opts.MaxConnectionsPerIP:
+		s.mu.Unlock()
+		<-s.sem
+		s.log.Warn("smtp connection refused: too many from one address", slog.String("client", sess.clientIP))
+		s.reject(conn, "421 4.7.0 Too many connections from your address, try again later")
+		return
 	}
 	s.sessions[sess] = struct{}{}
+	s.perIP[sess.clientIP]++
 	s.wg.Add(1)
 	s.mu.Unlock()
 	go func() {
 		defer func() {
 			s.mu.Lock()
 			delete(s.sessions, sess)
+			if s.perIP[sess.clientIP]--; s.perIP[sess.clientIP] <= 0 {
+				delete(s.perIP, sess.clientIP)
+			}
 			s.mu.Unlock()
 			<-s.sem
 			s.wg.Done()

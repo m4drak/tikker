@@ -67,6 +67,9 @@ const (
 	envMailGwMaxMessageSize = "TIKKER_MAIL_GATEWAY_MAX_MESSAGE_SIZE"
 	envMailGwMaxRecipients  = "TIKKER_MAIL_GATEWAY_MAX_RECIPIENTS"
 	envMailGwMaxConnections = "TIKKER_MAIL_GATEWAY_MAX_CONNECTIONS"
+	envMailGwMaxConnsPerIP  = "TIKKER_MAIL_GATEWAY_MAX_CONNECTIONS_PER_IP"
+	envMailGwMaxSessionDur  = "TIKKER_MAIL_GATEWAY_MAX_SESSION_DURATION"
+	envMailGwMaxMsgsPerSess = "TIKKER_MAIL_GATEWAY_MAX_MESSAGES_PER_SESSION"
 	envMailGwCommandTimeout = "TIKKER_MAIL_GATEWAY_COMMAND_TIMEOUT"
 	envMailGwDataTimeout    = "TIKKER_MAIL_GATEWAY_DATA_TIMEOUT"
 	envMailGwBody           = "TIKKER_MAIL_GATEWAY_BODY"
@@ -290,6 +293,9 @@ func applyEnv(cfg *Config, lookup LookupFunc) error {
 	integer(envMailGwMaxMessageSize, &mg.MaxMessageSize)
 	integer(envMailGwMaxRecipients, &mg.MaxRecipients)
 	integer(envMailGwMaxConnections, &mg.MaxConnections)
+	integer(envMailGwMaxConnsPerIP, &mg.MaxConnectionsPerIP)
+	duration(envMailGwMaxSessionDur, &mg.MaxSessionDuration)
+	integer(envMailGwMaxMsgsPerSess, &mg.MaxMessagesPerSession)
 	duration(envMailGwCommandTimeout, &mg.CommandTimeout)
 	duration(envMailGwDataTimeout, &mg.DataTimeout)
 	str(envMailGwBody, &mg.Body)

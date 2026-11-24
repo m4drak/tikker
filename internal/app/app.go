@@ -562,7 +562,9 @@ func (a *App) initMailGateway(ctx context.Context, ln net.Listener) error {
 	o := mailgw.Options{
 		Domain: mg.Domain, Hostname: mg.Hostname,
 		MaxMessageBytes: mg.MaxMessageSize, MaxRecipients: mg.MaxRecipients, MaxConnections: mg.MaxConnections,
-		CommandTimeout: mg.CommandTimeout, DataTimeout: mg.DataTimeout,
+		MaxConnectionsPerIP: mg.MaxConnectionsPerIP, MaxSessionDuration: mg.MaxSessionDuration,
+		MaxMessagesPerSession: mg.MaxMessagesPerSession,
+		CommandTimeout:        mg.CommandTimeout, DataTimeout: mg.DataTimeout,
 		SubjectInBody: mg.Body == config.MailBodySubjectText,
 		DefaultRegion: a.cfg.DefaultRegion, AllowShortNumbers: a.cfg.AllowShortNumbers,
 		Auth: a.auth, Sender: a.send, Limiter: a.tokenLimiter,

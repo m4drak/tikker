@@ -57,8 +57,16 @@ type session struct {
 
 	helo         string
 	principal    *auth.Principal
+	token        string // the raw token of principal, to check it again
 	authFailures int
 	badCommands  int
+	preAuthCmds  int // commands before a successful AUTH
+	messages     int // e-mails accepted in this session
+
+	// Session limits on the OS clock (they are enforced with socket
+	// deadlines, which use it).
+	lifeEnd    time.Time
+	preAuthEnd time.Time
 
 	inTx  bool     // MAIL FROM accepted
 	rcpts []string // E.164 numbers, unique
@@ -66,7 +74,9 @@ type session struct {
 
 func newSession(s *Server, conn net.Conn) *session {
 	id := s.nextID.Add(1)
+	now := time.Now()
 	return &session{
+		lifeEnd: now.Add(s.opts.MaxSessionDuration), preAuthEnd: now.Add(s.opts.PreAuthTimeout),
 		srv: s, id: id, conn: conn,
 		log:      s.log.With(slog.Uint64("session", id)),
 		br:       bufio.NewReaderSize(conn, maxLine),
@@ -136,7 +146,7 @@ func (c *session) serve() {
 			}
 			continue
 		case isTimeout(err):
-			c.reply("421 4.4.2 " + o.Hostname + " Timeout, closing connection")
+			c.reply(c.timeoutReply())
 			return
 		case err != nil:
 			return // connection closed or broken
@@ -147,8 +157,33 @@ func (c *session) serve() {
 	}
 }
 
+// timeoutReply explains why a read timed out: the session lifetime, the
+// time allowed before AUTH, or an idle client.
+func (c *session) timeoutReply() string {
+	now := time.Now().Add(50 * time.Millisecond) // deadlines fire on time; allow for scheduling
+	switch {
+	case !now.Before(c.lifeEnd):
+		c.log.Info("smtp session time limit reached")
+		return "421 4.7.0 Session time limit reached, closing connection"
+	case c.principal == nil && !now.Before(c.preAuthEnd):
+		c.log.Info("smtp session closed: no authentication in time", slog.String("client", c.clientIP))
+		return "421 4.7.0 Authentication required in time, closing connection"
+	}
+	return "421 4.4.2 " + c.srv.opts.Hostname + " Timeout, closing connection"
+}
+
 // command handles one command line; false ends the session.
 func (c *session) command(line string) bool {
+	if c.principal == nil {
+		// Every command counts before AUTH (NOOP, RSET, HELP, VRFY
+		// included), so an unauthenticated client cannot hold a slot.
+		c.preAuthCmds++
+		if c.preAuthCmds > c.srv.opts.MaxPreAuthCommands {
+			c.log.Info("smtp session closed: too many commands without authentication", slog.String("client", c.clientIP))
+			c.reply("421 4.7.0 Authentication required, closing connection")
+			return false
+		}
+	}
 	verb, arg, _ := strings.Cut(line, " ")
 	arg = strings.TrimSpace(arg)
 	switch strings.ToUpper(verb) {
@@ -244,7 +279,7 @@ func (c *session) startTLS(arg string) bool {
 	}
 	// RFC 3207 §4.2: forget everything learned before TLS.
 	c.helo = ""
-	c.principal = nil
+	c.principal, c.token = nil, ""
 	c.resetTx()
 	return true
 }
@@ -252,7 +287,7 @@ func (c *session) startTLS(arg string) bool {
 // handshake wraps the connection in TLS.
 func (c *session) handshake() bool {
 	tc := tls.Server(c.conn, c.srv.opts.TLSConfig)
-	_ = tc.SetDeadline(time.Now().Add(c.srv.opts.CommandTimeout))
+	_ = tc.SetDeadline(time.Now().Add(min(c.srv.opts.HandshakeTimeout, c.srv.opts.CommandTimeout)))
 	if err := tc.Handshake(); err != nil {
 		c.log.Info("tls handshake failed", slog.String("error", err.Error()))
 		return false
@@ -318,7 +353,7 @@ func (c *session) auth(arg string) bool {
 		c.log.Info("smtp auth refused: token lacks scope", slog.String("token_id", p.Token.ID.String()))
 		return c.reply(`535 5.7.8 Token lacks required scope "sms:send"`)
 	}
-	c.principal = &p
+	c.principal, c.token = &p, password
 	c.log.Info("smtp auth succeeded", slog.String("token_id", p.Token.ID.String()), slog.Bool("tls", c.tls))
 	return c.reply("235 2.7.0 Authentication successful")
 }
@@ -395,6 +430,17 @@ func (c *session) mail(arg string) bool {
 		return c.bad("530 5.7.0 Authentication required")
 	case c.inTx:
 		return c.bad("503 5.5.1 Nested MAIL command")
+	case c.messages >= o.MaxMessagesPerSession:
+		c.log.Info("smtp session message limit reached", slog.Int("messages", c.messages))
+		c.reply("421 4.7.0 Message limit per session reached, reconnect to continue")
+		return false
+	}
+	switch c.recheck() {
+	case checkInvalid:
+		return c.reply("535 5.7.8 Authentication credentials no longer valid")
+	case checkTemporary:
+		return c.reply("454 4.7.0 Temporary authentication failure")
+	case checkOK:
 	}
 	addr, params, ok := parsePath(arg, "FROM:")
 	if !ok || len(addr) > 256 {
@@ -494,7 +540,7 @@ func (c *session) data(arg string) bool {
 		c.reply("421 4.3.2 Service shutting down")
 		return false
 	case isTimeout(err):
-		c.reply("421 4.4.2 Timeout, closing connection")
+		c.reply(c.timeoutReply())
 		return false
 	case err != nil:
 		return false
@@ -516,6 +562,16 @@ func (c *session) deliver(raw []byte) string {
 			return "554 5.6.0 " + ce.Code + ": " + ce.Detail
 		}
 		return "451 4.3.0 Temporary failure, try again later"
+	}
+
+	// The token may have been revoked, expired or lost its scope (or its
+	// owner disabled) since AUTH.
+	switch c.recheck() {
+	case checkInvalid:
+		return "554 5.7.8 Authentication credentials no longer valid"
+	case checkTemporary:
+		return "451 4.3.0 Temporary failure, try again later"
+	case checkOK:
 	}
 
 	reqs := make([]sending.Request, len(c.rcpts))
@@ -569,11 +625,43 @@ func (c *session) deliver(raw []byte) string {
 		attrs = append(attrs, logging.PhoneAttr("to", c.rcpts[0]))
 	}
 	c.log.Info("smtp message queued", attrs...)
+	c.messages++
 	verb := "queued"
 	if res.Replayed {
 		verb = "already queued (same Message-ID)"
 	}
 	return fmt.Sprintf("250 2.0.0 Ok: %s as %s", verb, strings.Join(ids, ","))
+}
+
+// Outcomes of [session.recheck].
+type checkResult int
+
+const (
+	checkOK checkResult = iota
+	checkInvalid
+	checkTemporary
+)
+
+// recheck authenticates the session's token again, with the checks of AUTH
+// (valid, not expired or revoked, owner enabled, scope sms:send with the
+// owner's current role). An invalid token drops the authentication and the
+// transaction.
+func (c *session) recheck() checkResult {
+	ctx, cancel := context.WithTimeout(c.srv.opts.BaseContext, authTimeout)
+	defer cancel()
+	p, err := c.srv.opts.Auth.AuthenticateToken(ctx, c.token)
+	switch {
+	case errors.Is(err, auth.ErrInvalidToken) || (err == nil && !p.Can(domain.ScopeSMSSend)):
+		c.log.Info("smtp token no longer valid; authentication dropped", slog.String("token_id", c.principal.Token.ID.String()))
+		c.principal, c.token = nil, ""
+		c.resetTx()
+		return checkInvalid
+	case err != nil:
+		c.log.Error("smtp auth recheck error", slog.String("error", err.Error()))
+		return checkTemporary
+	}
+	c.principal = &p
+	return checkOK
 }
 
 // recipientIndex reads i from a field pointer "/messages/i/...".
@@ -590,7 +678,7 @@ func recipientIndex(field string) (int, bool) {
 // readLine reads one CRLF (or LF) terminated line within timeout.
 func (c *session) readLine(timeout time.Duration, limit int) (string, error) {
 	c.connMu.Lock()
-	_ = c.conn.SetReadDeadline(time.Now().Add(timeout))
+	_ = c.conn.SetReadDeadline(c.deadline(timeout))
 	c.connMu.Unlock()
 	if c.closing.Load() {
 		return "", errShutdown
@@ -606,6 +694,19 @@ func (c *session) readLine(timeout time.Duration, limit int) (string, error) {
 	return strings.TrimRight(string(line), "\r\n"), nil
 }
 
+// deadline is now+timeout, capped by the session lifetime and, before
+// AUTH, by the time allowed to authenticate.
+func (c *session) deadline(timeout time.Duration) time.Time {
+	d := time.Now().Add(timeout)
+	if c.lifeEnd.Before(d) {
+		d = c.lifeEnd
+	}
+	if c.principal == nil && c.preAuthEnd.Before(d) {
+		d = c.preAuthEnd
+	}
+	return d
+}
+
 // readData reads the message after DATA until a line "." (RFC 5321
 // §4.5.2: dot-unstuffing), within the data timeout. The terminator counts
 // only after CRLF, so a bare LF cannot end the message early. A message over
@@ -614,7 +715,7 @@ func (c *session) readLine(timeout time.Duration, limit int) (string, error) {
 func (c *session) readData() ([]byte, error) {
 	o := &c.srv.opts
 	c.connMu.Lock()
-	_ = c.conn.SetReadDeadline(time.Now().Add(o.DataTimeout))
+	_ = c.conn.SetReadDeadline(c.deadline(o.DataTimeout))
 	c.connMu.Unlock()
 	if c.closing.Load() {
 		return nil, errShutdown

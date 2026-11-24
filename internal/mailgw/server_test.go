@@ -693,3 +693,154 @@ func tlsDial(addr string) (net.Conn, error) {
 }
 
 func bufioReader(r io.Reader) *bufio.Reader { return bufio.NewReader(r) }
+
+// TestTokenRecheckedDuringSession: a token revoked, an owner disabled or
+// demoted after AUTH stops an open session at the next MAIL or DATA.
+func TestTokenRecheckedDuringSession(t *testing.T) {
+	viewer, disabled := domain.RoleViewer, true
+	tests := []struct {
+		name    string
+		token   func(e *env) string
+		change  func(e *env, tok string)
+		atData  bool // change after RCPT, before DATA
+		code    int
+		message string
+	}{
+		{name: "revoked before MAIL", token: func(e *env) string { return e.send }, change: revoke, code: 535},
+		{name: "revoked before DATA", token: func(e *env) string { return e.send }, change: revoke, atData: true, code: 554},
+		{name: "owner disabled before MAIL", token: func(e *env) string { return e.operator }, change: func(e *env, _ string) {
+			if _, err := e.auth.UpdateUser(e.ctx, domain.SystemActor, e.operatorUser.ID, auth.UserChanges{Disabled: &disabled}); err != nil {
+				e.t.Fatal(err)
+			}
+		}, code: 535},
+		{name: "owner demoted to viewer before DATA", token: func(e *env) string { return e.operator }, change: func(e *env, _ string) {
+			if _, err := e.auth.UpdateUser(e.ctx, domain.SystemActor, e.operatorUser.ID, auth.UserChanges{Role: &viewer}); err != nil {
+				e.t.Fatal(err)
+			}
+		}, atData: true, code: 554},
+		{name: "expired before MAIL", token: func(e *env) string {
+			return e.token(e.admin.ID, domain.Scopes{domain.ScopeSMSSend}, t0.Add(time.Minute))
+		}, change: func(e *env, _ string) { e.clk.Advance(2 * time.Minute) }, code: 535},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t)
+			tok := tt.token(e)
+			c := e.dial()
+			c.expect(220)
+			c.login(tok)
+			if tt.atData {
+				c.cmd(250, "MAIL FROM:<a@example.net>")
+				c.cmd(250, "RCPT TO:<%s>", rcpt("600100200"))
+				tt.change(e, tok)
+				c.cmd(354, "DATA")
+				c.raw(mailText("", "hi") + "\r\n.\r\n")
+				if got := c.expect(tt.code); !strings.Contains(got, "no longer valid") {
+					t.Errorf("reply %q", got)
+				}
+			} else {
+				tt.change(e, tok)
+				if got := c.cmd(tt.code, "MAIL FROM:<a@example.net>"); !strings.Contains(got, "no longer valid") {
+					t.Errorf("reply %q", got)
+				}
+			}
+			// The authentication is gone.
+			c.cmd(530, "MAIL FROM:<a@example.net>")
+			if n := len(e.messages()); n != 0 {
+				t.Errorf("%d messages stored", n)
+			}
+		})
+	}
+}
+
+func revoke(e *env, tok string) {
+	e.t.Helper()
+	if err := e.auth.DeleteToken(e.ctx, domain.SystemActor, e.tokenID(tok)); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// TestSessionLimits: per-address connections, time and commands before
+// AUTH, session lifetime and messages per session end with 421.
+func TestSessionLimits(t *testing.T) {
+	tests := []struct {
+		name string
+		opt  envOpt
+		run  func(e *env, c *conn)
+	}{
+		{name: "connections per address", opt: func(o *Options) { o.MaxConnectionsPerIP = 1 }, run: func(e *env, _ *conn) {
+			c2 := e.dial()
+			if got := c2.expect(421); !strings.Contains(got, "your address") {
+				t.Errorf("reply %q", got)
+			}
+		}},
+		{name: "commands before AUTH", run: func(_ *env, c *conn) {
+			for range DefaultMaxPreAuthCommands {
+				c.cmd(250, "NOOP")
+			}
+			if got := c.cmd(421, "RSET"); !strings.Contains(got, "Authentication required") {
+				t.Errorf("reply %q", got)
+			}
+		}},
+		{name: "commands after AUTH are not limited", run: func(e *env, c *conn) {
+			c.login(e.send)
+			for range 2 * DefaultMaxPreAuthCommands {
+				c.cmd(250, "NOOP")
+			}
+		}},
+		{name: "time before AUTH", opt: func(o *Options) { o.PreAuthTimeout = 300 * time.Millisecond }, run: func(_ *env, c *conn) {
+			c.cmd(250, "EHLO x")
+			if got := c.expect(421); !strings.Contains(got, "Authentication required in time") {
+				t.Errorf("reply %q", got)
+			}
+		}},
+		{name: "session lifetime", opt: func(o *Options) { o.MaxSessionDuration = 400 * time.Millisecond }, run: func(e *env, c *conn) {
+			c.login(e.send)
+			if got := c.expect(421); !strings.Contains(got, "Session time limit") {
+				t.Errorf("reply %q", got)
+			}
+		}},
+		{name: "messages per session", opt: func(o *Options) { o.MaxMessagesPerSession = 1 }, run: func(e *env, c *conn) {
+			c.login(e.send)
+			c.cmd(250, "MAIL FROM:<a@example.net>")
+			c.cmd(250, "RCPT TO:<%s>", rcpt("600100200"))
+			c.cmd(354, "DATA")
+			c.raw(mailText("", "one") + "\r\n.\r\n")
+			c.expect(250)
+			if got := c.cmd(421, "MAIL FROM:<a@example.net>"); !strings.Contains(got, "Message limit") {
+				t.Errorf("reply %q", got)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opts []envOpt
+			if tt.opt != nil {
+				opts = append(opts, tt.opt)
+			}
+			e := newEnv(t, opts...)
+			c := e.dial()
+			c.expect(220)
+			tt.run(e, c)
+		})
+	}
+}
+
+// TestImplicitTLSHandshakeDeadline: a client that never starts the TLS
+// handshake is dropped.
+func TestImplicitTLSHandshakeDeadline(t *testing.T) {
+	e := newEnv(t, withTLS(true), func(o *Options) { o.HandshakeTimeout = 200 * time.Millisecond })
+	nc, err := net.DialTimeout("tcp", e.addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = nc.Close() }()
+	_ = nc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	start := time.Now()
+	if _, err := nc.Read(make([]byte, 1)); err == nil || isTimeout(err) {
+		t.Fatalf("Read() = %v, want the server to close the connection", err)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("closed after %s", d)
+	}
+}

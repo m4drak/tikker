@@ -156,8 +156,14 @@ type MailGatewayConfig struct {
 	MaxMessageSize int `yaml:"max_message_size"`
 	// MaxRecipients limits RCPT TO per e-mail.
 	MaxRecipients int `yaml:"max_recipients"`
-	// MaxConnections limits concurrent SMTP sessions.
-	MaxConnections int `yaml:"max_connections"`
+	// MaxConnections limits concurrent SMTP sessions; MaxConnectionsPerIP
+	// limits them per client address (IPv6: per /64).
+	MaxConnections      int `yaml:"max_connections"`
+	MaxConnectionsPerIP int `yaml:"max_connections_per_ip"`
+	// MaxSessionDuration and MaxMessagesPerSession end a session (421);
+	// the client reconnects and authenticates again.
+	MaxSessionDuration    time.Duration `yaml:"max_session_duration"`
+	MaxMessagesPerSession int           `yaml:"max_messages_per_session"`
 	// CommandTimeout bounds waiting for one command; DataTimeout bounds
 	// receiving the message after DATA.
 	CommandTimeout time.Duration `yaml:"command_timeout"`
@@ -256,9 +262,14 @@ func Default() Config {
 			MaxMessageSize: 64 << 10,
 			MaxRecipients:  10,
 			MaxConnections: 20,
-			CommandTimeout: time.Minute,
-			DataTimeout:    5 * time.Minute,
-			Body:           MailBodyText,
+			// Per address, session lifetime and messages per session
+			// (security review of ADR 0004).
+			MaxConnectionsPerIP:   3,
+			MaxSessionDuration:    10 * time.Minute,
+			MaxMessagesPerSession: 100,
+			CommandTimeout:        time.Minute,
+			DataTimeout:           5 * time.Minute,
+			Body:                  MailBodyText,
 		},
 		MailNotify: MailNotifyConfig{
 			SMTPPort: 587,
@@ -346,6 +357,9 @@ func (c Config) entries() []entry {
 		{"mail_gateway.max_message_size", strconv.Itoa(c.MailGateway.MaxMessageSize)},
 		{"mail_gateway.max_recipients", strconv.Itoa(c.MailGateway.MaxRecipients)},
 		{"mail_gateway.max_connections", strconv.Itoa(c.MailGateway.MaxConnections)},
+		{"mail_gateway.max_connections_per_ip", strconv.Itoa(c.MailGateway.MaxConnectionsPerIP)},
+		{"mail_gateway.max_session_duration", strconv.Quote(c.MailGateway.MaxSessionDuration.String())},
+		{"mail_gateway.max_messages_per_session", strconv.Itoa(c.MailGateway.MaxMessagesPerSession)},
 		{"mail_gateway.command_timeout", strconv.Quote(c.MailGateway.CommandTimeout.String())},
 		{"mail_gateway.data_timeout", strconv.Quote(c.MailGateway.DataTimeout.String())},
 		{"mail_gateway.body", strconv.Quote(c.MailGateway.Body)},

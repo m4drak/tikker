@@ -311,7 +311,7 @@ Urządzenia i kanały są przechowywane w bazie (zarządzane z UI/API), opcjonal
 | `TIKKER_API_RATE_LIMIT` | `120` | limit żądań API na token na minutę (§4.5); `0` wyłącza |
 | `TIKKER_PASSWORD_HASH_CONCURRENCY` | `2` | ile hashowań argon2id równolegle (§7); `1` w trybie kontenerowym aby ograniczyć szczyt pamięci (F-05) |
 | `TIKKER_SHUTDOWN_TIMEOUT` | `30s` | czas na łagodne zamknięcie: dokończenie żądań HTTP i bieżących wysyłek (§2.2) |
-| `TIKKER_MAIL_GATEWAY_*` | wyłączone | bramka e-mail → SMS (serwer SMTP, ADR 0004): `ENABLED`, `LISTEN` (`:2525`), `DOMAIN`, `HOSTNAME`, `TLS_MODE` (`starttls`/`tls`/`none` tylko loopback), `TLS_CERT_FILE`, `TLS_KEY_FILE`, `MAX_MESSAGE_SIZE` (`65536`), `MAX_RECIPIENTS` (`10`), `MAX_CONNECTIONS` (`20`), `COMMAND_TIMEOUT` (`1m`), `DATA_TIMEOUT` (`5m`), `BODY` (`text`/`subject_text`); opis: `docs/email-gateway.md` |
+| `TIKKER_MAIL_GATEWAY_*` | wyłączone | bramka e-mail → SMS (serwer SMTP, ADR 0004): `ENABLED`, `LISTEN` (`:2525`), `DOMAIN`, `HOSTNAME`, `TLS_MODE` (`starttls`/`tls`/`none` tylko loopback), `TLS_CERT_FILE`, `TLS_KEY_FILE`, `MAX_MESSAGE_SIZE` (`65536`), `MAX_RECIPIENTS` (`10`), `MAX_CONNECTIONS` (`20`), `MAX_CONNECTIONS_PER_IP` (`3`), `MAX_SESSION_DURATION` (`10m`), `MAX_MESSAGES_PER_SESSION` (`100`), `COMMAND_TIMEOUT` (`1m`), `DATA_TIMEOUT` (`5m`), `BODY` (`text`/`subject_text`); opis: `docs/email-gateway.md` |
 | `TIKKER_MAIL_NOTIFY_*` | wyłączone | SMS przychodzące → e-mail przez przekaźnik SMTP: `ENABLED`, `SMTP_HOST`, `SMTP_PORT` (`587`), `TLS_MODE` (`starttls`/`tls`/`none` tylko loopback), `USERNAME`, `PASSWORD`, `PASSWORD_FILE`, `FROM`, `TO` (po przecinku), `TIMEOUT` (`30s`); opis: `docs/email-gateway.md` |
 
 ---

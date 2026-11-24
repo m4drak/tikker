@@ -87,6 +87,9 @@ var (
 	sMailGwMaxMessageSize = setting{"mail_gateway.max_message_size", envMailGwMaxMessageSize}
 	sMailGwMaxRecipients  = setting{"mail_gateway.max_recipients", envMailGwMaxRecipients}
 	sMailGwMaxConnections = setting{"mail_gateway.max_connections", envMailGwMaxConnections}
+	sMailGwMaxConnsPerIP  = setting{"mail_gateway.max_connections_per_ip", envMailGwMaxConnsPerIP}
+	sMailGwMaxSessionDur  = setting{"mail_gateway.max_session_duration", envMailGwMaxSessionDur}
+	sMailGwMaxMsgsPerSess = setting{"mail_gateway.max_messages_per_session", envMailGwMaxMsgsPerSess}
 	sMailGwCommandTimeout = setting{"mail_gateway.command_timeout", envMailGwCommandTimeout}
 	sMailGwDataTimeout    = setting{"mail_gateway.data_timeout", envMailGwDataTimeout}
 	sMailGwBody           = setting{"mail_gateway.body", envMailGwBody}
@@ -479,6 +482,15 @@ func validateMailGateway(m MailGatewayConfig, global TLSConfig) error {
 	}
 	if m.MaxConnections < 1 || m.MaxConnections > maxMailConnections {
 		add(sMailGwMaxConnections.errorf("must be between 1 and %d, got %d", maxMailConnections, m.MaxConnections))
+	}
+	if m.MaxConnectionsPerIP < 1 || m.MaxConnectionsPerIP > m.MaxConnections {
+		add(sMailGwMaxConnsPerIP.errorf("must be between 1 and max_connections (%d), got %d", m.MaxConnections, m.MaxConnectionsPerIP))
+	}
+	if m.MaxMessagesPerSession < 1 || m.MaxMessagesPerSession > 10000 {
+		add(sMailGwMaxMsgsPerSess.errorf("must be between 1 and 10000, got %d", m.MaxMessagesPerSession))
+	}
+	if m.MaxSessionDuration < time.Minute || m.MaxSessionDuration > 24*time.Hour {
+		add(sMailGwMaxSessionDur.errorf("must be between 1m and 24h, got %s", m.MaxSessionDuration))
 	}
 	for _, d := range []struct {
 		s setting

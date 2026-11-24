@@ -86,8 +86,12 @@ kontrakcie API. Osobna, mała tabela z tym samym schematem dzierżaw jest prosts
   skonfigurowaną domenę.
 - (+) Te same kontrole co w API (token, zakres, rola, limit na token, walidacja numeru, audyt) – jeden model uprawnień.
 - (+) Token nie przechodzi otwartym tekstem poza loopbackiem (TLS wymagany konfiguracją i w czasie działania).
-- (−) Nowy nasłuch TCP: ryzyko DoS (połączenia, wolni klienci). Ograniczone limitem połączeń, timeoutami i rozmiarem;
-  nie ma limitu połączeń na adres IP – przy wystawieniu do Internetu zalecamy firewall lub listę adresów.
+- (−) Nowy nasłuch TCP: ryzyko DoS (połączenia, wolni klienci). Ograniczone limitem połączeń (łącznie i na adres IP),
+  czasem i liczbą komend przed `AUTH`, timeoutami i rozmiarem; przy wystawieniu do Internetu zalecamy mimo to firewall
+  lub listę adresów (wiele adresów może zająć wszystkie sesje).
+- (+) Po przeglądzie bezpieczeństwa (2026-11-24): token jest sprawdzany ponownie przy `MAIL FROM` i przed zapisem
+  wiadomości, a sesja ma limit czasu i liczby e-maili, więc odwołanie tokenu, jego wygaśnięcie, wyłączenie lub
+  degradacja właściciela działają także na otwarte sesje.
 - (−) Token API zapisany w konfiguracji urządzeń wysyłających e-mail (drukarki, NAS) jest łatwiejszy do wycieku niż
   w skrypcie. Zalecenie: osobny token z samym `sms:send`, z datą wygaśnięcia, na każde urządzenie.
 - (−) SMTP nie ma odpowiedzi per adresat po `DATA`: wiadomość do wielu adresatów jest przyjmowana albo odrzucana

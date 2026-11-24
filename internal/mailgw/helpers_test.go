@@ -182,6 +182,9 @@ func newEnv(t *testing.T, opts ...envOpt) *env {
 	o := Options{
 		Domain: testDomain, Insecure: true, Auth: as, Sender: snd, Clock: clk, Logger: log,
 		CommandTimeout: 5 * time.Second, DataTimeout: 5 * time.Second,
+		// Sequential test clients may overlap with a session that is still
+		// closing; the per-address cap has its own test.
+		MaxConnectionsPerIP: 50,
 	}
 	for _, f := range opts {
 		f(&o)

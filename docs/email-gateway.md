@@ -46,13 +46,21 @@ na ten numer. Przykład: `600100200@sms.example.net` → SMS na `+48600100200` (
 | `max_message_size` | `TIKKER_MAIL_GATEWAY_MAX_MESSAGE_SIZE` | `65536` | maks. rozmiar e-maila w bajtach (1 KiB–10 MiB) |
 | `max_recipients` | `TIKKER_MAIL_GATEWAY_MAX_RECIPIENTS` | `10` | maks. adresatów jednego e-maila (1–100) |
 | `max_connections` | `TIKKER_MAIL_GATEWAY_MAX_CONNECTIONS` | `20` | maks. równoczesnych sesji SMTP |
+| `max_connections_per_ip` | `TIKKER_MAIL_GATEWAY_MAX_CONNECTIONS_PER_IP` | `3` | maks. równoczesnych sesji z jednego adresu (IPv6: /64); więcej: `421 4.7.0` |
+| `max_session_duration` | `TIKKER_MAIL_GATEWAY_MAX_SESSION_DURATION` | `10m` | maks. czas jednej sesji (1 min–24 h); potem `421 4.7.0` i rozłączenie |
+| `max_messages_per_session` | `TIKKER_MAIL_GATEWAY_MAX_MESSAGES_PER_SESSION` | `100` | maks. e-maili w jednej sesji; kolejny `MAIL FROM` dostaje `421 4.7.0` |
 | `command_timeout` | `TIKKER_MAIL_GATEWAY_COMMAND_TIMEOUT` | `1m` | czas na jedną komendę |
 | `data_timeout` | `TIKKER_MAIL_GATEWAY_DATA_TIMEOUT` | `5m` | czas na przesłanie treści po `DATA` |
 | `body` | `TIKKER_MAIL_GATEWAY_BODY` | `text` | `text` albo `subject_text` (temat w pierwszej linii) |
 
 Region numerów i numery krótkie: `TIKKER_DEFAULT_REGION`, `TIKKER_ALLOW_SHORT_NUMBERS` (jak w API).
 Stałe limity: linia do 4096 bajtów, 3 nieudane `AUTH` na połączenie, 10 nieudanych `AUTH` na adres IP (IPv6: /64),
-potem jedno co 30 s; 10 błędnych komend kończy sesję.
+potem jedno co 30 s; 10 błędnych komend kończy sesję. Przed udanym `AUTH` sesja ma 30 s i 10 komend (liczą się wszystkie,
+także `NOOP`, `RSET`, `HELP`, `VRFY`); potem `421 4.7.0`. Uzgadnianie TLS (implicit lub `STARTTLS`) ma 10 s.
+
+**Token jest sprawdzany ponownie** przy każdym `MAIL FROM` i tuż przed zapisaniem wiadomości po `DATA`. Usunięty
+lub wygasły token, wyłączony właściciel albo rola bez prawa wysyłki kończą uwierzytelnienie także w otwartej sesji:
+`535 5.7.8` przy `MAIL FROM`, `554 5.7.8` po `DATA` (nic nie jest zapisane); dalsze `MAIL FROM` dostają `530`.
 
 Przykład (`config.yaml`):
 
@@ -164,7 +172,8 @@ musi zgadzać się z certyfikatem.
 - Serwer SMTP nie jest przekaźnikiem: wymaga tokenu z `sms:send` i przyjmuje wyłącznie skonfigurowaną domenę.
 - Token nie przechodzi otwartym tekstem poza loopbackiem; konfiguracja z `tls_mode: none` na adresie innym niż
   loopback jest odrzucana przy starcie.
-- Nie wystawiaj portu SMTP do Internetu bez potrzeby; jeśli musisz – firewall/lista adresów. Limit połączeń jest
-  globalny, nie per adres IP.
-- Odwołanie dostępu = usunięcie tokenu (działa natychmiast, także dla SMTP).
+- Nie wystawiaj portu SMTP do Internetu bez potrzeby; jeśli musisz – firewall/lista adresów. Limity połączeń
+  (łącznie i na adres), czasu i komend przed `AUTH` ograniczają, ale nie wykluczają DoS z wielu adresów.
+- Odwołanie dostępu = usunięcie tokenu: działa natychmiast, także dla otwartych sesji SMTP (sprawdzenie przy
+  `MAIL FROM` i przed zapisem); sesja i tak trwa najwyżej `max_session_duration`.
 - Treść e-maili i SMS-ów nie trafia do logów; numery w logach są maskowane.
