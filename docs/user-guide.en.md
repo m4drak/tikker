@@ -225,6 +225,11 @@ sending and cancelling messages, and changes to webhooks. The audit log is avail
 - **Prometheus metrics**: `GET /metrics`, no token required. The endpoint needs no authentication, so on a public
   address restrict it at the reverse proxy to your monitoring network. See [metrics.md](metrics.md).
 - **`agent` connector**: the router polls tikker over HTTPS, with no VPN and no port forwarding: [agent.md](agent.md).
+- **E-mail ↔ SMS gateway** (optional, off by default): an e-mail to `<number>@<domain>` submitted to the built-in SMTP
+  server becomes an SMS (login: user `token`, password = an API token with the `sms:send` scope; TLS is required unless
+  the server listens on loopback), and incoming SMS messages can be forwarded to your mailbox. Example with `curl`:
+  `curl --url smtp://127.0.0.1:2525 --mail-from a@example.net --mail-rcpt 600100200@sms.local --user "token:$TIKKER_TOKEN" --upload-file mail.txt`.
+  Configuration, Postfix, Thunderbird and `swaks` examples (in Polish): [email-gateway.md](email-gateway.md).
 - **Threat model**: [security/threat-model.md](security/threat-model.md).
 
 ## 10. Backing up `/data`

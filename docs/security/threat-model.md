@@ -21,13 +21,15 @@ SPDX-License-Identifier: GPL-3.0-or-later
 | Dziennik audytu | `audit_log` | utrata rozliczalności |
 
 Granice: (1) Internet/LAN → HTTP tikkera (`/api/v1`, panel); (2) tikker → REST API RouterOS (veth, LAN lub WireGuard);
-(3) proces → `/data` (baza, klucz); (4) RouterOS → kontener (device-mode, mount, envs).
+(3) proces → `/data` (baza, klucz); (4) RouterOS → kontener (device-mode, mount, envs); (5) opcjonalnie: LAN/Internet →
+serwer SMTP tikkera i tikker → przekaźnik SMTP (bramka e-mail↔SMS, §3a, ADR 0004).
 
 ## 2. Podsumowanie
 
 | # | Komponent | S | T | R | I | D | E | Ryzyko rezydualne |
 |---|---|---|---|---|---|---|---|---|
 | 1 | API `/api/v1` | low | low | low | medium | low | low | **low** |
+| 1a | Bramka SMTP i powiadomienia e-mail (opcjonalne, 2026-11-24) | low | low | low | medium | medium | low | **medium** (tylko gdy włączone) |
 | 2 | Panel WWW | medium (kreator) | low | low | low | medium | low | **medium** |
 | 3 | Sekrety | — | low | — | medium | low | medium (F-02) | **medium** |
 | 4 | Kanał do routera | low | low | — | medium | low | medium | **medium** |
@@ -54,6 +56,27 @@ właściciela przed `v0.1.0` (§8).
 At-least-once (ADR 0002): duplikat SMS u odbiorcy jest **akceptowanym** ryzykiem; jest oznaczany `possible_duplicate`.
 Atakujący z `sms:send` nie może wymusić duplikatów inaczej niż wysyłając ponownie (to samo, co legalne użycie).
 Aliasy tokenów: w kodzie nie ma takiej funkcji; jedynym identyfikatorem dla ludzi jest `name` + publiczny prefiks.
+
+## 3a. Bramka e-mail↔SMS (opcjonalna, domyślnie wyłączona; ADR 0004)
+
+Nowe punkty wejścia: nasłuch SMTP (`internal/mailgw`, `mail_gateway.*`) oraz połączenia wychodzące do przekaźnika SMTP
+(`internal/mailnotify`, `mail_notify.*`). Stan kodu: gałąź `feat/email-sms-gateway`.
+
+| STRIDE | Zagrożenie | Środki w kodzie | Ryzyko |
+|---|---|---|---|
+| S | Wysyłka SMS bez uprawnień / open relay | `MAIL FROM` tylko po udanym `AUTH` (`internal/mailgw/session.go`, `mail`), hasło = token API sprawdzany przez `auth.Service.AuthenticateToken` (stały czas, wygaśnięcie, usunięcie, wyłączony właściciel), wymagany zakres `sms:send` przecięty z rolą; `RCPT TO` tylko `<numer>@domena` (`rcpt`); testy `TestNoOpenRelay`, `TestAuth` | low |
+| S | Podsłuch tokenu w SMTP | `AUTH` ogłaszane i przyjmowane dopiero po TLS (`authAllowed`, `538 5.7.11`); `tls_mode: none` odrzucane w konfiguracji poza loopbackiem (`internal/config/validate.go`, `validateMailGateway`) i w czasie działania dla klientów spoza loopbacku | low |
+| S | Zgadywanie tokenu przez SMTP | 3 błędy na połączenie, GCRA 10 + 1/30 s na adres IP (IPv6 /64), pobierane przed weryfikacją (`internal/mailgw/limiter.go`); entropia tokenu ≈190 bit | low |
+| T | Wstrzyknięcie komend po `STARTTLS` (CVE-2011-0411) | dane w buforze po `STARTTLS` zrywają połączenie; stan sesji (EHLO, AUTH) kasowany po TLS (`startTLS`); test `TestProtocolMisc` | low |
+| T | SMTP smuggling / przemycony koniec `DATA` | koniec danych tylko po `CRLF.CRLF`; tikker jest celem, nie przekaźnikiem, więc przemycona treść nie trafia do innego serwera | low |
+| T | Wstrzyknięcie nagłówków w e-mail powiadomienia (nadawca alfanumeryczny z CR/LF) | znaki sterujące usuwane, temat kodowany RFC 2047, adresy z `net/mail` (`internal/mailnotify`, `oneLine`, `compose`); test `TestComposeSanitizesSender` | low |
+| T | Podwójna wysyłka przy ponowieniu klienta SMTP | `Message-ID` jako klucz idempotencji w zakresie tokenu, zapis atomowy wszystkich adresatów (`sending.Service.SendBatch`) | low |
+| R | Kto wysłał e-mailem | `created_by=token:<id>`, audyt `message.send` z `source=smtp`, log `smtp auth succeeded` z `token_id` (bez tokenu) | low |
+| I | Treść SMS-ów (OTP) poza tikkerem | powiadomienia e-mail wysyłają treść do przekaźnika i skrzynki – świadoma decyzja właściciela; TLS do przekaźnika wymagany poza loopbackiem; temat i logi tylko z zamaskowanym numerem; hasło przekaźnika jako `Secret`/plik | medium (F-09-podobne, tylko gdy włączone) |
+| I | Treść i numery w logach | logi bez treści, numery maskowane (`logging.PhoneAttr`), test `TestMailGatewayEndToEnd`/`TestMailNotifyEndToEnd` sprawdza brak tokenu, treści i numeru | low |
+| D | Zalew połączeń / wolni klienci | limit sesji (domyślnie 20), timeout komendy (1 min) i `DATA` (5 min), rozmiar (64 KiB, liczony przy odczycie), linia 4096 B, limit adresatów (10), limit żądań per token wspólny z API; **brak limitu połączeń per IP** – przy wystawieniu do Internetu wymagany firewall | medium (tylko gdy wystawione) |
+| D | Przekaźnik SMTP niedostępny | trwała kolejka `mail_outbox` z backoffem (8 prób, ~4 h), dzierżawa i limit czasu wysyłki | low |
+| E | Token tylko do odczytu wysyła SMS-y | zakres `sms:send` wymagany przy `AUTH` (`535`); rola właściciela sprawdzana przy każdym logowaniu | low |
 
 ## 4. Panel WWW (sesje, htmx, html/template)
 

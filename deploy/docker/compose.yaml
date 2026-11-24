@@ -15,6 +15,9 @@
 #   TIKKER_BIND / TIKKER_PORT  where the HTTP port is published on the host (default 127.0.0.1:8080);
 #                          use 0.0.0.0 only for a trusted LAN without the tls profile
 #   TIKKER_ALLOWED_HTTP_HOSTS  only if a router is reached over http:// (e.g. a lab); the default is https only
+#   Optional e-mail <-> SMS gateway (docs/email-gateway.md, off by default): set TIKKER_MAIL_GATEWAY_* /
+#   TIKKER_MAIL_NOTIFY_* below and uncomment the SMTP port. The SMTP server needs a certificate
+#   (TIKKER_MAIL_GATEWAY_TLS_CERT_FILE/KEY_FILE, e.g. mounted under /data/tls) unless it listens on loopback.
 
 name: tikker
 
@@ -37,10 +40,17 @@ services:
       # that can spoof the client IP that keys the login rate limit and audit.
       TIKKER_TRUSTED_PROXIES: ${TIKKER_TRUSTED_PROXIES:-172.28.0.10}
       TIKKER_DEFAULT_REGION: ${TIKKER_DEFAULT_REGION:-PL}
+      # E-mail -> SMS (SMTP submission with API-token AUTH); off unless set to true.
+      TIKKER_MAIL_GATEWAY_ENABLED: ${TIKKER_MAIL_GATEWAY_ENABLED:-false}
+      TIKKER_MAIL_GATEWAY_DOMAIN: ${TIKKER_MAIL_GATEWAY_DOMAIN:-}
+      TIKKER_MAIL_GATEWAY_TLS_CERT_FILE: ${TIKKER_MAIL_GATEWAY_TLS_CERT_FILE:-}
+      TIKKER_MAIL_GATEWAY_TLS_KEY_FILE: ${TIKKER_MAIL_GATEWAY_TLS_KEY_FILE:-}
     volumes:
       - tikker-data:/data
     ports:
       - "${TIKKER_BIND:-127.0.0.1}:${TIKKER_PORT:-8080}:8080"
+      # Optional SMTP gateway (TIKKER_MAIL_GATEWAY_ENABLED=true); publish it only to a trusted network.
+      # - "${TIKKER_SMTP_BIND:-127.0.0.1}:${TIKKER_SMTP_PORT:-2525}:2525"
     healthcheck:
       # The scratch image has no shell: exec form only (the same command as the image HEALTHCHECK).
       test: ["CMD", "/tikker", "healthcheck"]

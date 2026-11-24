@@ -60,7 +60,7 @@ a bramka SMS-ów jest atrakcyjnym celem (wysyłka na koszt właściciela SIM, sp
   z `messages` w chwili wysyłki, więc nie powstaje druga kopia SMS-a z osobną retencją.
 - Wysyłka przez `net/smtp` z dzierżawą, licznikiem prób jako tokenem i wykładniczym backoffem (jak webhooki).
   Odpowiedzi `5xx` kończą próby od razu, `4xx` i błędy sieci są ponawiane.
-- Temat zawiera zamaskowany numer (`SMS od +48600***200`), treść e-maila – pełny numer, czas, kanał i tekst.
+- Temat zawiera zamaskowany numer (`SMS from +48600***200`), treść e-maila – pełny numer, czas, kanał i tekst.
   Logi zawierają wyłącznie zamaskowane numery.
 
 ### Dlaczego nie istniejąca tabela `webhook_deliveries`
@@ -76,7 +76,7 @@ kontrakcie API. Osobna, mała tabela z tym samym schematem dzierżaw jest prosts
 | **Odpytywanie IMAP** (tikker loguje się do skrzynki i czyta nowe listy) | brak nasłuchu, działa za NAT | biblioteka IMAP (zależność) albo duży własny kod, hasło do skrzynki w tikkerze, opóźnienie odpytywania, trudna idempotencja (flagi `\Seen`), zapis na flash przy każdym cyklu | odrzucone |
 | **Webhooki dostawców poczty** (Mailgun, SendGrid Inbound Parse, Postmark) | dostawca robi SMTP i antyspam | uzależnienie od chmury i jej formatu, treść SMS-ów u strony trzeciej, wymaga publicznego HTTPS, każdy dostawca inny | odrzucone (można dobudować później jako osobny endpoint) |
 | **Zewnętrzny MTA + potok** (Postfix `pipe` → `tikker sms send`) | dojrzały SMTP, filtry antyspam | nie działa w kontenerze na routerze, każdy użytkownik konfiguruje MTA sam; i tak jest możliwy przez CLI (`tikker sms send`) | pozostaje jako opcja w dokumentacji, nie zamiast |
-| **Biblioteka SMTP** (`emersion/go-smtp`, MIT) | kompletna implementacja | nowa zależność i większa powierzchnia (PIPELINING, LMTP, CHUNKING), których nie potrzebujemy; ADR 0003: najpierw stdlib | odrzucone; minimalny serwer (~600 linii) na `bufio`, `net/textproto`, `crypto/tls` |
+| **Biblioteka SMTP** (`emersion/go-smtp`, MIT) | kompletna implementacja | nowa zależność i większa powierzchnia (PIPELINING, LMTP, CHUNKING), których nie potrzebujemy; ADR 0003: najpierw stdlib | odrzucone; minimalny serwer (~1500 linii razem z parserem MIME) na `bufio`, `net/mail`, `mime`, `crypto/tls` |
 | **Uwierzytelnianie po IP / bez AUTH** | prosta konfiguracja urządzeń | otwarty przekaźnik przy błędzie konfiguracji, brak rozliczalności | odrzucone |
 | **Osobne hasła SMTP** | dowolne hasło w urządzeniu | drugi mechanizm uwierzytelniania, zarządzania i audytu | odrzucone: token API z zakresem `sms:send` |
 

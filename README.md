@@ -14,11 +14,13 @@ Weryfikacja zachowania RouterOS na sprzęcie (T00) jest odłożona, więc zało�
 - [Webhooki](docs/webhooks.md) (powiadomienia o SMS-ach przychodzących i statusach wysyłki)
 - [Metryki Prometheus](docs/metrics.md) (`GET /metrics`)
 - [Konektor `agent`](docs/agent.md) (pull za CGNAT, bez VPN)
+- [Bramka e-mail ↔ SMS](docs/email-gateway.md) (opcjonalny serwer SMTP i powiadomienia e-mail)
 - [Model zagrożeń](docs/security/threat-model.md)
 - [Specyfikacja](docs/SPEC.md) i [plan realizacji](docs/PLAN.md)
 - [ADR 0001 – architektura](docs/adr/0001-architektura.md)
 - [ADR 0002 – gwarancje dostarczenia](docs/adr/0002-gwarancje-dostarczenia.md)
 - [ADR 0003 – biblioteki i układ pakietów](docs/adr/0003-biblioteki.md)
+- [ADR 0004 – bramka e-mail↔SMS](docs/adr/0004-bramka-email-sms.md)
 - [Wydawanie wersji i weryfikacja podpisów](docs/releasing.md)
 
 ## Szybki start
