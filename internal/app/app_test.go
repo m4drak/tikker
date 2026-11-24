@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +28,7 @@ import (
 	"github.com/m4drak/tikker/internal/agent/fakeagent"
 	"github.com/m4drak/tikker/internal/auth"
 	"github.com/m4drak/tikker/internal/config"
+	"github.com/m4drak/tikker/internal/connector"
 	"github.com/m4drak/tikker/internal/connector/fake"
 	"github.com/m4drak/tikker/internal/domain"
 	"github.com/m4drak/tikker/internal/secrets"
@@ -675,5 +677,50 @@ func TestAgentEndToEnd(t *testing.T) {
 		if strings.Contains(out, secret) {
 			t.Errorf("logs contain %q", secret)
 		}
+	}
+}
+
+// The agent settings of the configuration reach the agent connector.
+func TestAgentConfigApplied(t *testing.T) {
+	tests := []struct {
+		name      string
+		mod       func(*config.AgentConfig)
+		timeout   time.Duration
+		segments  int
+		encodings []domain.Encoding
+	}{
+		{"defaults", func(*config.AgentConfig) {}, 30 * time.Second, 10, []domain.Encoding{domain.EncodingGSM7, domain.EncodingUCS2}},
+		{"overridden", func(a *config.AgentConfig) {
+			a.SendTimeout, a.StaleAfter, a.MaxSegments, a.UCS2 = 7*time.Second, 20*time.Second, 1, false
+		}, 7 * time.Second, 1, []domain.Encoding{domain.EncodingGSM7}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			tt.mod(&cfg.Agent)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			a, err := New(ctx, Options{Config: cfg, Logger: slog.New(slog.DiscardHandler), PasswordParams: fastParams})
+			if err != nil {
+				t.Fatal(err)
+			}
+			conn, err := a.agentHub.NewConn(ctx, connector.DeviceConfig{
+				DeviceID: "01J0000000000000000000DEV9", Kind: domain.ConnectorAgent,
+				AgentToken: "agent-token-0123456789abcdef0123456789",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			caps := conn.Capabilities()
+			_ = conn.Close()
+			cancel()
+			if err := a.Run(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if caps.SendTimeout != tt.timeout || caps.MaxSegments != tt.segments ||
+				caps.Concatenation != (tt.segments > 1) || !slices.Equal(caps.Encodings, tt.encodings) {
+				t.Errorf("capabilities = %+v", caps)
+			}
+		})
 	}
 }

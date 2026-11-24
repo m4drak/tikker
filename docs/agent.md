@@ -72,9 +72,18 @@ Zwykłe błędne Body są `application/problem+json` (RFC 9457), jak reszta API.
 
 ## Konfiguracja serwera
 
-Konektor `agent` domyślnie: `send_timeout=30s`, `stale_after=90s`,
-`max_segments=10`, `max_concurrent_sends=1`, `max_inbox=500`, `result_ttl=24h`
-(nadpisywalne przez `[agent]` w `tikker.yaml`).
+Sekcja `agent` w `tikker.yaml` (lub zmienne środowiskowe):
+
+| Klucz | Zmienna | Domyślnie | Znaczenie |
+|---|---|---|---|
+| `send_timeout` | `TIKKER_AGENT_SEND_TIMEOUT` | `30s` | limit jednej wysyłki (agent musi odpytać, wysłać i zaraportować); z niego dispatcher liczy dzierżawę |
+| `stale_after` | `TIKKER_AGENT_STALE_AFTER` | `90s` | wiek ostatniego `checkin`, po którym kanał jest `down` |
+| `max_segments` | `TIKKER_AGENT_MAX_SEGMENTS` | `10` | najdłuższa wiadomość (w segmentach); `1` wyłącza łączenie |
+| `ucs2` | `TIKKER_AGENT_UCS2` | `true` | czy wysyłać UCS-2; `false` = tylko GSM-7 |
+
+Pozostałe limity są stałe w kodzie (`internal/agent`, `Options`) i **nie** są
+konfigurowalne: jedna wysyłka naraz na port, do 500 buforowanych SMS-ów
+przychodzących na port, wyniki końcowe pamiętane przez 24 h.
 
 ## Weryfikacja
 
