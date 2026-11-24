@@ -689,10 +689,10 @@ func TestAgentConfigApplied(t *testing.T) {
 		segments  int
 		encodings []domain.Encoding
 	}{
-		{"defaults", func(*config.AgentConfig) {}, 30 * time.Second, 10, []domain.Encoding{domain.EncodingGSM7, domain.EncodingUCS2}},
+		{"defaults", func(*config.AgentConfig) {}, 30 * time.Second, 1, []domain.Encoding{domain.EncodingGSM7}},
 		{"overridden", func(a *config.AgentConfig) {
-			a.SendTimeout, a.StaleAfter, a.MaxSegments, a.UCS2 = 7*time.Second, 20*time.Second, 1, false
-		}, 7 * time.Second, 1, []domain.Encoding{domain.EncodingGSM7}},
+			a.SendTimeout, a.StaleAfter, a.MaxSegments, a.UCS2 = 7*time.Second, 20*time.Second, 10, true
+		}, 7 * time.Second, 10, []domain.Encoding{domain.EncodingGSM7, domain.EncodingUCS2}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

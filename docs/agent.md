@@ -46,9 +46,9 @@ uruchomienie, wymaga RouterOS **7.13+** ze względu na `:serialize`/`:deserializ
 Obecna wersja skryptu obsługuje **tylko jednosegmentowe SMS-y GSM-7**. Komendy
 UCS-2 lub wielosegmentowe (tryb PDU przez at-chat nie jest zaimplementowany)
 zgłasza jako `permanent` z powodem „unsupported” — nigdy jako `accepted`.
-Przy tym skrypcie ustaw więc w tikkerze `agent.ucs2: false` i
-`agent.max_segments: 1` (domyślne `true` i `10` zakładają agenta, który
-obsługuje PDU).
+Dlatego domyślnie tikker ma `agent.ucs2: false` i `agent.max_segments: 1`:
+nie tworzy takich komend, a polskie znaki są transliterowane. Podnoś te
+wartości tylko dla agenta, który obsługuje tryb PDU.
 
 ## Zapytania i deduplikacja
 
@@ -126,8 +126,8 @@ Sekcja `agent` w `tikker.yaml` (lub zmienne środowiskowe):
 |---|---|---|---|
 | `send_timeout` | `TIKKER_AGENT_SEND_TIMEOUT` | `30s` | limit jednej wysyłki (agent musi odpytać, wysłać i zaraportować); z niego dispatcher liczy dzierżawę |
 | `stale_after` | `TIKKER_AGENT_STALE_AFTER` | `90s` | wiek ostatniego `checkin`, po którym kanał jest `down` |
-| `max_segments` | `TIKKER_AGENT_MAX_SEGMENTS` | `10` | najdłuższa wiadomość (w segmentach); `1` wyłącza łączenie |
-| `ucs2` | `TIKKER_AGENT_UCS2` | `true` | czy wysyłać UCS-2; `false` = tylko GSM-7 |
+| `max_segments` | `TIKKER_AGENT_MAX_SEGMENTS` | `1` | najdłuższa wiadomość (w segmentach); `1` wyłącza łączenie |
+| `ucs2` | `TIKKER_AGENT_UCS2` | `false` | czy wysyłać UCS-2; `false` = tylko GSM-7 |
 
 Pozostałe limity są stałe w kodzie (`internal/agent`, `Options`) i **nie** są
 konfigurowalne: jedna wysyłka naraz na port, do 500 buforowanych SMS-ów
