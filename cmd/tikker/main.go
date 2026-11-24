@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -41,6 +42,8 @@ commands:
   token create    create an API token for an existing user and print it once:
                   token create [--user admin] [--name NAME] [--scope S]... [--ttl DURATION]
                   scopes: sms:send, sms:read, admin (default: admin)
+  sms             client for a running tikker (REST API): send, get, list, cancel, inbox;
+                  see "tikker sms --help" (TIKKER_URL, TIKKER_TOKEN or --token-file)
   version         print build version information (also available as --version)
   healthcheck     probe the local /readyz (exit 0 when ready); --live probes /healthz
 
@@ -52,11 +55,17 @@ options:
 `
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(runIO(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
-// run executes the command line in args and returns the process exit code.
+// run executes the command line in args with an empty stdin and returns the
+// process exit code.
 func run(args []string, stdout, stderr io.Writer) int {
+	return runIO(args, strings.NewReader(""), stdout, stderr)
+}
+
+// runIO is run with an explicit stdin (used by `sms send`).
+func runIO(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("tikker", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	configPath := fs.String("config", "", "configuration file")
@@ -116,6 +125,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runServe(ctx, *configPath, stdout, stderr)
 	case "token":
 		return runToken(*configPath, rest[1:], stdout, stderr)
+	case "sms":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return runSMS(ctx, rest[1:], stdin, stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "tikker: unknown command %q\n\n", rest[0])
 		printUsage(stderr)

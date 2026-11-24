@@ -351,5 +351,5 @@ Rozkład: Opus 6, Sonnet 13, Haiku 9. Przeglądy krzyżowe są dodatkowe (§1.2)
 2. Webhooki (przychodzące SMS, zmiany statusu; podpis HMAC, ponowienia) – Sonnet / Gemini Pro. **Zrobione (2026-11-23):** `POST` na `incoming_sms` i `message_status`, HMAC-SHA256 + signed delivery id, trwała kolejka SQLite z retry, API `/api/v1/webhooks`, SSRF-guard; `docs/webhooks.md`.
 3. Metryki Prometheus – Haiku / DeepSeek V4 Flash @ Hermes. **Zrobione (2026-11-23):** `GET /metrics` (text exposition, bez zewnętrznej zależności), metryki kolejki + zdrowia kanałów + startu; `docs/metrics.md`.
 4. PostgreSQL jako alternatywny store – Sonnet / ChatGPT (flagowy).
-5. Bramka e-mail↔SMS, CLI – Sonnet / Gemini Pro.
+5. Bramka e-mail↔SMS, CLI – Sonnet / Gemini Pro. **Stan (2026-11-24):** część CLI zrobiona: `tikker sms send|get|list|cancel|inbox` (`cmd/tikker/sms.go`, klient HTTP w `internal/client`; sekcja 11 przewodnika użytkownika). Bramka e-mail↔SMS nie jest zrobiona.
 6. Raporty doręczenia (jeśli RouterOS/modem udostępni) – Opus / ChatGPT (flagowy).

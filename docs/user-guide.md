@@ -275,6 +275,44 @@ Gdy nie znasz wyniku (timeout, błąd sieci), powtórz żądanie z **tym samym**
 `0` wyłącza limit). Nagłówki `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` pokazują stan; po wyczerpaniu
 przychodzi `429` z `Retry-After`.
 
+### CLI: `tikker sms`
+
+Ten sam plik wykonywalny `tikker` jest też klientem działającej bramki: wysyła i sprawdza SMS-y przez REST API, bez curl.
+Adres i token podajesz zmiennymi środowiskowymi albo opcjami (opcje po nazwie polecenia, np. `tikker sms send --url …`).
+Token **nie** ma opcji z wartością (nie trafi do historii powłoki ani `ps`): `TIKKER_TOKEN` albo `--token-file PATH`.
+Potrzebny zakres: `sms:send` do wysyłki i anulowania, `sms:read` do reszty.
+
+```sh
+export TIKKER_URL=https://sms.example.com        # domyślnie http://127.0.0.1:8080
+export TIKKER_TOKEN='tkr_xxxxxxxx_yyyyyyyy'      # albo --token-file /etc/tikker/token
+
+tikker sms send --to +48600100200 --body "Kod: 482913" --wait 30s   # czeka na sent/failed/cancelled
+echo "Alarm: serwerownia 31 C" | tikker sms send --to 600100200 --tag alarm   # treść ze stdin
+tikker sms send --to 600100200 --body-file msg.txt --idempotency-key "job-42"
+tikker sms get 01M89304ZQ61F6CVNX486V10VC
+tikker sms list --status queued --status sending --limit 20
+tikker sms list --all --output json                  # wszystkie strony jako jeden obiekt {"items":[…],"next_cursor":null}
+tikker sms cancel 01M89304ZQ61F6CVNX486V10VC         # tylko wiadomość w stanie queued
+tikker sms inbox --limit 10                          # przychodzące (GET /messages?direction=in)
+```
+
+| Opcja | Znaczenie |
+|---|---|
+| `--url`, `TIKKER_URL` | adres bramki (bez `/api/v1`; sufiks jest tolerowany) |
+| `--token-file`, `TIKKER_TOKEN` | token API; plik ma pierwszeństwo przed zmienną |
+| `--output text\|json` | `text` (domyślnie) albo odpowiedź API w JSON (z wcięciami) |
+| `--timeout` | limit czasu pojedynczego żądania HTTP (domyślnie 10 s) |
+
+`sms send` przyjmuje `--to` (wymagane), treść z `--body`, `--body-file PATH` (`-` to stdin) albo ze stdin (bez
+terminala), oraz `--channel`, `--tag` (powtarzalna), `--client-ref`, `--expires-at` (RFC 3339), `--idempotency-key`
+i `--wait DURATION`. Bez `--wait` polecenie kończy się po przyjęciu do kolejki i wypisuje wiersze `id<TAB>status<TAB>numer`.
+Z `--wait` odpytuje status do `sent`, `failed` lub `cancelled`. Przy podziale długiej wiadomości (`split`)
+czeka na wszystkie części.
+
+Kody wyjścia: `0` powodzenie; `1` błąd API (komunikat z `type`, `title`, `detail` i `errors[]` problemu RFC 9457 na stderr),
+błąd sieci, wiadomość zakończona jako `failed`/`cancelled` albo upłynięcie `--wait`; `2` błąd wywołania (zła opcja,
+brak tokenu lub `--to`). Skrypt może ponowić `send` z tym samym `--idempotency-key` po błędzie sieci.
+
 ### curl
 
 ```sh

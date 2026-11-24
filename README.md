@@ -87,6 +87,10 @@ curl -s -X POST localhost:8080/api/v1/messages -H "Authorization: Bearer $TOKEN"
 curl -s localhost:8080/api/v1/messages/<id wiadomości> -H "Authorization: Bearer $TOKEN"
 curl -s localhost:18728/_fake/sent
 
+# to samo klientem CLI z tej samej binarki (token ze zmiennej TIKKER_TOKEN lub z --token-file, nie z opcji;
+# --wait czeka na status końcowy), potem bin/tikker sms get|list|inbox|cancel
+TIKKER_URL=http://127.0.0.1:8080 TIKKER_TOKEN=$TOKEN bin/tikker sms send --to +48600100200 --body "Hello from tikker" --wait 30s
+
 # 6. SMS przychodzący (widoczny po kolejnym odpytaniu skrzynki, domyślnie co 15 s)
 curl -s -X POST localhost:18728/_fake/inject -d '{"port":"lte1","from":"+48511222333","text":"Odpowiedź: tak"}'
 curl -s "localhost:8080/api/v1/messages?direction=in" -H "Authorization: Bearer $TOKEN"
