@@ -22,9 +22,9 @@
 #     its modem state;
 #   - outbound: ONLY single-segment GSM-7 commands, sent with /tool sms send.
 #     Anything else (UCS-2, multi-segment, PDU mode) is reported as
-#     "permanent" with reason "unsupported", never as accepted. On the
-#     tikker side set agent.ucs2: false and agent.max_segments: 1 so that
-#     such commands are not produced;
+#     "permanent" with reason "unsupported", never as accepted. The tikker
+#     defaults (agent.ucs2: false, agent.max_segments: 1) do not produce
+#     such commands; do not raise them for this script;
 #   - a result is reported only after /tool sms send returned; a failed send
 #     is reported as "transient" (tikker retries it);
 #   - deduplication by message_id in the global array tikkerDone (survives

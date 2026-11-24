@@ -156,8 +156,10 @@ func Default() Config {
 		Agent: AgentConfig{
 			SendTimeout: 30 * time.Second,
 			StaleAfter:  90 * time.Second,
-			MaxSegments: 10,
-			UCS2:        true,
+			// Single-segment GSM-7: all the shipped deploy/routeros/agent.rsc
+			// can send. An agent with PDU support may raise both.
+			MaxSegments: 1,
+			UCS2:        false,
 		},
 		Retry: RetryConfig{
 			MaxAttempts: rp.MaxAttempts,

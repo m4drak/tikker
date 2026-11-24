@@ -87,7 +87,7 @@ Domyślne wartości:
 |---|---|---|---|
 | `rate_per_min` | 6 | 1–600 | Limit wysyłki kanału. Nadmiar czeka w kolejce; to nie jest błąd `429`. |
 | `max_segments` | 3 | 1–10 | Maksymalna liczba segmentów jednej wiadomości. Działa razem z możliwościami konektora. |
-| `transliterate` | `true` dla `routeros-rest`, `false` dla `agent` (tylko dlatego, że `TIKKER_AGENT_UCS2` domyślnie jest `true`; dla konektora bez UCS-2 serwer ustawia `true`) | – | Zamiana polskich znaków na ASCII przed wysyłką (patrz rozdz. 4). |
+| `transliterate` | `true` dla konektora bez UCS-2 (`routeros-rest` oraz `agent` przy domyślnym `TIKKER_AGENT_UCS2=false`), `false` dla `agent` z włączonym UCS-2 | – | Zamiana polskich znaków na ASCII przed wysyłką (patrz rozdz. 4). |
 | `tags` | puste | do 16 tagów | Routing: żądanie z `tags` trafia na kanał, który ma **wszystkie** te tagi. |
 
 Stan kanału to `ok`, `degraded`, `down` albo `disabled`. Zdrowie sprawdzane jest co 60 s (`TIKKER_HEALTH_INTERVAL`).

@@ -92,7 +92,7 @@ switch. Defaults:
 |---|---|---|---|
 | `rate_per_min` | 6 | 1–600 | Sending rate limit of the channel. Excess messages wait in the queue; this is not a `429` error. |
 | `max_segments` | 3 | 1–10 | Maximum number of segments of one message. Works together with the connector's capabilities. |
-| `transliterate` | `true` for `routeros-rest`, `false` for `agent` (only because `TIKKER_AGENT_UCS2` defaults to `true`; for a connector without UCS-2 the server picks `true`) | – | Replaces Polish letters with ASCII before sending (see section 4). |
+| `transliterate` | `true` for a connector without UCS-2 (`routeros-rest`, and `agent` with the default `TIKKER_AGENT_UCS2=false`), `false` for `agent` with UCS-2 enabled | – | Replaces Polish letters with ASCII before sending (see section 4). |
 | `tags` | empty | up to 16 tags | Routing: a request with `tags` goes to a channel that has **all** of those tags. |
 
 A channel state is `ok`, `degraded`, `down`, or `disabled`. Health is checked every 60 s (`TIKKER_HEALTH_INTERVAL`).
