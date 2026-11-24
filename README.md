@@ -39,7 +39,7 @@ Tikker działa na zwykłym serwerze Linux i łączy się z routerami przez LAN, 
 Docker Compose: `deploy/docker/compose.yaml` (sekcja 2 przewodnika wdrożenia). Binarka i unit systemd: sekcja 3.
 Pełna instrukcja: [Wdrożenie serwerowe (Docker, systemd, WireGuard)](docs/deploy-server.md).
 
-
+Licencja: GNU GPL v3.0 – patrz [LICENSE](LICENSE).
 
 MikroTik i RouterOS są znakami towarowymi MikroTik. Projekt nie jest powiązany z firmą MikroTik.
 

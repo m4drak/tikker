@@ -19,7 +19,7 @@ Konektor `agent` odwraca role:
 ```
 MikroTik RouterOS (za CGNAT, tylko NAT out)          tikker (serwer publiczny)
   deploy/routeros/agent.rsc  ===HTTPS polling===>    GET /agent/v1/...
-      (żółwie cyklicznie)                              (autoryzacja Bearer token)
+      (cyklicznie)                              (autoryzacja Bearer token)
 ```
 
 Skrypt na routerze:
