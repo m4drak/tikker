@@ -61,6 +61,9 @@ var (
 	// ErrNoResult: the agent fetched the command but did not report a
 	// result in time; the SMS may have been sent.
 	ErrNoResult = errors.New("agent did not report a result")
+	// ErrRedelivered: the agent reported a result for a command it had
+	// been handed more than once; the SMS may have been sent twice.
+	ErrRedelivered = errors.New("command was redelivered")
 	// ErrUnknownPort: the agent did not report the channel's port.
 	ErrUnknownPort = errors.New("port not reported by the agent")
 	// ErrInvalidMessage: the message cannot be sent at all.
@@ -112,6 +115,12 @@ type Options struct {
 	// MaxCommands is the most commands one poll returns (default
 	// DefaultMaxCommands).
 	MaxCommands int
+	// RedeliverAfter hides a command handed to the agent from further polls
+	// for this long (default SendTimeout/2), so that overlapping polls do
+	// not both get it. After it, the command is handed out again (lost
+	// response, crashed script); an outcome reported for a command handed
+	// out more than once is flagged as a possible duplicate.
+	RedeliverAfter time.Duration
 }
 
 func (o Options) withDefaults() Options {
@@ -150,6 +159,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.MaxCommands <= 0 {
 		o.MaxCommands = DefaultMaxCommands
+	}
+	if o.RedeliverAfter <= 0 {
+		o.RedeliverAfter = max(o.SendTimeout/2, time.Second)
 	}
 	return o
 }
@@ -313,6 +325,10 @@ type outcome struct {
 	reason    string // sanitized
 	remoteRef string
 	at        time.Time
+	// deliveries is how often the command was handed to the agent before
+	// this outcome was reported (0 for remembered results). More than one
+	// means the agent may have executed it twice.
+	deliveries int
 }
 
 type command struct {
@@ -321,8 +337,9 @@ type command struct {
 	msg        connector.OutboundSMS
 	pdus       []SubmitPDU
 	enqueuedAt time.Time
-	delivered  int // times handed to the agent
-	waiters    int // Sends waiting for the result
+	delivered  int       // times handed to the agent
+	hiddenTill time.Time // not handed out again before (redelivery lease)
+	waiters    int       // Sends waiting for the result
 	done       chan struct{}
 	out        outcome // set before done is closed
 }
@@ -453,12 +470,16 @@ func (s *session) removeLocked(cmd *command) {
 }
 
 // pending returns up to max unresolved commands for ports (all ports when
-// empty) and marks them delivered. Every poll returns them again until the
-// agent reports a result: a lost response or a crashed script is covered,
-// and the agent drops commands it has already executed by message ID.
+// empty) and marks them delivered. A delivered command is hidden from
+// further polls for RedeliverAfter, so overlapping polls do not both get it;
+// then it is handed out again until the agent reports a result (a lost
+// response or a crashed script). The agent drops commands it has already
+// executed by message ID; if it does not, the outcome of a command handed
+// out more than once is flagged as a possible duplicate (see Conn.outcome).
 func (s *session) pending(ports []string, limit int) ([]*command, <-chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.now()
 	var out []*command
 	for _, c := range s.queue {
 		if len(out) >= limit {
@@ -467,7 +488,11 @@ func (s *session) pending(ports []string, limit int) ([]*command, <-chan struct{
 		if len(ports) > 0 && !slices.Contains(ports, c.port) {
 			continue
 		}
+		if now.Before(c.hiddenTill) {
+			continue
+		}
 		c.delivered++
+		c.hiddenTill = now.Add(s.hub.opts.RedeliverAfter)
 		out = append(out, c)
 	}
 	return out, s.wake
@@ -493,6 +518,7 @@ func (s *session) resolve(id domain.ID, out outcome) (known bool) {
 	}
 	s.removeLocked(c)
 	c.out = out
+	c.out.deliveries = c.delivered
 	close(c.done)
 	return true
 }

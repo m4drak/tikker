@@ -42,6 +42,17 @@ Skrypt na routerze:
   `ResultTTL` (24 h): redelivery danej komendy kończy się bez kontaktu z agentem.
 - Brak potwierdzenia w czasie `SendTimeout` → `TransientAmbiguous` (router mógł
   wysłać); komunikat wraca do kolejki jako możliwy duplikat (ADR 0002).
+- Komenda wydana agentowi jest **ukryta** przed kolejnymi zapytaniami przez
+  `SendTimeout/2` (dzierżawa redelivery), więc dwa nakładające się zapytania
+  nie dostaną jej obu. Po tym czasie jest wydawana ponownie (zgubiona
+  odpowiedź, restart skryptu). Wynik komendy wydanej więcej niż raz jest
+  zawsze niejednoznaczny: `accepted` i `transient` → `TransientAmbiguous`,
+  `permanent` → błąd trwały z flagą możliwego duplikatu. Przy `accepted`
+  wiadomość wraca do kolejki z `possible_duplicate`, a ponowienie kończy się
+  od razu jako `sent` z zapamiętanego wyniku (bez kontaktu z agentem).
+  Ograniczenie: jeśli to była ostatnia dozwolona próba (`max_attempts`),
+  wiadomość kończy jako `failed` z `possible_duplicate`, choć wyszła —
+  interfejs konektora nie pozwala zgłosić „wysłano, ale możliwy duplikat”.
 
 ## Health
 

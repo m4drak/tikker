@@ -5,6 +5,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -182,6 +183,80 @@ func TestRedeliveryDeduplicatedByTikker(t *testing.T) {
 	e.pollUntil(1)
 	if r := e.result(done); r.err != nil {
 		t.Fatal(r.err)
+	}
+}
+
+// pollIDs polls once as the raw agent and returns the message IDs received.
+func (e *env) pollIDs() []string {
+	e.t.Helper()
+	res := e.request("POST", Prefix+"/commands", token, "")
+	var resp commandsResponse
+	if err := json.NewDecoder(res.Body).Decode(&resp); err != nil {
+		e.t.Fatal(err)
+	}
+	ids := make([]string, len(resp.Commands))
+	for i, c := range resp.Commands {
+		ids[i] = c.MessageID
+	}
+	return ids
+}
+
+// A command handed to the agent is hidden from overlapping polls for
+// RedeliverAfter; once handed out again, its outcome is a possible
+// duplicate whatever the agent reports (ADR 0002).
+func TestRedeliveryLease(t *testing.T) {
+	tests := []struct {
+		status string
+		kind   domain.ErrorKind
+		// retryOK: a retried Send completes from the remembered result.
+		retryOK bool
+	}{
+		{"accepted", domain.KindTransient, true},
+		{"transient", domain.KindTransient, false},
+		{"permanent", domain.KindPermanent, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			e := newEnv(t, Options{SendTimeout: time.Minute, RedeliverAfter: 10 * time.Second}, fakeagent.Options{})
+			done := e.sendAsync(context.Background(), lte1, msgOf(id1, "Hello"))
+			e.queued(1)
+			if got := e.pollIDs(); !slices.Equal(got, []string{id1}) {
+				t.Fatalf("first poll = %v", got)
+			}
+			if got := e.pollIDs(); len(got) != 0 {
+				t.Fatalf("overlapping poll got %v, want nothing", got)
+			}
+			e.clk.Advance(9 * time.Second)
+			if got := e.pollIDs(); len(got) != 0 {
+				t.Fatalf("poll within the lease got %v", got)
+			}
+			e.clk.Advance(time.Second)
+			if got := e.pollIDs(); !slices.Equal(got, []string{id1}) {
+				t.Fatalf("poll after the lease = %v", got)
+			}
+			e.request("POST", Prefix+"/commands/"+id1+"/result", token, `{"status":"`+tt.status+`"}`)
+			r := e.result(done)
+			wantKind(t, r.err, tt.kind, true, ErrRedelivered)
+			if tt.retryOK {
+				if _, err := e.conn.Send(context.Background(), lte1, msgOf(id1, "Hello")); err != nil {
+					t.Fatalf("retried Send = %v", err)
+				}
+			}
+		})
+	}
+}
+
+// A command delivered once keeps the agent's outcome unchanged.
+func TestSingleDeliveryNotAmbiguous(t *testing.T) {
+	e := newEnv(t, Options{RedeliverAfter: 10 * time.Second}, fakeagent.Options{})
+	done := e.sendAsync(context.Background(), lte1, msgOf(id1, "Hello"))
+	e.queued(1)
+	if got := e.pollIDs(); len(got) != 1 {
+		t.Fatalf("poll = %v", got)
+	}
+	e.request("POST", Prefix+"/commands/"+id1+"/result", token, `{"status":"accepted"}`)
+	if r := e.result(done); r.err != nil {
+		t.Fatalf("Send = %v", r.err)
 	}
 }
 
