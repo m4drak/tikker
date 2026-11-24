@@ -77,9 +77,9 @@ func smsEnv(t *testing.T, url string) string {
 	t.Setenv("TIKKER_URL", url)
 	t.Setenv("TIKKER_TOKEN", smsToken)
 	old := pollInterval
-	oldMin, oldMax := retryBackoffMin, retryBackoffMax
-	pollInterval, retryBackoffMin, retryBackoffMax = 5*time.Millisecond, 5*time.Millisecond, 20*time.Millisecond
-	t.Cleanup(func() { pollInterval, retryBackoffMin, retryBackoffMax = old, oldMin, oldMax })
+	oldMin, oldMax := retryBackoffInitial, retryBackoffMax
+	pollInterval, retryBackoffInitial, retryBackoffMax = 5*time.Millisecond, 5*time.Millisecond, 20*time.Millisecond
+	t.Cleanup(func() { pollInterval, retryBackoffInitial, retryBackoffMax = old, oldMin, oldMax })
 	return t.TempDir()
 }
 
