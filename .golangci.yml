@@ -4,7 +4,7 @@ version: "2"
 
 run:
   timeout: 5m
-  go: "1.25"
+  go: "1.26"
 
 linters:
   default: none
@@ -35,6 +35,11 @@ linters:
       - path: _test\.go
         linters:
           - gosec
+      # Package names (api, metrics, version) are established by ADR-0003; revive's
+      # newer package-name checks (golangci-lint >= v2.9) would force renames.
+      - linters:
+          - revive
+        text: "var-naming: avoid (meaningless package names|package names that conflict)"
 
 formatters:
   enable:

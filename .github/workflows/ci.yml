@@ -29,12 +29,12 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          # golangci-lint v2.5.0 panics on newer Go releases; lint with the go.mod minimum.
+          # golangci-lint must be built with at least the Go version in go.mod (v2.9+ for Go 1.26).
           go-version-file: go.mod
           cache: true
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.5.0
+          version: v2.9.0
 
   test:
     # "minimum" = version declared in go.mod (compatibility); "stable" = toolchain used for releases.
