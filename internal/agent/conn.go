@@ -255,7 +255,12 @@ func (c *Conn) DeleteInbox(_ context.Context, ch connector.ChannelRef, remoteIDs
 		return c.errClosed(opDeleteInbox)
 	}
 	if err := c.s.markDeleted(ch.Port, remoteIDs); err != nil {
-		return c.errClosed(opDeleteInbox)
+		if errors.Is(err, ErrClosed) {
+			return c.errClosed(opDeleteInbox)
+		}
+		c.log.Warn("inbox deletions pending on the agent are at their limit; entries stay buffered",
+			slog.String("port", ch.Port), slog.Any("error", err))
+		return domain.Transient(opDeleteInbox, err)
 	}
 	return nil
 }

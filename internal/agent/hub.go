@@ -47,8 +47,9 @@ const (
 
 	// maxResults bounds the remembered results per device.
 	maxResults = 10000
-	// maxPendingDeletes bounds the inbox deletions waiting for the agent.
-	maxPendingDeletes = 10000
+	// defaultMaxPendingDeletes bounds the inbox deletions waiting for the
+	// agent.
+	defaultMaxPendingDeletes = 10000
 )
 
 // Sentinel causes wrapped into connector errors; test with errors.Is.
@@ -70,6 +71,9 @@ var (
 	ErrUnknownPort = errors.New("port not reported by the agent")
 	// ErrInvalidMessage: the message cannot be sent at all.
 	ErrInvalidMessage = errors.New("invalid message")
+	// ErrTooManyDeletes: too many stored inbox entries wait for the agent
+	// to delete them; the rest stays buffered until it catches up.
+	ErrTooManyDeletes = errors.New("too many inbox deletions pending")
 	// ErrClosed: the connector was closed.
 	ErrClosed = errors.New("connector closed")
 )
@@ -123,6 +127,10 @@ type Options struct {
 	// response, crashed script); an outcome reported for a command handed
 	// out more than once is flagged as a possible duplicate.
 	RedeliverAfter time.Duration
+
+	// maxPendingDeletes bounds the inbox deletions waiting for the agent
+	// (default defaultMaxPendingDeletes; settable by tests).
+	maxPendingDeletes int
 }
 
 func (o Options) withDefaults() Options {
@@ -161,6 +169,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.MaxCommands <= 0 {
 		o.MaxCommands = DefaultMaxCommands
+	}
+	if o.maxPendingDeletes <= 0 {
+		o.maxPendingDeletes = defaultMaxPendingDeletes
 	}
 	if o.RedeliverAfter <= 0 {
 		o.RedeliverAfter = max(o.SendTimeout/2, time.Second)
@@ -643,7 +654,9 @@ func (s *session) fetch(port string) ([]connector.InboundSMS, error) {
 
 // markDeleted moves stored entries, identified by the handles FetchInbox
 // returned, to the deletions the agent still has to perform on the router.
-// Unknown handles are ignored.
+// Unknown handles are ignored. When the pending deletions are at their cap,
+// the remaining entries stay buffered and ErrTooManyDeletes is returned:
+// dropping them unmarked would let the next push add them again.
 func (s *session) markDeleted(port string, handles []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -652,16 +665,19 @@ func (s *session) markDeleted(port string, handles []string) error {
 	}
 	now := s.now()
 	list := s.inbox[port]
+	full := false
 	for _, h := range handles {
 		i := slices.IndexFunc(list, func(x inboxEntry) bool { return x.handle == h })
 		if i < 0 {
 			continue
 		}
 		e := list[i]
-		if len(s.deletes) < maxPendingDeletes {
-			s.deletes[deleteKey{inboxKey{port: port, remoteID: e.sms.RemoteID}, e.fp}] = deleteMark{
-				phone: e.sms.Phone, timestamp: e.sms.RawTimestamp, at: now,
-			}
+		if len(s.deletes) >= s.hub.opts.maxPendingDeletes {
+			full = true
+			break
+		}
+		s.deletes[deleteKey{inboxKey{port: port, remoteID: e.sms.RemoteID}, e.fp}] = deleteMark{
+			phone: e.sms.Phone, timestamp: e.sms.RawTimestamp, at: now,
 		}
 		list = slices.Delete(list, i, i+1)
 	}
@@ -669,6 +685,9 @@ func (s *session) markDeleted(port string, handles []string) error {
 		delete(s.inbox, port)
 	} else {
 		s.inbox[port] = list
+	}
+	if full {
+		return fmt.Errorf("%w (%d)", ErrTooManyDeletes, len(s.deletes))
 	}
 	return nil
 }

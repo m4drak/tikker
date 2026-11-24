@@ -589,6 +589,35 @@ func TestInboxAckMatchesContent(t *testing.T) {
 	}
 }
 
+// When the pending deletions are at their cap, DeleteInbox keeps the
+// entries it cannot mark (and fails transiently) instead of dropping them
+// unmarked, which would make the next push add them again.
+func TestInboxPendingDeletesCap(t *testing.T) {
+	e := newEnv(t, Options{maxPendingDeletes: 1}, fakeagent.Options{})
+	ctx := context.Background()
+	e.request("POST", Prefix+"/inbox", token, `{"messages":[
+		{"port":"lte1","remote_id":"*1","phone":"+48511222333","body":"a"},
+		{"port":"lte1","remote_id":"*2","phone":"+48511222333","body":"b"}]}`)
+	got, _ := e.conn.FetchInbox(ctx, lte1)
+	if len(got) != 2 {
+		t.Fatalf("FetchInbox = %+v", got)
+	}
+	err := e.conn.DeleteInbox(ctx, lte1, []string{got[0].RemoteID, got[1].RemoteID})
+	wantKind(t, err, domain.KindTransient, false, ErrTooManyDeletes)
+	left, _ := e.conn.FetchInbox(ctx, lte1)
+	if len(left) != 1 || left[0].Body != "b" {
+		t.Fatalf("after capped delete: %+v, want b kept", left)
+	}
+	if n := e.conn.s.snapshot().pendingDeletes; n != 1 {
+		t.Fatalf("pending deletes = %d", n)
+	}
+	// Re-pushing does not duplicate b.
+	e.request("POST", Prefix+"/inbox", token, `{"messages":[{"port":"lte1","remote_id":"*2","phone":"+48511222333","body":"b"}]}`)
+	if left, _ := e.conn.FetchInbox(ctx, lte1); len(left) != 1 {
+		t.Fatalf("after re-push: %+v", left)
+	}
+}
+
 func TestInboxLimit(t *testing.T) {
 	e := newEnv(t, Options{MaxInbox: 2}, fakeagent.Options{})
 	for i := range 3 {
