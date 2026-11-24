@@ -137,7 +137,7 @@ func TestMailNotifyEndToEnd(t *testing.T) {
 	cfg.MailNotify = config.MailNotifyConfig{
 		Enabled: true, SMTPHost: "127.0.0.1", SMTPPort: sink.ln.Addr().(*net.TCPAddr).Port, TLSMode: config.MailTLSNone,
 		Username: "tikker", PasswordFile: pwFile, From: "sms@example.net", To: []string{"owner@example.net"},
-		Timeout: 5 * time.Second,
+		Timeout: 5 * time.Second, MaxAge: 72 * time.Hour, MaxPerHour: 60,
 	}
 	if err := config.Validate(cfg); err != nil {
 		t.Fatal(err)
@@ -190,6 +190,18 @@ func TestMailNotifyEndToEnd(t *testing.T) {
 	if len(mails) != 1 || !strings.Contains(mails[0], "From: +48511222333") || !strings.Contains(mails[0], "Kod logowania: 4711") {
 		t.Fatalf("mails = %q", mails)
 	}
+	// The outcome is visible in /metrics.
+	waitFor(t, "mail metrics", func() bool {
+		res, err := http.Get("http://" + a.Addr().String() + "/metrics")
+		if err != nil {
+			return false
+		}
+		body, _ := io.ReadAll(res.Body)
+		_ = res.Body.Close()
+		return strings.Contains(string(body), "tikker_mail_notify_sent_total 1") &&
+			strings.Contains(string(body), "tikker_mail_notify_retried_total 1") &&
+			strings.Contains(string(body), "tikker_mail_notify_pending 0")
+	})
 
 	cancel()
 	select {
@@ -214,14 +226,15 @@ func TestMailNotifyEndToEnd(t *testing.T) {
 }
 
 func TestNewMailNotifierErrors(t *testing.T) {
-	ok := config.MailNotifyConfig{SMTPHost: "127.0.0.1", SMTPPort: 25, TLSMode: config.MailTLSNone, From: "a@example.net", To: []string{"b@example.net"}}
+	ok := config.Config{MailNotify: config.MailNotifyConfig{SMTPHost: "127.0.0.1", SMTPPort: 25, TLSMode: config.MailTLSNone, From: "a@example.net", To: []string{"b@example.net"}}}
 	tests := []struct {
 		name string
-		mod  func(*config.MailNotifyConfig)
+		mod  func(*config.Config)
 		want string
 	}{
-		{"missing password file", func(c *config.MailNotifyConfig) { c.PasswordFile = "/nonexistent/pw" }, "password file"},
-		{"invalid relay", func(c *config.MailNotifyConfig) { c.From = "nope" }, "mail notifications"},
+		{"missing password file", func(c *config.Config) { c.MailNotify.PasswordFile = "/nonexistent/pw" }, "password file"},
+		{"invalid relay", func(c *config.Config) { c.MailNotify.From = "nope" }, "mail notifications"},
+		{"negative cap", func(c *config.Config) { c.MailNotify.MaxPerHour = -1 }, "MaxPerHour"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

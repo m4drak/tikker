@@ -59,7 +59,8 @@ a bramka SMS-ów jest atrakcyjnym celem (wysyłka na koszt właściciela SIM, sp
   SMS-a (wzorzec webhooków, ADR 0002: at-least-once). Wiersz przechowuje tylko ID wiadomości: treść jest czytana
   z `messages` w chwili wysyłki, więc nie powstaje druga kopia SMS-a z osobną retencją.
 - Wysyłka przez `net/smtp` z dzierżawą, licznikiem prób jako tokenem i wykładniczym backoffem (jak webhooki).
-  Odpowiedzi `5xx` kończą próby od razu, `4xx` i błędy sieci są ponawiane.
+  Odpowiedzi `5xx` kończą próby od razu, `4xx` i błędy sieci są ponawiane (co najwyżej co godzinę) do usunięcia treści
+  przez retencję albo do `max_age` (72 h). Limit `max_per_hour` (60) odkłada nadmiar e-maili, nie odrzuca go.
 - Temat zawiera zamaskowany numer (`SMS from +48600***200`), treść e-maila – pełny numer, czas, kanał i tekst.
   Logi zawierają wyłącznie zamaskowane numery.
 

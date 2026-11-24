@@ -130,12 +130,19 @@ Każdy zapisany SMS przychodzący jest wysyłany e-mailem na skonfigurowane adre
 (np. konto pocztowe u dostawcy, Postfix w LAN).
 
 - Powiadomienie jest zapisywane w bazie w tej samej transakcji co SMS (tabela `mail_outbox`), więc nie ginie przy
-  restarcie. Odpowiedź `4xx` przekaźnika i błędy sieci: ponowienia (30 s, 2 min, 8 min, 32 min, potem co godzinę;
-  8 prób). `5xx` (np. zły login, odrzucony adresat): koniec prób, błąd w logu.
+  restarcie. Odpowiedź `4xx` przekaźnika i błędy sieci: ponowienia (30 s, 2 min, 8 min, 32 min, potem co godzinę)
+  bez limitu liczby prób – do usunięcia treści SMS-a przez retencję albo do `max_age` (domyślnie 72 h) od odbioru SMS-a.
+  `5xx` (np. zły login, odrzucony adresat): koniec prób od razu. Każda nieudana próba to wpis `Warn` w logu,
+  rezygnacja – `Error`; stan widać też w `/metrics` (`tikker_mail_notify_pending`, `..._failed_total`,
+  `..._retried_total`, `..._sent_total`, `..._deferred_total`, zob. [metrics.md](metrics.md)).
+- **Limit godzinowy** (`max_per_hour`, domyślnie 60, `0` = bez limitu): po jego wyczerpaniu kolejne powiadomienia
+  czekają do następnej godziny (nie są odrzucane); raz na godzinę w logu pojawia się ostrzeżenie. Chroni skrzynkę
+  i limity przekaźnika przy zalewie SMS-ów (np. spam na numer karty SIM).
 - Temat: `SMS from +48600***200` (zamaskowany numer – temat bywa widoczny na ekranie blokady). Treść e-maila: pełny
   numer nadawcy, czas odbioru (UTC), kanał, ID wiadomości i tekst SMS-a. Logi zawierają tylko zamaskowane numery.
 - Treść jest czytana z bazy w chwili wysyłki: po upływie retencji (`TIKKER_RETENTION`) niewysłane powiadomienie
-  kończy się błędem zamiast wysyłać pustą wiadomość.
+  kończy się błędem zamiast wysyłać pustą wiadomość. SMS, który naprawdę nie miał treści (wiadomość młodsza niż
+  retencja), jest przesyłany z dopiskiem `(empty message)`.
 - **Uwaga:** e-mail przenosi treść SMS-ów (także kody jednorazowe OTP/2FA) do przekaźnika i skrzynki. Włączaj funkcję
   świadomie i tylko z TLS do przekaźnika.
 
@@ -151,6 +158,8 @@ Każdy zapisany SMS przychodzący jest wysyłany e-mailem na skonfigurowane adre
 | `from` | `TIKKER_MAIL_NOTIFY_FROM` | – | **wymagany**: nadawca, np. `tikker <sms@example.net>` |
 | `to` | `TIKKER_MAIL_NOTIFY_TO` | – | **wymagani**: adresaci, po przecinku (maks. 20) |
 | `timeout` | `TIKKER_MAIL_NOTIFY_TIMEOUT` | `30s` | limit jednej wysyłki (1 s–10 min) |
+| `max_age` | `TIKKER_MAIL_NOTIFY_MAX_AGE` | `72h` | jak długo ponawiać błędy chwilowe, licząc od odbioru SMS-a (1 h–720 h) |
+| `max_per_hour` | `TIKKER_MAIL_NOTIFY_MAX_PER_HOUR` | `60` | maks. e-maili (prób) na godzinę; nadmiar czeka; `0` = bez limitu |
 
 ```yaml
 mail_notify:

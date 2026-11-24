@@ -153,11 +153,12 @@ func TestValidate(t *testing.T) {
 				m.SMTPHost, m.SMTPPort, m.TLSMode = "bad host", 0, "ssl"
 				m.PasswordFile = "/nonexistent/pw"
 				m.From, m.To, m.Timeout = "not an address", []string{"ok@example.net", "nope"}, 0
+				m.MaxAge, m.MaxPerHour = time.Minute, -1
 			})
 		}, wantErr: []string{
 			"mail_notify.smtp_host (TIKKER_MAIL_NOTIFY_SMTP_HOST)", "mail_notify.smtp_port", "must be starttls, tls or none",
 			"not both", "mail_notify.password_file", "not accessible", "mail_notify.from", `"nope" is not an e-mail address`,
-			"mail_notify.timeout",
+			"mail_notify.timeout", "mail_notify.max_age (TIKKER_MAIL_NOTIFY_MAX_AGE)", "mail_notify.max_per_hour",
 		}},
 		{name: "mail notify missing values", mutate: func(c *Config) {
 			c.MailNotify = mailNotify(func(m *MailNotifyConfig) { m.SMTPHost, m.From, m.To, m.Password = "", "", nil, "" })

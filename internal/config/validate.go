@@ -103,6 +103,8 @@ var (
 	sMailNotifyFrom         = setting{"mail_notify.from", envMailNotifyFrom}
 	sMailNotifyTo           = setting{"mail_notify.to", envMailNotifyTo}
 	sMailNotifyTimeout      = setting{"mail_notify.timeout", envMailNotifyTimeout}
+	sMailNotifyMaxAge       = setting{"mail_notify.max_age", envMailNotifyMaxAge}
+	sMailNotifyMaxPerHour   = setting{"mail_notify.max_per_hour", envMailNotifyMaxPerHour}
 )
 
 var regionPattern = regexp.MustCompile(`^[A-Z]{2}$`)
@@ -575,6 +577,12 @@ func validateMailNotify(m MailNotifyConfig) error {
 	}
 	if m.Timeout < time.Second || m.Timeout > 10*time.Minute {
 		add(sMailNotifyTimeout.errorf("must be between 1s and 10m, got %s", m.Timeout))
+	}
+	if m.MaxAge < time.Hour || m.MaxAge > 30*24*time.Hour {
+		add(sMailNotifyMaxAge.errorf("must be between 1h and 720h, got %s", m.MaxAge))
+	}
+	if m.MaxPerHour < 0 || m.MaxPerHour > 10000 {
+		add(sMailNotifyMaxPerHour.errorf("must be 0 (no cap) or up to 10000, got %d", m.MaxPerHour))
 	}
 	return errors.Join(errs...)
 }

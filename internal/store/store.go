@@ -526,6 +526,8 @@ type MailOutboxRepo interface {
 	Reschedule(ctx context.Context, l domain.DeliveryLease, at, next time.Time, lastErr string) error
 	// Get returns one notification. Errors: domain.ErrNotFound.
 	Get(ctx context.Context, id domain.ID) (domain.MailNotification, error)
+	// CountPending returns the number of pending notifications.
+	CountPending(ctx context.Context) (int, error)
 	// Purge deletes delivered and failed notifications last updated before
 	// cutoff and returns their number.
 	Purge(ctx context.Context, cutoff time.Time) (int, error)

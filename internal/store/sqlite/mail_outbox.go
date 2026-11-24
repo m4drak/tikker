@@ -152,6 +152,15 @@ func (r *mailOutboxRepo) Get(ctx context.Context, id domain.ID) (domain.MailNoti
 	return n, nil
 }
 
+// CountPending implements [store.MailOutboxRepo].
+func (r *mailOutboxRepo) CountPending(ctx context.Context) (int, error) {
+	var n int
+	if err := r.h.r.QueryRowContext(ctx, `SELECT COUNT(*) FROM mail_outbox WHERE status = 'pending'`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("sqlite: count pending mail: %w", err)
+	}
+	return n, nil
+}
+
 // Purge implements [store.MailOutboxRepo].
 func (r *mailOutboxRepo) Purge(ctx context.Context, cutoff time.Time) (int, error) {
 	var n int64

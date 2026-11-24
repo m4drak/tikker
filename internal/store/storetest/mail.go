@@ -28,6 +28,9 @@ func testMailOutbox(t *testing.T, f Factory) {
 	e.ok(e.s.WithTx(e.ctx, func(tx store.Repos) error { return tx.MailOutbox().Add(e.ctx, a) }))
 	e.ok(repo.Add(e.ctx, b))
 	e.is(repo.Add(e.ctx, a), domain.ErrConflict)
+	if n, err := repo.CountPending(e.ctx); err != nil || n != 2 {
+		t.Fatalf("CountPending = %d %v", n, err)
+	}
 
 	at, ok, err := repo.NextDue(e.ctx)
 	e.ok(err)
@@ -75,6 +78,9 @@ func testMailOutbox(t *testing.T, f Factory) {
 	}
 	if _, ok, _ := repo.NextDue(e.ctx); ok {
 		t.Error("NextDue with nothing pending")
+	}
+	if n, _ := repo.CountPending(e.ctx); n != 0 {
+		t.Errorf("CountPending = %d, want 0", n)
 	}
 
 	_, err = repo.Get(e.ctx, e.id())

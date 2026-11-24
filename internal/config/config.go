@@ -113,6 +113,12 @@ type MailNotifyConfig struct {
 	To   []string `yaml:"to"`
 	// Timeout bounds one delivery to the relay.
 	Timeout time.Duration `yaml:"timeout"`
+	// MaxAge is how long transient failures (network, 4xx) are retried,
+	// counted from the arrival of the SMS.
+	MaxAge time.Duration `yaml:"max_age"`
+	// MaxPerHour caps the e-mails per hour; notifications over the cap are
+	// deferred, not dropped. 0: no cap.
+	MaxPerHour int `yaml:"max_per_hour"`
 }
 
 // Mail gateway TLS modes.
@@ -272,9 +278,11 @@ func Default() Config {
 			Body:                  MailBodyText,
 		},
 		MailNotify: MailNotifyConfig{
-			SMTPPort: 587,
-			TLSMode:  MailTLSStartTLS,
-			Timeout:  30 * time.Second,
+			SMTPPort:   587,
+			TLSMode:    MailTLSStartTLS,
+			Timeout:    30 * time.Second,
+			MaxAge:     72 * time.Hour,
+			MaxPerHour: 60,
 		},
 		Retry: RetryConfig{
 			MaxAttempts: rp.MaxAttempts,
@@ -373,6 +381,8 @@ func (c Config) entries() []entry {
 		{"mail_notify.from", strconv.Quote(c.MailNotify.From)},
 		{"mail_notify.to", quoteList(c.MailNotify.To)},
 		{"mail_notify.timeout", strconv.Quote(c.MailNotify.Timeout.String())},
+		{"mail_notify.max_age", strconv.Quote(c.MailNotify.MaxAge.String())},
+		{"mail_notify.max_per_hour", strconv.Itoa(c.MailNotify.MaxPerHour)},
 	}
 }
 

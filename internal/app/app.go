@@ -379,7 +379,7 @@ func (a *App) initPipeline(creds *secrets.DeviceCredentials, reg *connector.Regi
 	// to the e-mail notifications, in the transaction that stores them.
 	var events inbox.MessagePublisher = a.webhookPub
 	if cfg.MailNotify.Enabled {
-		if a.mailNotify, err = newMailNotifier(cfg.MailNotify, a.store, a.clk, a.log, mailRetry); err != nil {
+		if a.mailNotify, err = newMailNotifier(cfg, a.store, a.clk, a.log, mailRetry); err != nil {
 			return err
 		}
 		events = publishers{a.webhookPub, mailnotify.NewPublisher(a.clk, nil, a.mailNotify)}
@@ -427,7 +427,8 @@ func (a *App) initPipeline(creds *secrets.DeviceCredentials, reg *connector.Regi
 // newMailNotifier builds the e-mail notifications of inbound SMS
 // (ADR 0004). The relay password comes from the configuration or a file;
 // it is never logged.
-func newMailNotifier(c config.MailNotifyConfig, st *sqlite.Store, clk clock.Clock, log *slog.Logger, retry domain.RetryPolicy) (*mailnotify.Sender, error) {
+func newMailNotifier(cfg config.Config, st *sqlite.Store, clk clock.Clock, log *slog.Logger, retry domain.RetryPolicy) (*mailnotify.Sender, error) {
+	c := cfg.MailNotify
 	password := string(c.Password)
 	if c.PasswordFile != "" {
 		b, err := os.ReadFile(c.PasswordFile)
@@ -438,6 +439,7 @@ func newMailNotifier(c config.MailNotifyConfig, st *sqlite.Store, clk clock.Cloc
 	}
 	s, err := mailnotify.NewSender(mailnotify.Options{
 		Store: st, Clock: clk, Logger: log, Timeout: c.Timeout, Retry: retry,
+		MaxAge: c.MaxAge, MaxPerHour: c.MaxPerHour, Retention: cfg.Retention,
 		Relay: mailnotify.Relay{
 			Host: c.SMTPHost, Port: c.SMTPPort, TLSMode: c.TLSMode,
 			Username: c.Username, Password: password, From: c.From, To: c.To,
@@ -540,7 +542,10 @@ func (a *App) handler(creds *secrets.DeviceCredentials, reg *connector.Registry,
 	mux.Handle("/readyz", routes)
 	// Prometheus metrics (backlog §5 #3); unauthenticated, read-only.
 	m, err := metrics.New(metrics.Options{
-		Source: metricsSource{stats: a.disp.Stats, snap: a.health.Snapshot, started: func() int64 { return a.startedAt.Unix() }},
+		Source: metricsSource{
+			stats: a.disp.Stats, snap: a.health.Snapshot, started: func() int64 { return a.startedAt.Unix() },
+			mail: a.mailNotify,
+		},
 		Logger: a.log, Namespace: "tikker",
 	})
 	if err != nil {
@@ -610,10 +615,23 @@ type metricsSource struct {
 	stats   func() queue.Stats
 	snap    func() []health.ChannelStatus
 	started func() int64
+	mail    *mailnotify.Sender // nil: notifications disabled
 }
 
 func (s metricsSource) Snapshot() (metrics.Snapshot, error) {
-	return metrics.Snapshot{Queue: s.stats(), Health: s.snap(), Started: s.started()}, nil
+	snap := metrics.Snapshot{Queue: s.stats(), Health: s.snap(), Started: s.started()}
+	if s.mail != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		// A failed count leaves the mail metrics out rather than failing
+		// the whole scrape.
+		if st, err := s.mail.Stats(ctx); err == nil {
+			snap.MailNotify = &metrics.MailNotifyStats{
+				Pending: st.Pending, Sent: st.Sent, Failed: st.Failed, Retried: st.Retried, Deferred: st.Deferred,
+			}
+		}
+	}
+	return snap, nil
 }
 
 // agentOptions maps the [agent] settings onto the agent hub. Settings the

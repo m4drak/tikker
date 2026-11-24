@@ -9,8 +9,10 @@
 // sends one e-mail through the configured SMTP relay (net/smtp, STARTTLS or
 // implicit TLS; plain text only to a loopback relay) and records the
 // outcome. Delivery is at-least-once like webhooks (ADR 0002): 4xx answers
-// and network errors are retried with exponential backoff, 5xx answers end
-// the notification.
+// and network errors are retried with exponential backoff capped at one hour
+// for as long as the message text exists and the notification is younger
+// than MaxAge; 5xx answers end the notification. An optional hourly cap
+// (MaxPerHour) defers notifications instead of dropping them.
 //
 // The e-mail carries the full sender number and the text (the owner's own
 // mailbox); the subject and the logs carry the masked number only.
@@ -32,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -50,17 +53,22 @@ const (
 
 // Defaults of [Options].
 const (
-	DefaultTimeout     = 30 * time.Second
-	DefaultMaxIdle     = 30 * time.Second
-	DefaultPurgeAfter  = 7 * 24 * time.Hour
-	DefaultPurgeEvery  = time.Hour
+	DefaultTimeout    = 30 * time.Second
+	DefaultMaxIdle    = 30 * time.Second
+	DefaultPurgeAfter = 7 * 24 * time.Hour
+	DefaultPurgeEvery = time.Hour
+	// DefaultMaxAge is how long transient failures are retried.
+	DefaultMaxAge = 72 * time.Hour
+	// rateWindow is the window of MaxPerHour.
+	rateWindow         = time.Hour
 	defaultLeaseMargin = 30 * time.Second
 	finalizeTimeout    = 10 * time.Second
 	maxLastErrorLen    = 500
 )
 
-// DefaultRetryPolicy is the retry schedule of notifications: 8 attempts
-// over about 4 hours (30 s, 2 m, 8 m, 32 m, then hourly).
+// DefaultRetryPolicy is the backoff of notifications: 30 s, 2 m, 8 m, 32 m,
+// then hourly. The number of attempts is not limited by it (MaxAttempts is
+// ignored): transient failures are retried until Options.MaxAge.
 func DefaultRetryPolicy() domain.RetryPolicy {
 	return domain.RetryPolicy{MaxAttempts: 8, Initial: 30 * time.Second, Multiplier: 4, Max: time.Hour, Jitter: 0.2}
 }
@@ -89,9 +97,20 @@ type Options struct {
 	Logger *slog.Logger
 	// Timeout bounds one delivery (default DefaultTimeout).
 	Timeout time.Duration
-	// Retry is the schedule (default DefaultRetryPolicy); Rand its jitter.
+	// Retry is the backoff (default DefaultRetryPolicy; MaxAttempts is
+	// ignored); Rand its jitter.
 	Retry domain.RetryPolicy
 	Rand  domain.RandFunc
+	// MaxAge ends a notification that still fails transiently this long
+	// after the SMS arrived (default DefaultMaxAge).
+	MaxAge time.Duration
+	// Retention is the SMS body retention (TIKKER_RETENTION): an empty
+	// text of a message older than that was purged; a younger one is an
+	// empty SMS and is forwarded. Zero: bodies are never purged.
+	Retention time.Duration
+	// MaxPerHour caps the e-mails (attempts) per hour; notifications over
+	// the cap wait for the next window. Zero: no cap.
+	MaxPerHour int
 	// MaxIdle caps the idle sleep (missed wake-ups); PurgeAfter is how long
 	// finished notifications are kept.
 	MaxIdle    time.Duration
@@ -148,6 +167,14 @@ type Sender struct {
 	lease time.Duration
 	from  *mail.Address
 	to    []*mail.Address
+
+	// Counters for /metrics.
+	sent, failed, retried, deferred atomic.Int64
+	// Hourly cap state; touched by the single worker only.
+	winStart     time.Time
+	winCount     int
+	winWarned    bool
+	limitedUntil time.Time
 
 	wake     chan struct{}
 	mu       sync.Mutex
@@ -209,6 +236,10 @@ func NewSender(opts Options) (*Sender, error) {
 	setDuration(&opts.Timeout, DefaultTimeout)
 	setDuration(&opts.MaxIdle, DefaultMaxIdle)
 	setDuration(&opts.PurgeAfter, DefaultPurgeAfter)
+	setDuration(&opts.MaxAge, DefaultMaxAge)
+	if opts.MaxPerHour < 0 {
+		return nil, errors.New("mailnotify: MaxPerHour must not be negative")
+	}
 	if opts.Dial == nil {
 		d := &net.Dialer{Timeout: opts.Timeout}
 		opts.Dial = d.DialContext
@@ -315,8 +346,12 @@ func (s *Sender) run(ctx context.Context) {
 	}
 }
 
-// idleWait is the time until the next notification is due, at most MaxIdle.
+// idleWait is the time until the next notification is due, at most MaxIdle,
+// or until the hourly cap opens again.
 func (s *Sender) idleWait(ctx context.Context) time.Duration {
+	if d := s.limitedUntil.Sub(s.clk.Now()); d > 0 {
+		return d
+	}
 	at, ok, err := s.st.MailOutbox().NextDue(ctx)
 	switch {
 	case err != nil:
@@ -334,6 +369,9 @@ func (s *Sender) idleWait(ctx context.Context) time.Duration {
 // one.
 func (s *Sender) step(ctx context.Context) bool {
 	now := s.clk.Now()
+	if !s.allow(ctx, now) {
+		return false
+	}
 	n, ok, err := s.st.MailOutbox().Acquire(ctx, now, now.Add(s.lease))
 	if err != nil {
 		if ctx.Err() == nil {
@@ -344,16 +382,61 @@ func (s *Sender) step(ctx context.Context) bool {
 	if !ok {
 		return false
 	}
+	s.winCount++
 	s.attempt(ctx, n)
 	return true
+}
+
+// allow applies the hourly cap (fixed windows). Over the cap nothing is
+// acquired: the notifications stay pending and go out in a later window. It
+// warns once per window, when something is actually waiting.
+func (s *Sender) allow(ctx context.Context, now time.Time) bool {
+	if s.opts.MaxPerHour <= 0 {
+		return true
+	}
+	if s.winStart.IsZero() || now.Sub(s.winStart) >= rateWindow {
+		s.winStart, s.winCount, s.winWarned = now, 0, false
+	}
+	if s.winCount < s.opts.MaxPerHour {
+		return true
+	}
+	s.limitedUntil = s.winStart.Add(rateWindow)
+	if !s.winWarned {
+		if at, ok, err := s.st.MailOutbox().NextDue(ctx); err == nil && ok && !at.After(now) {
+			s.winWarned = true
+			s.deferred.Add(1)
+			s.log.Warn("e-mail notification cap reached; notifications deferred to the next window",
+				slog.Int("max_per_hour", s.opts.MaxPerHour), slog.Time("resume_at", s.limitedUntil))
+		}
+	}
+	return false
+}
+
+// Stats are the counters of the sender (for /metrics).
+type Stats struct {
+	Pending  int   // notifications waiting (or retrying)
+	Sent     int64 // e-mails accepted by the relay
+	Failed   int64 // notifications given up
+	Retried  int64 // attempts rescheduled
+	Deferred int64 // hourly windows in which the cap held notifications back
+}
+
+// Stats returns the counters and the number of pending notifications.
+func (s *Sender) Stats(ctx context.Context) (Stats, error) {
+	n, err := s.st.MailOutbox().CountPending(ctx)
+	if err != nil {
+		return Stats{}, fmt.Errorf("mailnotify: count pending: %w", err)
+	}
+	return Stats{Pending: n, Sent: s.sent.Load(), Failed: s.failed.Load(), Retried: s.retried.Load(), Deferred: s.deferred.Load()}, nil
 }
 
 // attempt sends one notification and records the outcome.
 func (s *Sender) attempt(ctx context.Context, n domain.MailNotification) {
 	log := s.log.With(slog.String("notification_id", n.ID.String()), slog.String("message_id", n.MessageID.String()),
 		slog.Int("attempt", n.Attempts))
-	if n.Attempts > s.opts.Retry.MaxAttempts {
-		s.finish(log, n, fmt.Errorf("%w: attempt limit reached without a recorded result", errPermanent))
+	if s.clk.Now().Sub(n.CreatedAt) >= s.opts.MaxAge {
+		// Also ends a notification whose attempts keep crashing.
+		s.finish(log, n, fmt.Errorf("%w: not delivered within %s", errPermanent, s.opts.MaxAge))
 		return
 	}
 	m, err := s.st.Messages().Get(ctx, n.MessageID)
@@ -364,7 +447,7 @@ func (s *Sender) attempt(ctx context.Context, n domain.MailNotification) {
 	case err != nil:
 		s.finish(log, n, fmt.Errorf("read message: %w", err))
 		return
-	case m.Body == "":
+	case m.Body == "" && s.purged(m):
 		s.finish(log, n, fmt.Errorf("%w: the message text is gone (retention)", errPermanent))
 		return
 	}
@@ -383,24 +466,38 @@ func (s *Sender) attempt(ctx context.Context, n domain.MailNotification) {
 	}
 	if err == nil {
 		s.record(log, func(c context.Context) error { return s.st.MailOutbox().MarkSent(c, n.Lease(), s.clk.Now()) })
+		s.sent.Add(1)
 		log.Info("sms forwarded by e-mail", logging.PhoneAttr("from", m.Peer))
 		return
 	}
 	s.finish(log, n, err)
 }
 
-// finish records a failed attempt: permanent errors and exhausted retries
-// end the notification, the rest are rescheduled with backoff.
+// purged reports whether the empty text of m was removed by retention:
+// PurgeBodies empties messages created before now-Retention, so an empty
+// text of a younger message is a genuinely empty SMS.
+func (s *Sender) purged(m domain.Message) bool {
+	return s.opts.Retention > 0 && m.CreatedAt.Before(s.clk.Now().Add(-s.opts.Retention))
+}
+
+// finish records a failed attempt: permanent errors and notifications
+// older than MaxAge end, the rest are rescheduled with backoff (capped by
+// the policy's Max, one hour by default).
 func (s *Sender) finish(log *slog.Logger, n domain.MailNotification, err error) {
 	now := s.clk.Now()
 	msg := truncate(err.Error(), maxLastErrorLen)
-	if !permanent(err) && n.Attempts < s.opts.Retry.MaxAttempts {
+	if !permanent(err) && now.Sub(n.CreatedAt) < s.opts.MaxAge {
 		next := now.Add(s.opts.Retry.Delay(n.Attempts, s.opts.Rand))
 		s.record(log, func(c context.Context) error { return s.st.MailOutbox().Reschedule(c, n.Lease(), now, next, msg) })
+		s.retried.Add(1)
 		log.Warn("e-mail notification failed, will retry", slog.String("error", msg), slog.Time("next_attempt_at", next))
 		return
 	}
+	if !permanent(err) {
+		msg = truncate("gave up after "+s.opts.MaxAge.String()+": "+msg, maxLastErrorLen)
+	}
 	s.record(log, func(c context.Context) error { return s.st.MailOutbox().MarkFailed(c, n.Lease(), now, msg) })
+	s.failed.Add(1)
 	log.Error("e-mail notification failed", slog.String("error", msg))
 }
 
@@ -535,6 +632,9 @@ func (s *Sender) compose(n domain.MailNotification, m domain.Message, channel st
 		body.WriteString("Channel: " + oneLine(channel) + "\n")
 	}
 	body.WriteString("Message: " + m.ID.String() + "\n\n")
+	if m.Body == "" {
+		body.WriteString("(empty message)")
+	}
 	body.WriteString(m.Body)
 	body.WriteString("\n")
 	qp := quotedprintable.NewWriter(&b)

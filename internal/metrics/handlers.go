@@ -21,6 +21,17 @@ type Snapshot struct {
 	Queue   queue.Stats
 	Health  []health.ChannelStatus
 	Started int64 // unix seconds
+	// MailNotify is nil when e-mail notifications are disabled.
+	MailNotify *MailNotifyStats
+}
+
+// MailNotifyStats are the e-mail notifications of inbound SMS (ADR 0004).
+type MailNotifyStats struct {
+	Pending  int
+	Sent     int64
+	Failed   int64
+	Retried  int64
+	Deferred int64
 }
 
 // Source supplies the snapshot for a scrape.
@@ -134,6 +145,14 @@ func (s *Server) render(snap Snapshot) string {
 		counter("channel_auth_errors_total", "Authentication errors per channel.", lbl, ch.AuthErrors)
 		gauge("channel_active", "Whether the channel worker is active (1) or not (0).", lbl, boolGauge(ch.Active))
 		gauge("channel_sending", "Whether the channel is currently sending (1) or not (0).", lbl, boolGauge(ch.Sending))
+	}
+
+	if m := snap.MailNotify; m != nil {
+		gauge("mail_notify_pending", "E-mail notifications of inbound SMS waiting to be sent.", "", float64(m.Pending))
+		counter("mail_notify_sent_total", "E-mail notifications accepted by the relay.", "", m.Sent)
+		counter("mail_notify_failed_total", "E-mail notifications given up.", "", m.Failed)
+		counter("mail_notify_retried_total", "E-mail notification attempts rescheduled.", "", m.Retried)
+		counter("mail_notify_deferred_total", "Hours in which the hourly cap deferred e-mail notifications.", "", m.Deferred)
 	}
 
 	for _, h := range snap.Health {

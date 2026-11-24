@@ -324,15 +324,17 @@ func TestLoadMailGatewayFromEnv(t *testing.T) {
 func TestLoadMailNotifyFromEnv(t *testing.T) {
 	dir := t.TempDir()
 	cfg, err := Load(Options{Lookup: envMap(testEnv(dir, map[string]string{
-		envMailNotifyEnabled:  "1",
-		envMailNotifyHost:     " smtp.example.net ",
-		envMailNotifyPort:     "465",
-		envMailNotifyTLSMode:  "TLS",
-		envMailNotifyUsername: "tikker",
-		envMailNotifyPassword: "relay-secret-1",
-		envMailNotifyFrom:     "sms@example.net",
-		envMailNotifyTo:       "a@example.net, b@example.net",
-		envMailNotifyTimeout:  "10s",
+		envMailNotifyEnabled:    "1",
+		envMailNotifyHost:       " smtp.example.net ",
+		envMailNotifyPort:       "465",
+		envMailNotifyTLSMode:    "TLS",
+		envMailNotifyUsername:   "tikker",
+		envMailNotifyPassword:   "relay-secret-1",
+		envMailNotifyFrom:       "sms@example.net",
+		envMailNotifyTo:         "a@example.net, b@example.net",
+		envMailNotifyTimeout:    "10s",
+		envMailNotifyMaxAge:     "24h",
+		envMailNotifyMaxPerHour: "0",
 	}))})
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -340,7 +342,8 @@ func TestLoadMailNotifyFromEnv(t *testing.T) {
 	m := cfg.MailNotify
 	if !m.Enabled || m.SMTPHost != "smtp.example.net" || m.SMTPPort != 465 || m.TLSMode != MailTLSImplicit ||
 		m.Username != "tikker" || m.Password != "relay-secret-1" || m.From != "sms@example.net" ||
-		len(m.To) != 2 || m.To[1] != "b@example.net" || m.Timeout != 10*time.Second {
+		len(m.To) != 2 || m.To[1] != "b@example.net" || m.Timeout != 10*time.Second ||
+		m.MaxAge != 24*time.Hour || m.MaxPerHour != 0 {
 		t.Errorf("mail notify = %+v", m)
 	}
 	if out := cfg.String(); strings.Contains(out, "relay-secret-1") || !strings.Contains(out, "mail_notify.password: \"[REDACTED]\"") {

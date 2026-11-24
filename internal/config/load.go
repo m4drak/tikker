@@ -84,6 +84,8 @@ const (
 	envMailNotifyFrom         = "TIKKER_MAIL_NOTIFY_FROM"
 	envMailNotifyTo           = "TIKKER_MAIL_NOTIFY_TO"
 	envMailNotifyTimeout      = "TIKKER_MAIL_NOTIFY_TIMEOUT"
+	envMailNotifyMaxAge       = "TIKKER_MAIL_NOTIFY_MAX_AGE"
+	envMailNotifyMaxPerHour   = "TIKKER_MAIL_NOTIFY_MAX_PER_HOUR"
 )
 
 // DefaultConfigFile is the YAML file name looked up in the data directory
@@ -311,6 +313,8 @@ func applyEnv(cfg *Config, lookup LookupFunc) error {
 	str(envMailNotifyFrom, &mn.From)
 	list(envMailNotifyTo, &mn.To)
 	duration(envMailNotifyTimeout, &mn.Timeout)
+	duration(envMailNotifyMaxAge, &mn.MaxAge)
+	integer(envMailNotifyMaxPerHour, &mn.MaxPerHour)
 
 	return errors.Join(errs...)
 }

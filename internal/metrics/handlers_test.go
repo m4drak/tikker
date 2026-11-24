@@ -200,3 +200,41 @@ func validateExposition(body string) error {
 	}
 	return nil
 }
+
+func TestRenderMailNotify(t *testing.T) {
+	tests := []struct {
+		name string
+		mail *MailNotifyStats
+		want []string
+		not  []string
+	}{
+		{name: "disabled", not: []string{"mail_notify"}},
+		{name: "enabled", mail: &MailNotifyStats{Pending: 4, Sent: 7, Failed: 1, Retried: 3, Deferred: 2}, want: []string{
+			"tikker_mail_notify_pending 4", "tikker_mail_notify_sent_total 7", "tikker_mail_notify_failed_total 1",
+			"tikker_mail_notify_retried_total 3", "tikker_mail_notify_deferred_total 2",
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &stubSource{snap: Snapshot{Started: 1, MailNotify: tt.mail}}
+			srv, err := New(Options{Source: src, Namespace: "tikker"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := srv.render(src.snap)
+			if err := validateExposition(body); err != nil {
+				t.Fatalf("invalid exposition: %v\n%s", err, body)
+			}
+			for _, w := range tt.want {
+				if !strings.Contains(body, w) {
+					t.Errorf("body missing %q", w)
+				}
+			}
+			for _, w := range tt.not {
+				if strings.Contains(body, w) {
+					t.Errorf("body has %q", w)
+				}
+			}
+		})
+	}
+}

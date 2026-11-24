@@ -235,8 +235,9 @@ func (e *env) sender(r Relay, mod ...func(*Options)) *Sender {
 	e.t.Helper()
 	o := Options{
 		Store: e.st, Relay: r, Clock: e.clk, Logger: slog.New(slog.DiscardHandler), Timeout: 5 * time.Second,
-		Retry: domain.RetryPolicy{MaxAttempts: 3, Initial: time.Minute, Multiplier: 2, Max: time.Hour},
-		Rand:  func() float64 { return 0.5 },
+		Retry:  domain.RetryPolicy{MaxAttempts: 3, Initial: time.Minute, Multiplier: 2, Max: time.Hour},
+		Rand:   func() float64 { return 0.5 },
+		MaxAge: 72 * time.Hour, Retention: 24 * time.Hour,
 	}
 	for _, f := range mod {
 		f(&o)
@@ -335,7 +336,9 @@ func TestPermanentFailures(t *testing.T) {
 		{name: "no STARTTLS offered", setup: func(_ *env, _ *sink, r *Relay) { r.TLSMode = TLSStartTLS }, want: "does not offer STARTTLS"},
 		{name: "no AUTH offered", setup: func(_ *env, _ *sink, r *Relay) { r.Username, r.Password = "u", "p" }, want: "does not offer AUTH"},
 		{name: "message text gone", setup: func(e *env, _ *sink, _ *Relay) {
-			if _, err := e.st.Messages().PurgeBodies(e.ctx, t0.Add(time.Second)); err != nil {
+			// Retention (24 h in e.sender) has passed and purged the text.
+			e.clk.Advance(25 * time.Hour)
+			if _, err := e.st.Messages().PurgeBodies(e.ctx, e.clk.Now().Add(-24*time.Hour)); err != nil {
 				e.t.Fatal(err)
 			}
 		}, want: "retention"},
@@ -367,19 +370,112 @@ func TestPermanentFailures(t *testing.T) {
 	}
 }
 
-func TestRetriesExhausted(t *testing.T) {
+// TestTransientFailuresUntilMaxAge: 4xx answers are retried well past the
+// policy's MaxAttempts, at most hourly, until MaxAge.
+func TestTransientFailuresUntilMaxAge(t *testing.T) {
 	e := newEnv(t)
 	sk := newSink(t, nil)
-	sk.dataReplies = []string{"421 a", "421 b", "421 c"}
-	s := e.sender(relay(sk.port()))
+	for range 20 {
+		sk.dataReplies = append(sk.dataReplies, "421 busy")
+	}
+	s := e.sender(relay(sk.port()), func(o *Options) { o.MaxAge = 6 * time.Hour })
 	e.inbound("+48511222333", "x")
-	for range 3 {
-		s.step(e.ctx)
+	attempts := 0
+	for range 12 {
+		if s.step(e.ctx) {
+			attempts++
+		}
+		if n := e.notification(); n.Status != domain.DeliveryPending {
+			break
+		}
+		if next := e.notification().NextAttemptAt; next.Sub(e.clk.Now()) > time.Hour+time.Minute {
+			t.Fatalf("retry delay %s above the 1 h cap", next.Sub(e.clk.Now()))
+		}
 		e.clk.Advance(time.Hour)
 	}
-	if n := e.notification(); n.Status != domain.DeliveryFailed || n.Attempts != 3 || !strings.Contains(n.LastError, "421 c") {
-		t.Errorf("notification = %+v", n)
+	n := e.notification()
+	if n.Status != domain.DeliveryFailed || !strings.Contains(n.LastError, "6h0m0s") || attempts <= 3 {
+		t.Errorf("notification = %+v after %d attempts", n, attempts)
 	}
+	st, err := s.Stats(e.ctx)
+	if err != nil || st.Failed != 1 || st.Retried < 3 || st.Pending != 0 {
+		t.Errorf("stats = %+v, %v", st, err)
+	}
+}
+
+// TestEmptySMSForwarded: an SMS with no text (not purged) is forwarded with
+// a note.
+func TestEmptySMSForwarded(t *testing.T) {
+	e := newEnv(t)
+	sk := newSink(t, nil)
+	s := e.sender(relay(sk.port()))
+	e.inbound("+48511222333", "")
+	s.step(e.ctx)
+	if n := e.notification(); n.Status != domain.DeliveryDelivered {
+		t.Fatalf("notification = %+v", n)
+	}
+	if got := sk.got(); len(got) != 1 || !strings.Contains(got[0], "(empty message)") {
+		t.Errorf("mails = %q", got)
+	}
+}
+
+// TestHourlyCap: over MaxPerHour nothing is dropped; the rest goes out in
+// the next window, and the cap is logged once per window.
+func TestHourlyCap(t *testing.T) {
+	e := newEnv(t)
+	sk := newSink(t, nil)
+	logs := &bytes.Buffer{}
+	var mu sync.Mutex
+	s := e.sender(relay(sk.port()), func(o *Options) {
+		o.MaxPerHour = 2
+		o.Logger = slog.New(slog.NewTextHandler(lockedWriter{&mu, logs}, nil))
+	})
+	for range 5 {
+		e.inbound("+48511222333", "x")
+	}
+	for range 4 {
+		s.step(e.ctx)
+	}
+	if n := len(sk.got()); n != 2 {
+		t.Fatalf("%d e-mails in the first hour, want 2", n)
+	}
+	if d := s.idleWait(e.ctx); d != time.Hour {
+		t.Errorf("idleWait = %s, want the rest of the window", d)
+	}
+	e.clk.Advance(time.Hour)
+	for range 4 {
+		s.step(e.ctx)
+	}
+	e.clk.Advance(time.Hour)
+	for range 4 {
+		s.step(e.ctx)
+	}
+	if n := len(sk.got()); n != 5 {
+		t.Fatalf("%d e-mails after three windows, want 5", n)
+	}
+	mu.Lock()
+	warns := strings.Count(logs.String(), "notification cap reached")
+	mu.Unlock()
+	if warns != 2 {
+		t.Errorf("%d cap warnings, want one per limited window (2)", warns)
+	}
+	if st, _ := s.Stats(e.ctx); st.Sent != 5 || st.Deferred != 2 {
+		t.Errorf("stats = %+v", st)
+	}
+	if _, err := NewSender(Options{Store: e.st, Relay: relay(25), MaxPerHour: -1}); err == nil {
+		t.Error("negative cap accepted")
+	}
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (l lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
 
 func TestTLSModes(t *testing.T) {
@@ -420,7 +516,8 @@ func TestTLSModes(t *testing.T) {
 func TestRunWakesAndShutsDown(t *testing.T) {
 	e := newEnv(t)
 	sk := newSink(t, nil)
-	s := e.sender(relay(sk.port()), func(o *Options) { o.Clock = clock.System() })
+	// The worker runs on the real clock; the store's rows are dated t0.
+	s := e.sender(relay(sk.port()), func(o *Options) { o.Clock = clock.System(); o.MaxAge = 100 * 365 * 24 * time.Hour })
 	e.pub = NewPublisher(e.clk, e.ids, s)
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatal(err)

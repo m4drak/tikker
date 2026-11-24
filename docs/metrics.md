@@ -44,6 +44,11 @@ Wszystkie metryki mają prefix `tikker_`.
 | `tikker_channel_checked` | gauge | 1 po pierwszym checku |
 | `tikker_channel_auth_pending` | gauge | 1 gdy Auth oczekuje na powodzenie |
 | `tikker_channel_signal_rssi_dbm` | gauge | ostatnie RSSI modemu (dBm), brak gdy nieznane |
+| `tikker_mail_notify_pending` | gauge | powiadomienia e-mail o SMS-ach czekające na wysyłkę (tylko gdy `mail_notify` włączone) |
+| `tikker_mail_notify_sent_total` | counter | e-maile przyjęte przez przekaźnik |
+| `tikker_mail_notify_failed_total` | counter | powiadomienia porzucone (`5xx`, brak treści, `max_age`) |
+| `tikker_mail_notify_retried_total` | counter | próby przełożone po błędzie chwilowym |
+| `tikker_mail_notify_deferred_total` | counter | godziny, w których limit `max_per_hour` wstrzymał powiadomienia |
 
 ## Przykład scrape
 
