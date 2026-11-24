@@ -282,6 +282,54 @@ generate a new one.
 (`TIKKER_API_RATE_LIMIT`, `0` turns the limit off). The headers `RateLimit-Limit`, `RateLimit-Remaining` and
 `RateLimit-Reset` show the state; once the limit is exhausted you get `429` with `Retry-After`.
 
+### CLI: `tikker sms`
+
+The same `tikker` binary is also a client for a running gateway: it sends and inspects SMS messages through the REST
+API, no curl needed. Set the address and the token with environment variables or options (options go after the command
+name, for example `tikker sms send --url …`). There is deliberately **no** option that takes the token value (it would
+land in shell history and `ps`): use `TIKKER_TOKEN` or `--token-file PATH`.
+Required scope: `sms:send` to send and cancel, `sms:read` for the rest.
+
+```sh
+export TIKKER_URL=https://sms.example.com        # default http://127.0.0.1:8080
+export TIKKER_TOKEN='tkr_xxxxxxxx_yyyyyyyy'      # or --token-file /etc/tikker/token
+
+tikker sms send --to +48600100200 --body "Code: 482913" --wait 30s   # waits for sent/failed/cancelled
+echo "Alarm: server room 31 C" | tikker sms send --to 600100200 --tag alarm   # body from stdin
+tikker sms send --to 600100200 --body-file msg.txt --idempotency-key "job-42"
+tikker sms get 01M89304ZQ61F6CVNX486V10VC
+tikker sms list --status queued --status sending --limit 20
+tikker sms list --limit 50 --cursor <next_cursor>    # next page (cursor from the hint under the table)
+tikker sms list --all --output json                  # all pages as one object {"items":[…],"next_cursor":null}
+tikker sms cancel 01M89304ZQ61F6CVNX486V10VC         # only a message in the queued state
+tikker sms inbox --limit 10                          # incoming (GET /messages?direction=in)
+```
+
+| Option | Meaning |
+|---|---|
+| `--url`, `TIKKER_URL` | gateway address (without `/api/v1`; the suffix is tolerated). `http://` is refused (exit `2`) unless the host is loopback (`localhost`, `127.0.0.0/8`, `::1`) |
+| `--insecure-http` | allows `http://` to another host; the token then travels in clear text and the command warns on stderr. Use only on a trusted network |
+| `--token-file`, `TIKKER_TOKEN` | API token; the file takes precedence over the variable |
+| `--output text\|json` | `text` (default) or the API response as indented JSON |
+| `--timeout` | timeout of a single HTTP request (default 10 s) |
+
+`sms send` takes `--to` (required), the text from `--body`, `--body-file PATH` (`-` is stdin) or from stdin (when it is
+not a terminal), and `--channel`, `--tag` (repeatable), `--client-ref`, `--expires-at` (RFC 3339), `--idempotency-key`
+and `--wait DURATION`. Without `--idempotency-key` the CLI generates a random key (32 hex characters) and sends it as
+`Idempotency-Key`; when the outcome is unknown (timeout, network error, 5xx) it prints
+`retry safely with --idempotency-key <key>` on stderr, and repeating the command with that key cannot create a duplicate.
+Without `--wait` the command ends once the message is queued and prints `id<TAB>status<TAB>number`
+lines. With `--wait` it polls until `sent`, `failed` or `cancelled`, retrying transient errors (429, 5xx, network) with a backoff
+(1 s, doubling to 10 s, honouring `Retry-After`) until the `--wait` deadline; Ctrl-C ends with `interrupted`; for a long message split by the `split` strategy it
+waits for every part.
+
+`list` and `inbox` accept `--cursor`; `--all` stops with an error if the server repeats a cursor or after 1000 pages.
+HTTP redirects are not followed (a 3xx is an error that names the `Location`).
+
+Exit codes: `0` success; `1` API error (stderr shows the `type`, `title`, `detail` and `errors[]` of the RFC 9457
+problem), network error, a message that ended `failed`/`cancelled`, or the `--wait` time running out; `2` usage error
+(bad option, missing token or `--to`). A script can repeat `send` with the same `--idempotency-key` after a network error.
+
 ### curl
 
 ```sh
